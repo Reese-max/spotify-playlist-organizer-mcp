@@ -79,19 +79,29 @@ export function trackSummary(item, position) {
   if (!track || typeof track !== "object") return { position, unavailable: true };
 
   const artists = Array.isArray(track.artists)
-    ? track.artists.map((artist) => artist?.name).filter(Boolean)
+    ? track.artists.map((artist) => typeof artist === "string" ? artist : artist?.name).filter(Boolean)
     : [];
+  const videoId = typeof track.id === "object"
+    ? track.id?.videoId
+    : track.contentDetails?.videoId ?? track.snippet?.resourceId?.videoId;
+  const id = typeof track.id === "string" ? track.id : videoId ?? track.videoId ?? null;
+  const isYouTube = Boolean(videoId || track.platform === "youtube" || track.snippet?.channelTitle);
   const album = track.album?.name ?? track.album?.title ?? null;
-  const externalUrl = track.external_urls?.spotify ?? (track.id ? `https://open.spotify.com/track/${track.id}` : null);
+  const externalUrl = track.external_urls?.spotify
+    ?? track.external_url
+    ?? track.url
+    ?? (isYouTube && id ? `https://www.youtube.com/watch?v=${id}` : id ? `https://open.spotify.com/track/${id}` : null);
   return {
     position,
-    id: track.id ?? null,
-    name: track.name ?? track.title ?? "Unknown track",
+    id,
+    name: track.name ?? track.title ?? track.snippet?.title ?? "Unknown track",
     artists,
-    album,
-    uri: track.uri ?? (track.id ? `spotify:track:${track.id}` : null),
+    album: album ?? null,
+    uri: track.uri ?? (isYouTube && id ? `youtube:video:${id}` : id ? `spotify:track:${id}` : null),
     url: externalUrl,
     isLocal: Boolean(track.is_local),
+    platform: track.platform ?? (isYouTube ? "youtube" : "spotify"),
+    channel: track.channel ?? track.channelTitle ?? track.snippet?.channelTitle ?? null,
   };
 }
 
@@ -108,8 +118,12 @@ function trackSearchText(item) {
   return normalizeText([
     track?.name,
     track?.title,
+    track?.snippet?.title,
     track?.album?.name,
-    ...(track?.artists ?? []).map((artist) => artist?.name),
+    track?.channel,
+    track?.channelTitle,
+    track?.snippet?.channelTitle,
+    ...(track?.artists ?? []).map((artist) => typeof artist === "string" ? artist : artist?.name),
   ].filter(Boolean).join(" "));
 }
 

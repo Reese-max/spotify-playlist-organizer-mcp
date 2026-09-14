@@ -17,7 +17,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
 
   const responsePromise = new Promise((resolveResponse, reject) => {
     let buffer = "";
-    const timer = setTimeout(() => reject(new Error(`Timed out waiting for MCP response. ${stderr}`)), 10_000);
+    const timer = setTimeout(() => reject(new Error("Timed out waiting for MCP response. " + stderr)), 10_000);
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString();
       const line = buffer.split("\n")[0];
@@ -26,31 +26,31 @@ test("starts an MCP stdio server and answers initialize", async () => {
       try {
         resolveResponse(JSON.parse(line));
       } catch (error) {
-        reject(new Error(`Invalid MCP response: ${line}`, { cause: error }));
+        reject(new Error("Invalid MCP response: " + line, { cause: error }));
       }
     });
     child.once("error", reject);
     child.once("exit", (code) => {
-      if (code !== null && code !== 0) reject(new Error(`MCP server exited with ${code}. ${stderr}`));
+      if (code !== null && code !== 0) reject(new Error("MCP server exited with " + code + ". " + stderr));
     });
   });
 
-  child.stdin.write(`${JSON.stringify({
+  child.stdin.write(JSON.stringify({
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
     params: {
       protocolVersion: "2026-07-28",
       capabilities: {},
-      clientInfo: { name: "smoke-test", version: "0.1.0" },
+      clientInfo: { name: "smoke-test", version: "0.2.0" },
     },
-  })}\n`);
+  }) + "\n");
 
   try {
     const response = await responsePromise;
     assert.equal(response.jsonrpc, "2.0");
     assert.equal(response.id, 1);
-    assert.equal(response.result.serverInfo.name, "spotify-playlist-organizer");
+    assert.equal(response.result.serverInfo.name, "music-playlist-organizer");
   } finally {
     child.kill();
     await once(child, "exit").catch(() => {});

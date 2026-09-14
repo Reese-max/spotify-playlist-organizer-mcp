@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyItems, findDuplicates, parseLink, parsePlaylistId } from "../src/core.js";
 
-test("parses Spotify, YouTube, and plain search inputs", () => {
+test("parses Spotify, YouTube, YouTube Music, and plain search inputs", () => {
   assert.deepEqual(parseLink("https://open.spotify.com/intl-zh/track/abc123?si=ignored"), {
     kind: "spotify-track",
     id: "abc123",
@@ -14,6 +14,11 @@ test("parses Spotify, YouTube, and plain search inputs", () => {
     id: "video123",
     url: "https://youtu.be/video123?t=20",
   });
+  assert.deepEqual(parseLink("https://music.youtube.com/watch?v=video123&list=PL123"), {
+    kind: "youtube-video",
+    id: "video123",
+    url: "https://music.youtube.com/watch?v=video123&list=PL123",
+  });
   assert.deepEqual(parseLink("Daft Punk One More Time"), {
     kind: "query",
     query: "Daft Punk One More Time",
@@ -21,16 +26,17 @@ test("parses Spotify, YouTube, and plain search inputs", () => {
   assert.equal(parsePlaylistId("spotify:playlist:playlist123"), "playlist123");
 });
 
-test("finds duplicate Spotify tracks and keeps playlist positions", () => {
+test("finds duplicate Spotify and YouTube items and keeps playlist positions", () => {
   const items = [
     { track: { id: "one", name: "One", artists: [{ name: "Artist" }] } },
-    { track: { id: "two", name: "Two", artists: [{ name: "Artist" }] } },
+    { id: "video123", name: "Video", artists: ["Channel"], platform: "youtube" },
     { item: { id: "one", name: "One", artists: [{ name: "Artist" }] } },
+    { id: "video123", name: "Video", artists: ["Channel"], platform: "youtube" },
   ];
   const result = findDuplicates(items);
-  assert.equal(result.duplicateGroups, 1);
-  assert.equal(result.duplicateItemCount, 1);
-  assert.deepEqual(result.duplicates[0].map((track) => track.position), [1, 3]);
+  assert.equal(result.duplicateGroups, 2);
+  assert.equal(result.duplicateItemCount, 2);
+  assert.deepEqual(result.duplicates.map((group) => group.map((track) => track.position)), [[1, 3], [2, 4]]);
 });
 
 test("classifies tracks deterministically with custom rules", () => {

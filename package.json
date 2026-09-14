@@ -1,16 +1,17 @@
 {
   "name": "spotify-playlist-organizer-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "MCP server for searching, identifying, classifying, and organizing Spotify tracks and playlists.",
+  "description": "Provider-neutral MCP server for saving, classifying, and organizing YouTube and Spotify music links.",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "smoke": "node --test test/mcp-smoke.test.js"
+    "smoke": "node --test test/mcp-smoke.test.js",
+    "youtube:auth": "node scripts/youtube-auth.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",

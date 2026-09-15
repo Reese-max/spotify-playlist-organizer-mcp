@@ -2,8 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  canonicalizeSource,
+  normalizeText,
+  SOURCE_TYPES,
+  tokenContainment,
+  tokenSimilarity,
+} from "./canonical.js";
 
 const SECRET_KEY_PATTERN = /passphrase|secret|token|api[_-]?key|private[_-]?key|credential/i;
+
+const POSSIBLE_MATCH_THRESHOLD = 0.4;
 
 const TRACK_COLUMNS = Object.freeze({
   canonicalTitle: "canonical_title",
@@ -78,7 +87,40 @@ const MIGRATIONS = [
       )`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      "ALTER TABLE tracks ADD COLUMN canonical_key TEXT",
+      "ALTER TABLE tracks ADD COLUMN normalized_title TEXT",
+      "ALTER TABLE tracks ADD COLUMN normalized_artist TEXT",
+      "ALTER TABLE tracks ADD COLUMN identity_locked INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE tracks ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE track_sources ADD COLUMN source_type TEXT",
+      "ALTER TABLE track_sources ADD COLUMN confidence REAL",
+      "ALTER TABLE track_sources ADD COLUMN provenance TEXT",
+      "CREATE INDEX IF NOT EXISTS idx_tracks_canonical_key ON tracks(canonical_key)",
+      "CREATE INDEX IF NOT EXISTS idx_tracks_normalized_title ON tracks(normalized_title)",
+      "CREATE INDEX IF NOT EXISTS idx_tracks_normalized_artist ON tracks(normalized_artist)",
+      `CREATE TABLE IF NOT EXISTS identity_candidates (
+        track_id INTEGER NOT NULL REFERENCES tracks(id),
+        candidate_track_id INTEGER NOT NULL REFERENCES tracks(id),
+        confidence REAL NOT NULL,
+        reason TEXT,
+        decided_at TEXT NOT NULL,
+        PRIMARY KEY (track_id, candidate_track_id)
+      )`,
+    ],
+  },
 ];
+
+export const DEDUPE_LEVELS = Object.freeze([
+  "EXACT_SOURCE_DUPLICATE",
+  "SAME_CANONICAL_TRACK",
+  "POSSIBLE_MATCH",
+  "DISTINCT_TRACK",
+]);
+
+const SOURCE_TYPE_SET = new Set(SOURCE_TYPES);
 
 export class LibraryError extends Error {
   constructor(code, message, options = {}) {
@@ -118,11 +160,22 @@ function trackRow(row) {
     era: row.era,
     savedAt: row.saved_at,
     updatedAt: row.updated_at,
+    canonicalKey: row.canonical_key ?? null,
+    normalizedTitle: row.normalized_title ?? null,
+    normalizedArtist: row.normalized_artist ?? null,
+    identityLocked: Boolean(row.identity_locked),
+    needsReview: Boolean(row.needs_review),
   };
 }
 
 function sourceRow(row) {
   if (!row) return null;
+  let provenance = row.provenance ?? null;
+  if (typeof provenance === "string") {
+    try {
+      provenance = JSON.parse(provenance);
+    } catch {}
+  }
   return {
     id: row.id,
     trackId: row.track_id,
@@ -130,6 +183,9 @@ function sourceRow(row) {
     sourceId: row.source_id,
     url: row.url,
     versionType: row.version_type,
+    sourceType: row.source_type ?? "unknown",
+    confidence: row.confidence ?? null,
+    provenance,
   };
 }
 
@@ -189,6 +245,8 @@ function normalizeTrackInput(input) {
     sourceId,
     url: optionalText(input.source.url, "source.url"),
     versionType: optionalText(input.source.versionType, "source.versionType"),
+    sourceType: optionalText(input.source.sourceType, "source.sourceType"),
+    channelTitle: optionalText(input.source.channelTitle, "source.channelTitle"),
   };
 
   let tags = [];
@@ -300,7 +358,66 @@ export class MusicLibrary {
         );
       }
     }
+    this.backfillIdentities();
     return this;
+  }
+
+  backfillIdentities() {
+    const tracks = this.db
+      .prepare("SELECT id, canonical_title, artist FROM tracks WHERE canonical_key IS NULL")
+      .all();
+    const update = this.db.prepare(
+      `UPDATE tracks SET canonical_key = ?, normalized_title = ?, normalized_artist = ?
+       WHERE id = ?`,
+    );
+    for (const row of tracks) {
+      const identity = canonicalizeSource({ title: row.canonical_title, artist: row.artist });
+      update.run(identity.canonicalKey, identity.normalizedTitle, identity.normalizedArtist, row.id);
+    }
+
+    const sources = this.db
+      .prepare("SELECT id, version_type FROM track_sources WHERE source_type IS NULL")
+      .all();
+    const updateSource = this.db.prepare(
+      "UPDATE track_sources SET source_type = ?, confidence = ?, provenance = ? WHERE id = ?",
+    );
+    for (const row of sources) {
+      const hinted = typeof row.version_type === "string"
+        ? normalizeText(row.version_type).replace(/\s+/g, "_")
+        : "";
+      const sourceType = SOURCE_TYPE_SET.has(hinted) ? hinted : "unknown";
+      updateSource.run(
+        sourceType,
+        1,
+        JSON.stringify({ matchedBy: "backfill_v1" }),
+        row.id,
+      );
+    }
+
+    const collisions = this.db
+      .prepare(
+        `SELECT canonical_key FROM tracks
+         WHERE canonical_key IS NOT NULL
+         GROUP BY canonical_key HAVING COUNT(*) > 1`,
+      )
+      .all();
+    const now = new Date().toISOString();
+    for (const { canonical_key: key } of collisions) {
+      const rows = this.db
+        .prepare("SELECT id FROM tracks WHERE canonical_key = ? ORDER BY id")
+        .all(key);
+      const keeper = rows[0].id;
+      for (const { id } of rows.slice(1)) {
+        this.db.prepare("UPDATE tracks SET needs_review = 1 WHERE id = ?").run(id);
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO identity_candidates
+              (track_id, candidate_track_id, confidence, reason, decided_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(id, keeper, 1, "canonical_key_collision", now);
+      }
+    }
   }
 
   assertOpen() {
@@ -329,6 +446,7 @@ export class MusicLibrary {
     this.db.exec("BEGIN IMMEDIATE");
     let trackId;
     let created;
+    let identity;
     try {
       const existingSource = this.db
         .prepare("SELECT id, track_id FROM track_sources WHERE provider = ? AND source_id = ?")
@@ -357,47 +475,120 @@ export class MusicLibrary {
           sourceUpdates.push("version_type = ?");
           sourceParams.push(normalized.source.versionType);
         }
+        if (normalized.source.sourceType !== undefined) {
+          sourceUpdates.push("source_type = ?");
+          sourceParams.push(normalized.source.sourceType);
+        }
         if (sourceUpdates.length) {
           sourceParams.push(existingSource.id);
           this.db
             .prepare(`UPDATE track_sources SET ${sourceUpdates.join(", ")} WHERE id = ?`)
             .run(...sourceParams);
         }
+        identity = {
+          state: "existing",
+          level: "EXACT_SOURCE_DUPLICATE",
+          canonicalKey: this.ensureTrackIdentity(trackId),
+          confidence: 1,
+          matchedTrackId: trackId,
+          candidates: [],
+        };
       } else {
         if (!normalized.fields.canonicalTitle) {
           throw new LibraryError("LIBRARY_INPUT_INVALID", "A non-empty title is required.");
         }
-        const result = this.db
-          .prepare(
-            `INSERT INTO tracks
-              (canonical_title, artist, language, genre, mood, activity, energy, era, saved_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            normalized.fields.canonicalTitle,
-            normalized.fields.artist ?? null,
-            normalized.fields.language ?? null,
-            normalized.fields.genre ?? null,
-            normalized.fields.mood ?? null,
-            normalized.fields.activity ?? null,
-            normalized.fields.energy ?? null,
-            normalized.fields.era ?? null,
-            now,
-            now,
-          );
-        trackId = Number(result.lastInsertRowid);
-        this.db
-          .prepare(
-            "INSERT INTO track_sources (track_id, provider, source_id, url, version_type) VALUES (?, ?, ?, ?, ?)",
-          )
-          .run(
-            trackId,
-            normalized.source.provider,
-            normalized.source.sourceId,
-            normalized.source.url ?? null,
-            normalized.source.versionType ?? null,
-          );
-        created = true;
+        const canonical = canonicalizeSource({
+          title: normalized.fields.canonicalTitle,
+          artist: normalized.fields.artist,
+          channelTitle: normalized.source.channelTitle,
+          versionType: normalized.source.versionType,
+          sourceType: normalized.source.sourceType,
+        });
+        const decision = this.evaluateIdentity(canonical);
+
+        if (decision.action === "attach") {
+          trackId = decision.target.id;
+          created = false;
+          this.db
+            .prepare(
+              `UPDATE tracks SET updated_at = ?,
+                 artist = COALESCE(artist, ?),
+                 language = COALESCE(?, language),
+                 genre = COALESCE(?, genre),
+                 mood = COALESCE(?, mood),
+                 activity = COALESCE(?, activity),
+                 energy = COALESCE(?, energy),
+                 era = COALESCE(?, era)
+               WHERE id = ?`,
+            )
+            .run(
+              now,
+              normalized.fields.artist ?? null,
+              normalized.fields.language ?? null,
+              normalized.fields.genre ?? null,
+              normalized.fields.mood ?? null,
+              normalized.fields.activity ?? null,
+              normalized.fields.energy ?? null,
+              normalized.fields.era ?? null,
+              trackId,
+            );
+          this.insertSource(trackId, normalized, canonical, decision, now);
+          this.recordAliases(trackId, normalized, canonical);
+          for (const collision of decision.collisions) {
+            this.recordCandidate(trackId, collision.id, 1, "canonical_key_collision", now);
+            this.db.prepare("UPDATE tracks SET needs_review = 1 WHERE id = ?").run(trackId);
+          }
+          identity = {
+            state: "same_canonical",
+            level: "SAME_CANONICAL_TRACK",
+            canonicalKey: canonical.canonicalKey,
+            confidence: decision.confidence,
+            matchedTrackId: trackId,
+            matchedBy: decision.matchedBy,
+            candidates: [],
+          };
+        } else {
+          const needsReview = decision.action === "review" ? 1 : 0;
+          const result = this.db
+            .prepare(
+              `INSERT INTO tracks
+                (canonical_title, artist, language, genre, mood, activity, energy, era,
+                 saved_at, updated_at, canonical_key, normalized_title, normalized_artist,
+                 identity_locked, needs_review)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+            )
+            .run(
+              normalized.fields.canonicalTitle,
+              normalized.fields.artist ?? canonical.artist ?? null,
+              normalized.fields.language ?? null,
+              normalized.fields.genre ?? null,
+              normalized.fields.mood ?? null,
+              normalized.fields.activity ?? null,
+              normalized.fields.energy ?? null,
+              normalized.fields.era ?? null,
+              now,
+              now,
+              canonical.canonicalKey,
+              canonical.normalizedTitle,
+              canonical.normalizedArtist || null,
+              needsReview,
+            );
+          trackId = Number(result.lastInsertRowid);
+          created = true;
+          this.insertSource(trackId, normalized, canonical, { matchedBy: "new", confidence: 1 }, now);
+          this.recordAliases(trackId, normalized, canonical);
+          for (const candidate of decision.candidates) {
+            this.recordCandidate(trackId, candidate.trackId, candidate.confidence, candidate.reason, now);
+          }
+          identity = {
+            state: needsReview ? "possible_match" : "created",
+            level: needsReview ? "POSSIBLE_MATCH" : "DISTINCT_TRACK",
+            canonicalKey: canonical.canonicalKey,
+            confidence: needsReview ? decision.candidates[0].confidence : 1,
+            matchedTrackId: trackId,
+            candidates: decision.candidates,
+          };
+        }
       }
 
       for (const tag of normalized.tags) this.linkTag(trackId, tag);
@@ -413,7 +604,481 @@ export class MusicLibrary {
       created,
       source: this.source(normalized.source.provider, normalized.source.sourceId),
       writeState: "SAVED",
+      identity,
     };
+  }
+
+  evaluateIdentity(canonical) {
+    const exact = this.db
+      .prepare(
+        `SELECT id, identity_locked FROM tracks
+         WHERE canonical_key = ? ORDER BY id`,
+      )
+      .all(canonical.canonicalKey);
+    const unlocked = exact.filter((row) => !row.identity_locked);
+    if (unlocked.length) {
+      return {
+        action: "attach",
+        target: unlocked[0],
+        matchedBy: "canonical_key",
+        confidence: 1,
+        collisions: exact.filter((row) => row.id !== unlocked[0].id),
+        candidates: [],
+      };
+    }
+    if (exact.length) {
+      return {
+        action: "review",
+        matchedBy: "canonical_key",
+        candidates: exact.map((row) => ({
+          trackId: row.id,
+          confidence: 1,
+          reason: "identity_locked",
+        })),
+      };
+    }
+
+    const aliasRows = this.db
+      .prepare(
+        `SELECT t.id, t.identity_locked FROM aliases a
+         JOIN tracks t ON t.id = a.track_id
+         WHERE a.kind = 'canonical_key' AND a.value = ?
+         ORDER BY t.id`,
+      )
+      .all(canonical.canonicalKey);
+    if (aliasRows.length) {
+      return {
+        action: "attach",
+        target: aliasRows[0],
+        matchedBy: "canonical_alias",
+        confidence: 1,
+        collisions: aliasRows.slice(1),
+        candidates: [],
+      };
+    }
+
+    const candidates = this.fuzzyCandidates(canonical);
+    if (candidates.length) return { action: "review", matchedBy: "fuzzy", candidates };
+    return { action: "create", matchedBy: "none", candidates: [] };
+  }
+
+  fuzzyCandidates(canonical) {
+    const rows = this.db
+      .prepare(
+        `SELECT id, normalized_title, normalized_artist FROM tracks
+         WHERE (normalized_title = ? AND normalized_title != '')
+            OR (normalized_artist != '' AND normalized_artist = ?)
+         LIMIT 500`,
+      )
+      .all(canonical.normalizedTitle, canonical.normalizedArtist || "");
+    const candidates = [];
+    for (const row of rows) {
+      let confidence = 0;
+      let reason = null;
+      if (row.normalized_title && row.normalized_title === canonical.normalizedTitle) {
+        if ((row.normalized_artist || "") === canonical.normalizedArtist) {
+          confidence = 0.8;
+          reason = "same_song_different_version";
+        } else if (!row.normalized_artist || !canonical.normalizedArtist) {
+          confidence = 0.6;
+          reason = "same_title_partial_artist";
+        } else if (tokenContainment(row.normalized_artist, canonical.normalizedArtist)) {
+          confidence = 0.55;
+          reason = "same_title_related_artist";
+        } else {
+          confidence = 0.45;
+          reason = "same_title_different_artist";
+        }
+      } else if (row.normalized_artist && row.normalized_artist === canonical.normalizedArtist) {
+        if (tokenContainment(row.normalized_title, canonical.normalizedTitle)) {
+          confidence = 0.5;
+          reason = "similar_title";
+        } else if (tokenSimilarity(row.normalized_title, canonical.normalizedTitle) >= 0.5) {
+          confidence = 0.4;
+          reason = "similar_title";
+        }
+      }
+      if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
+        candidates.push({ trackId: row.id, confidence, reason });
+      }
+    }
+    candidates.sort((a, b) => b.confidence - a.confidence || a.trackId - b.trackId);
+    return candidates.slice(0, 20);
+  }
+
+  ensureTrackIdentity(trackId) {
+    const row = this.db
+      .prepare("SELECT canonical_title, artist, canonical_key FROM tracks WHERE id = ?")
+      .get(trackId);
+    if (!row) return null;
+    if (row.canonical_key) return row.canonical_key;
+    const canonical = canonicalizeSource({ title: row.canonical_title, artist: row.artist });
+    this.db
+      .prepare(
+        `UPDATE tracks SET canonical_key = ?, normalized_title = ?, normalized_artist = ?
+         WHERE id = ?`,
+      )
+      .run(canonical.canonicalKey, canonical.normalizedTitle, canonical.normalizedArtist, trackId);
+    return canonical.canonicalKey;
+  }
+
+  insertSource(trackId, normalized, canonical, decision, now) {
+    this.db
+      .prepare(
+        `INSERT INTO track_sources
+          (track_id, provider, source_id, url, version_type, source_type, confidence, provenance)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        trackId,
+        normalized.source.provider,
+        normalized.source.sourceId,
+        normalized.source.url ?? null,
+        normalized.source.versionType ?? null,
+        canonical?.sourceType ?? "unknown",
+        decision.confidence ?? null,
+        JSON.stringify({
+          matchedBy: decision.matchedBy ?? "new",
+          version: canonical?.version || null,
+          features: canonical?.features ?? [],
+          packaging: canonical?.packaging ?? [],
+          channelTitle: normalized.source.channelTitle ?? null,
+          decidedAt: now,
+        }),
+      );
+  }
+
+  recordAliases(trackId, normalized, canonical) {
+    const statement = this.db.prepare(
+      "INSERT OR IGNORE INTO aliases (kind, value, track_id) VALUES (?, ?, ?)",
+    );
+    const rawTitle = normalizeText(normalized.fields.canonicalTitle);
+    if (rawTitle) statement.run("title", rawTitle, trackId);
+    const rawArtist = normalizeText(normalized.fields.artist ?? canonical?.artist ?? "");
+    if (rawArtist) statement.run("artist", rawArtist, trackId);
+    for (const feature of canonical?.features ?? []) {
+      statement.run("feature", feature, trackId);
+    }
+  }
+
+  recordCandidate(trackId, candidateTrackId, confidence, reason, now) {
+    if (trackId === candidateTrackId) return;
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO identity_candidates
+          (track_id, candidate_track_id, confidence, reason, decided_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(trackId, candidateTrackId, confidence, reason, now ?? new Date().toISOString());
+  }
+
+  previewIdentity(input) {
+    this.assertOpen();
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A track input object is required.");
+    }
+    assertNoSecretKeys(input);
+    const title = optionalText(input.title, "title");
+    if (!title) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A non-empty title is required.");
+    }
+    const artist = optionalText(input.artist, "artist");
+    const source = input.source && typeof input.source === "object" ? input.source : {};
+    const canonical = canonicalizeSource({
+      title,
+      artist,
+      channelTitle: optionalText(source.channelTitle, "source.channelTitle"),
+      versionType: optionalText(source.versionType, "source.versionType"),
+      sourceType: optionalText(source.sourceType, "source.sourceType"),
+    });
+    try {
+      const provider = optionalText(source.provider, "source.provider");
+      const sourceId = optionalText(source.sourceId, "source.sourceId");
+      if (provider && sourceId) {
+        const existing = this.db
+          .prepare("SELECT track_id FROM track_sources WHERE provider = ? AND source_id = ?")
+          .get(provider, sourceId);
+        if (existing) {
+          const keyRow = this.db
+            .prepare("SELECT canonical_key FROM tracks WHERE id = ?")
+            .get(existing.track_id);
+          return {
+            canonical,
+            decision: {
+              state: "existing",
+              level: "EXACT_SOURCE_DUPLICATE",
+              canonicalKey: keyRow?.canonical_key ?? null,
+              confidence: 1,
+              matchedTrackId: existing.track_id,
+              candidates: [],
+            },
+          };
+        }
+      }
+      const decision = this.evaluateIdentity(canonical);
+      const stateByAction = {
+        attach: "same_canonical",
+        review: "possible_match",
+        create: "created",
+      };
+      const levelByAction = {
+        attach: "SAME_CANONICAL_TRACK",
+        review: "POSSIBLE_MATCH",
+        create: "DISTINCT_TRACK",
+      };
+      return {
+        canonical,
+        decision: {
+          state: stateByAction[decision.action],
+          level: levelByAction[decision.action],
+          canonicalKey: canonical.canonicalKey,
+          confidence: decision.confidence ?? decision.candidates[0]?.confidence ?? 1,
+          matchedBy: decision.matchedBy,
+          matchedTrackId: decision.target?.id ?? null,
+          candidates: decision.candidates,
+        },
+      };
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  mergeTracks(intoTrackId, fromTrackId) {
+    this.assertOpen();
+    const into = this.requireTrack(intoTrackId);
+    const from = this.requireTrack(fromTrackId);
+    if (into.id === from.id) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "Cannot merge a track into itself.");
+    }
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE track_sources SET track_id = ? WHERE track_id = ?").run(into.id, from.id);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO track_tags (track_id, tag_id)
+           SELECT ?, tag_id FROM track_tags WHERE track_id = ?`,
+        )
+        .run(into.id, from.id);
+      this.db.prepare("DELETE FROM track_tags WHERE track_id = ?").run(from.id);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO track_playlists (track_id, playlist_id, added_at)
+           SELECT ?, playlist_id, added_at FROM track_playlists WHERE track_id = ?`,
+        )
+        .run(into.id, from.id);
+      this.db.prepare("DELETE FROM track_playlists WHERE track_id = ?").run(from.id);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO aliases (kind, value, track_id)
+           SELECT kind, value, ? FROM aliases WHERE track_id = ?`,
+        )
+        .run(into.id, from.id);
+      this.db.prepare("DELETE FROM aliases WHERE track_id = ?").run(from.id);
+      if (from.canonicalKey) {
+        this.db
+          .prepare("INSERT OR IGNORE INTO aliases (kind, value, track_id) VALUES (?, ?, ?)")
+          .run("canonical_key", from.canonicalKey, into.id);
+      }
+
+      const pendingPairs = this.db
+        .prepare(
+          `SELECT track_id, candidate_track_id, confidence, reason, decided_at
+           FROM identity_candidates
+           WHERE track_id = ? OR candidate_track_id = ?`,
+        )
+        .all(from.id, from.id);
+      this.db
+        .prepare("DELETE FROM identity_candidates WHERE track_id = ? OR candidate_track_id = ?")
+        .run(from.id, from.id);
+      for (const pair of pendingPairs) {
+        const trackId = pair.track_id === from.id ? into.id : pair.track_id;
+        const candidateId = pair.candidate_track_id === from.id ? into.id : pair.candidate_track_id;
+        this.recordCandidate(trackId, candidateId, pair.confidence, pair.reason, pair.decided_at);
+      }
+
+      const remaining = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM identity_candidates
+           WHERE track_id = ? OR candidate_track_id = ?`,
+        )
+        .get(into.id, into.id).count;
+      this.db
+        .prepare(
+          `UPDATE tracks SET needs_review = ?, updated_at = ?,
+             artist = COALESCE(artist, ?),
+             language = COALESCE(language, ?),
+             genre = COALESCE(genre, ?),
+             mood = COALESCE(mood, ?),
+             activity = COALESCE(activity, ?),
+             energy = COALESCE(energy, ?),
+             era = COALESCE(era, ?)
+           WHERE id = ?`,
+        )
+        .run(
+          remaining ? 1 : 0,
+          now,
+          from.artist ?? null,
+          from.language ?? null,
+          from.genre ?? null,
+          from.mood ?? null,
+          from.activity ?? null,
+          from.energy ?? null,
+          from.era ?? null,
+          into.id,
+        );
+      this.db.prepare("DELETE FROM tracks WHERE id = ?").run(from.id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return this.getTrackById(into.id);
+  }
+
+  splitTrack(trackId, sourceIds, fields = {}) {
+    this.assertOpen();
+    const original = this.requireTrack(trackId);
+    if (!Array.isArray(sourceIds) || !sourceIds.length) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "sourceIds must be a non-empty array.");
+    }
+    const uniqueIds = [...new Set(sourceIds.map((id) => Number(id)))];
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const owned = this.db
+      .prepare(
+        `SELECT id FROM track_sources WHERE track_id = ? AND id IN (${placeholders})`,
+      )
+      .all(original.id, ...uniqueIds)
+      .map((row) => row.id);
+    if (owned.length !== uniqueIds.length) {
+      throw new LibraryError(
+        "LIBRARY_INPUT_INVALID",
+        "Every sourceId must belong to the track being split.",
+      );
+    }
+    const overrides = {};
+    for (const name of Object.keys(TRACK_COLUMNS)) {
+      if (fields[name] !== undefined) overrides[name] = optionalText(fields[name], name);
+    }
+    const titleInput = fields.title !== undefined
+      ? optionalText(fields.title, "title")
+      : overrides.canonicalTitle;
+    const title = titleInput ?? original.canonicalTitle;
+    const artist = overrides.artist !== undefined ? overrides.artist : original.artist;
+    const canonical = canonicalizeSource({ title, artist });
+    const now = new Date().toISOString();
+
+    let newTrackId;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare(
+          `INSERT INTO tracks
+            (canonical_title, artist, language, genre, mood, activity, energy, era,
+             saved_at, updated_at, canonical_key, normalized_title, normalized_artist,
+             identity_locked, needs_review)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)`,
+        )
+        .run(
+          title,
+          artist ?? null,
+          overrides.language !== undefined ? overrides.language : original.language,
+          overrides.genre !== undefined ? overrides.genre : original.genre,
+          overrides.mood !== undefined ? overrides.mood : original.mood,
+          overrides.activity !== undefined ? overrides.activity : original.activity,
+          overrides.energy !== undefined ? overrides.energy : original.energy,
+          overrides.era !== undefined ? overrides.era : original.era,
+          now,
+          now,
+          canonical.canonicalKey,
+          canonical.normalizedTitle,
+          canonical.normalizedArtist || null,
+        );
+      newTrackId = Number(result.lastInsertRowid);
+      this.db
+        .prepare(`UPDATE track_sources SET track_id = ? WHERE id IN (${placeholders})`)
+        .run(newTrackId, ...uniqueIds);
+      // A split revokes earlier merge memory: the original track must stop
+      // claiming the moved sources' canonical key.
+      this.db
+        .prepare(
+          "DELETE FROM aliases WHERE track_id = ? AND kind = 'canonical_key' AND value = ?",
+        )
+        .run(original.id, canonical.canonicalKey);
+      this.db
+        .prepare(
+          `UPDATE track_sources SET provenance = ?
+           WHERE track_id = ? AND provenance IS NULL`,
+        )
+        .run(JSON.stringify({ matchedBy: "manual_split", decidedAt: now }), newTrackId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return {
+      track: this.getTrackById(newTrackId),
+      originalTrack: this.getTrackById(original.id),
+      movedSourceIds: owned,
+    };
+  }
+
+  setIdentityLocked(trackId, locked = true) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    try {
+      this.db
+        .prepare("UPDATE tracks SET identity_locked = ?, updated_at = ? WHERE id = ?")
+        .run(locked ? 1 : 0, new Date().toISOString(), track.id);
+    } catch (error) {
+      writeFailed(error);
+    }
+    return this.getTrackById(track.id);
+  }
+
+  setNeedsReview(trackId, needsReview = true) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    try {
+      this.db
+        .prepare("UPDATE tracks SET needs_review = ?, updated_at = ? WHERE id = ?")
+        .run(needsReview ? 1 : 0, new Date().toISOString(), track.id);
+    } catch (error) {
+      writeFailed(error);
+    }
+    return this.getTrackById(track.id);
+  }
+
+  identityReviewQueue() {
+    this.assertOpen();
+    try {
+      return this.db
+        .prepare(
+          `SELECT ic.track_id AS trackId, t.canonical_title AS trackTitle,
+                  ic.candidate_track_id AS candidateTrackId,
+                  c.canonical_title AS candidateTitle,
+                  ic.confidence, ic.reason, ic.decided_at AS decidedAt
+           FROM identity_candidates ic
+           JOIN tracks t ON t.id = ic.track_id
+           JOIN tracks c ON c.id = ic.candidate_track_id
+           ORDER BY ic.confidence DESC, ic.decided_at DESC, ic.track_id`,
+        )
+        .all();
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  requireTrack(trackId) {
+    const id = Number(trackId);
+    if (!Number.isInteger(id)) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A numeric track id is required.");
+    }
+    const track = this.getTrackById(id);
+    if (!track) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", `Track ${id} does not exist.`);
+    }
+    return track;
   }
 
   linkTag(trackId, name) {

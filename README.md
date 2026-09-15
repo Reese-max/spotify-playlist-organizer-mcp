@@ -50,6 +50,31 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
 - 重置：關閉 server，刪除 `library.sqlite`，重新啟動即會重建空 schema。
 - OAuth token、refresh token、client secret 與 `YOUTUBE_CREDENTIAL_PASSPHRASE` 一律留在加密憑證檔，不會寫入音樂庫 DB、log 或 MCP 輸出；寫入端也會拒絕疑似 secret 的欄位名稱。
 
+## Canonical 曲目識別與去重
+
+音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：
+
+- 標題／藝人先經 NFKC、大小寫、拉丁 diacritics、標點與全半形正規化（CJK 組合符如濁點保留），再剝除 `feat.`/`ft.`、`(Official Video)`、`[MV]`、`Official Audio`、`Lyrics`、`- Topic` 後綴、`Artist - Title` 前綴等包裝性詞彙。
+- `canonical_key = ct|<normalizedArtist>|<normalizedTitle>|<version>`：`version` 只在 live、cover、remix、remaster、acoustic 等「不同錄音版本」時才有值（如 `live:at wembley`）；Official MV 與 Official Audio 的 key 相同，因此會掛成同一首歌的兩個 source。
+- 每筆 source 記錄 `source_type`（`official_video | official_audio | live | lyrics | cover | remix | remaster | unknown`）、匹配置信度與 provenance（JSON）。
+
+`upsertTrack` 回傳 `identity` 欄位：`state` 為 `created | existing | same_canonical | possible_match`，`level` 為四級去重結果：
+
+| level | 意義 |
+|---|---|
+| `EXACT_SOURCE_DUPLICATE` | 同一 provider + sourceId，冪等更新 |
+| `SAME_CANONICAL_TRACK` | canonical key 相同（含 merge 記憶 alias），掛為新 source |
+| `POSSIBLE_MATCH` | 模糊命中（同名不同版本、同名不同藝人、近似標題）：**不**自動合併，另建曲目並標 `needs_review`，候選寫入 `identity_candidates` |
+| `DISTINCT_TRACK` | 無相近候選，建新曲目 |
+
+人工決策永遠優先於自動流程：
+
+- `mergeTracks(intoId, fromId)`：把 from 的 sources、tags、playlists、aliases 全部併入 into 並刪除 from；from 的 canonical key 會存成 into 的 `canonical_key` alias，之後同 key 的新來源仍自動掛進來。
+- `splitTrack(trackId, sourceIds, { title?, artist?, ... })`：把指定 sources 拆到一個新曲目（新曲目 `identity_locked = 1`），並撤銷原曲目上對應的 canonical_key alias。
+- `identity_locked` 的曲目不會成為自動掛載目標：同 key 新來源會落入 `possible_match`（reason `identity_locked`）。`setIdentityLocked(trackId, false)` 可解除。
+- `previewIdentity(input)` 為唯讀預覽：回傳正規化結果與將採用的去重決策，不寫入任何資料。
+- `identityReviewQueue()` 列出所有待審候選配對（含信心值與原因）；`setNeedsReview(trackId, false)` 可手動清除標記。
+
 ## 需求
 
 - Node.js 24 或更新版本（`node:sqlite`）。

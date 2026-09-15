@@ -112,6 +112,12 @@ const MIGRATIONS = [
       )`,
     ],
   },
+  {
+    version: 3,
+    statements: [
+      "ALTER TABLE track_sources ADD COLUMN status TEXT",
+    ],
+  },
 ];
 
 export const DEDUPE_LEVELS = Object.freeze([
@@ -185,6 +191,7 @@ function sourceRow(row) {
     url: row.url,
     versionType: row.version_type,
     sourceType: row.source_type ?? "unknown",
+    status: row.status ?? "ok",
     confidence: row.confidence ?? null,
     provenance,
   };
@@ -1484,6 +1491,93 @@ export class MusicLibrary {
       writeFailed(error);
     }
     return { track, sources, tags, playlists, deleted };
+  }
+
+  listManagedPlaylists(provider = "youtube") {
+    this.assertOpen();
+    try {
+      return this.db
+        .prepare(
+          `SELECT id, provider, playlist_id AS playlistId, name
+           FROM playlists
+           WHERE provider = ? AND playlist_id IS NOT NULL
+           ORDER BY id`,
+        )
+        .all(provider)
+        .map((row) => ({
+          id: row.id,
+          provider: row.provider,
+          playlistId: row.playlistId,
+          name: row.name ?? null,
+        }));
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  updatePlaylistName(provider, playlistId, name) {
+    this.assertOpen();
+    const cleanName = optionalText(name, "name");
+    if (!cleanName) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A non-empty playlist name is required.");
+    }
+    try {
+      const result = this.db
+        .prepare("UPDATE playlists SET name = ? WHERE provider = ? AND playlist_id = ?")
+        .run(cleanName, provider, playlistId);
+      if (!result.changes) {
+        throw new LibraryError(
+          "LIBRARY_INPUT_INVALID",
+          `Playlist ${provider}:${playlistId} does not exist.`,
+        );
+      }
+    } catch (error) {
+      writeFailed(error);
+    }
+  }
+
+  setSourceStatus(provider, sourceId, status) {
+    this.assertOpen();
+    const cleanStatus = optionalText(status, "status");
+    if (!cleanStatus) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A non-empty source status is required.");
+    }
+    try {
+      const result = this.db
+        .prepare("UPDATE track_sources SET status = ? WHERE provider = ? AND source_id = ?")
+        .run(cleanStatus, provider, sourceId);
+      if (!result.changes) {
+        throw new LibraryError(
+          "LIBRARY_INPUT_INVALID",
+          `Source ${provider}:${sourceId} does not exist.`,
+        );
+      }
+    } catch (error) {
+      writeFailed(error);
+    }
+    return this.source(provider, sourceId);
+  }
+
+  attachPlaylist(trackId, playlist) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    if (!playlist || typeof playlist !== "object") {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "playlist must be an object.");
+    }
+    const provider = optionalText(playlist.provider, "playlist.provider");
+    if (!provider) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "playlist.provider is required.");
+    }
+    try {
+      this.linkPlaylist(track.id, {
+        provider,
+        playlistId: optionalText(playlist.playlistId, "playlist.playlistId"),
+        name: optionalText(playlist.name, "playlist.name"),
+      }, new Date().toISOString());
+    } catch (error) {
+      writeFailed(error);
+    }
+    return this.listTrackPlaylists(track.id);
   }
 
   setSyncState(key, value) {

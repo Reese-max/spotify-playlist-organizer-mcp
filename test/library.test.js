@@ -35,7 +35,7 @@ test("first open initializes the schema version", async () => {
   const { directory, filePath } = await tempLibrary();
   try {
     const library = openLibrary({ MUSIC_LIBRARY_FILE: filePath });
-    assert.equal(library.schemaVersion(), 2);
+    assert.equal(library.schemaVersion(), 3);
     library.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -141,7 +141,7 @@ test("migrates a pre-schema database forward without deleting data", async () =>
 
     const library = openLibrary(filePath);
     try {
-      assert.equal(library.schemaVersion(), 2);
+      assert.equal(library.schemaVersion(), 3);
       const track = library.getTrackById(1);
       assert.equal(track.canonicalTitle, "Pre-existing Song");
       assert.equal(track.canonicalKey, "ct|someone|pre existing song|");

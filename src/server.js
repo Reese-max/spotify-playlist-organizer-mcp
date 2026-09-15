@@ -30,6 +30,7 @@ import {
   searchLibrary,
   updateMusicTags,
 } from "./library-query.js";
+import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -845,6 +846,50 @@ export function createServer(library) {
       }),
     },
     safeTool((args) => listUnsyncedMusic(library, args)),
+  );
+
+  server.registerTool(
+    "sync_status",
+    {
+      description: "Read-only scan comparing the local library with managed YouTube playlists. Reports per-track status (in_sync, local_only, conflict, unknown_after_write, unknown) and per-video status (youtube_only, unlinked, unavailable).",
+      inputSchema: z.object({
+        playlist: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      syncStatus({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "sync_youtube",
+    {
+      description: "Preview or apply synchronization between the library and YouTube. direction=push adds missing local tracks to playlists (and optionally removes unknown remote items when allowRemoval=true); pull imports YouTube-only videos into the library; reconcile repairs local sync state (playlist renames, unavailable sources, unlinked memberships, unknown_after_write markers) without provider writes.",
+      inputSchema: z.object({
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        direction: z.enum(["push", "pull", "reconcile"]).default("push"),
+        playlist: z.string().min(1).optional(),
+        allowRemoval: z.boolean().default(false),
+      }),
+    },
+    safeTool((args, extra) => (
+      syncYoutube({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "reconcile_track",
+    {
+      description: "Exact-ID read-back for one library track (or youtube videoId): checks each source against the provider, marks deleted/private videos unavailable without deleting the canonical track, and resolves unknown_after_write markers to synced/local_only/unavailable.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1).optional(),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
+        playlistId: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      reconcileTrack({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
   );
 
   return server;

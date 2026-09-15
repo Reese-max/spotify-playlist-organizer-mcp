@@ -87,6 +87,7 @@ export function youtubeVideoSummary(item, position = null) {
     url: item?.url ?? (id ? youtubeVideoUrl(id) : null),
     platform: "youtube",
     channel,
+    status: item?.status?.privacyStatus ?? (typeof item?.status === "string" ? item.status : null),
     description: snippet.description ?? item?.description ?? null,
     publishedAt: snippet.publishedAt ?? item?.publishedAt ?? null,
     duration: contentDetails.duration ?? item?.duration ?? null,

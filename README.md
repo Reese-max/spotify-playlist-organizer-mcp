@@ -81,6 +81,20 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
 - `remove_music`：預設 `preview`。`apply` 只執行明確授權的 effect——`local: true` 刪本機曲目（連同 sources、tags、playlist mapping、aliases、identity candidates、sync_state）；`youtubePlaylist`（**精確 playlist ID 或 URL**，名稱會被拒絕）＋可選 `videoId` 刪 YouTube playlist item。兩個 effect 獨立執行、各自回報 `writeState`，一邊失敗不會回滾另一邊；未授權任何 effect 的 apply 是明確 no-op（`no_effect_authorized`）。
 - `list_unsynced_music`：列出需要注意的曲目——`not_synced`（不在任何 provider playlist）、`identity_conflict`（`needs_review`）、`provider_unavailable`（`sync.<trackId>` 標記為非 synced 狀態）；可用 `reason` 過濾。
 
+## YouTube ↔ 音樂庫同步
+
+同步工具在 `src/library-sync.js`，讓音樂庫與 YouTube playlist 不再無限漂移。設計原則：預設不做雙向破壞性同步；先產生 plan；`push`／`pull`／`reconcile` 語意分離；playlist 只用精確 ID 識別（名稱可改名，ID 不變）；provider read-back 是事實來源，但不會覆寫本機 tags 或 canonical 合併決策。
+
+- `sync_status`：唯讀掃描。回報每首歌的穩定狀態——`in_sync`、`local_only`（音樂庫有、playlist 沒有）、`conflict`（`needs_review`）、`unknown_after_write`（上次寫入結果不確定）、`unknown`（playlist 讀取失敗）；以及 remote 端的 `youtube_only`、`unlinked`（本機有該 source 但缺 playlist 關聯）、`unavailable`（deleted/private）。可用 `playlist`（精確 ID 或 URL）限定範圍。
+- `sync_youtube`：預設 `preview` 回傳明確 plan（`additions`／`imports`／`removals`／`renames`／`links`／`sourceMarks`／`markerResolutions`），不做任何 provider 寫入。`apply` 只執行預覽授權的 `direction` 與範圍：
+  - `push`：把 `local_only` 曲目補進 playlist；已在 playlist 內的不會重複加；`allowRemoval: true` 才會另外移除 `youtube_only` 項目（破壞性操作需額外授權）。
+  - `pull`：把 `youtube_only` 影片以 `upsertTrack` 匯入音樂庫，走原有 dedup 與 playlist 精確 ID 關聯。
+  - `reconcile`：只修本機狀態，不做 provider 寫入——同步 playlist 改名（不會新建重複 playlist）、標記 `unavailable` source、補 `unlinked` 關聯、用已讀回的項目解 `unknown_after_write` marker。
+  - 寫入遇到 timeout/5xx/429 不盲目 retry：該筆標記 `unknown_after_write`，整體回 `reconciliation_required`。
+- `reconcile_track`：對單曲做 exact-ID read-back——逐 source 呼叫 `getVideo` 判斷 deleted/private（標 `unavailable`，**不刪** canonical track）、對 linked playlist 讀回 membership、`unknown_after_write` 解為 `synced`／`local_only`／`unavailable`。
+
+同步狀態存在 `sync.<trackId>` marker（JSON，無 secrets），與 `list_unsynced_music` 的 `provider_unavailable` 過濾相容。schema v3 在 `track_sources` 增加 `status` 欄位（`ok`／`unavailable`），source 失效不等於歌曲消失。
+
 ## Canonical 曲目識別與去重
 
 音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：

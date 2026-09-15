@@ -28,6 +28,17 @@
 - `youtube_auth_status`：查看憑證狀態，不會顯示 token。
 - `youtube_auth_revoke`：撤銷 OAuth 憑證並刪除本機加密憑證檔。
 - `library_status`：查看本機音樂庫路徑、schema version 與曲目數，不會回傳任何列內容或 secret。
+- `classify_track`：用固定 taxonomy 預覽單曲的多維度分類（genre、mood、language、activity、energy、era、artist、custom_tags），每個值附來源（`user`／`rule`／`model`）與信心度；唯讀，不寫入音樂庫。
+
+## 多維度分類
+
+`src/classify.js` 的 `classifyMusic({ title, artist, channelTitle, description, userClassification })` 回傳 `{ taxonomyVersion, dimensions, provenance, needsReview }`：
+
+- 固定 taxonomy 定義在 `src/taxonomy.js`（`TAXONOMY_VERSION = 1`）；同義詞會正規化（`jpop`／`J-Pop`／`J-POP` → `j-pop`）。
+- 無法對應官方值的輸入會導向 `custom_tags` 並列入 `needsReview`，不會憑空擴充官方 taxonomy。
+- 預設走決定性規則（`source: "rule"`，沿用 `DEFAULT_RULES` 關鍵字加上 taxonomy 掃描）；可注入本地 `model` stub，失敗或缺模型時自動落回規則，不呼叫外部 LLM API。
+- `userClassification` 的欄位永遠優先（`source: "user"`）；自動分類只填空的維度，provider metadata 只算證據而非事實（信心度 < 1）。
+- 透過 MusicLibrary 公共 API 持久化：`persistClassification(library, trackInput, result)` 用 `upsertTrack` 寫維度欄位、`addTag` 寫 `custom_tags`、完整 provenance JSON 存進 `sync_state` 的 `classification.<trackId>`。重新分類時使用者設過的維度與標籤不會被覆寫，tags 只增不減。
 
 ## 本機音樂庫
 

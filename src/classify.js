@@ -455,5 +455,11 @@ export function persistClassification(library, trackInput, classification) {
     (dimension) => prior?.provenance?.[dimension] === "user"
       && merged.provenance[dimension] === "user",
   );
-  return { track: saved.track, trackId, classification: merged, preserved };
+  return {
+    track: saved.track,
+    trackId,
+    classification: merged,
+    preserved,
+    identity: saved.identity,
+  };
 }

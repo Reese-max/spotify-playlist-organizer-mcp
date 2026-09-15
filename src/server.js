@@ -19,6 +19,7 @@ import {
 } from "./youtube.js";
 import { openLibrary } from "./library.js";
 import { classifyMusic } from "./classify.js";
+import { saveMusic } from "./save-music.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -684,6 +685,25 @@ export function createServer(library) {
         action: "added",
       };
     }),
+  );
+
+  server.registerTool(
+    "save_music",
+    {
+      description: "Unified entry point: identify a song from a name or YouTube/YouTube Music link, canonicalize, dedupe, classify, save to the local music library, and optionally sync to a YouTube playlist. Returns a complete receipt; previews by default.",
+      inputSchema: z.object({
+        input: z.string().min(1),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
+        tags: z.array(z.string().min(1).max(200)).max(50).optional(),
+        category: z.string().min(1).max(80).optional(),
+        playlist: z.string().min(1).optional(),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        syncToYouTube: z.boolean().default(true),
+      }),
+    },
+    safeTool((args, extra) => (
+      saveMusic({ youtube: youtubeClient, library }, args, { signal: extra?.signal })
+    )),
   );
 
   server.registerTool(

@@ -6,7 +6,23 @@
 
 ## 收藏流程
 
-對「歌曲名稱或搜尋文字」建議採用兩階段流程，避免搜尋結果第一名不是你想收藏的影片：
+建議的統一入口是 `save_music`：一次呼叫完成「辨識 → 綁定影片 → canonical 去重 → 分類 → 寫入本機音樂庫 →（可選）同步 YouTube 播放清單」，並回傳完整 receipt。
+
+```text
+save_music({
+  "input": "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+  "mode": "apply"
+})
+```
+
+- `input` 接受歌曲名稱、YouTube／YouTube Music 影片連結或 11 字元 video ID；`videoId` 可指定候選影片。
+- `mode` 預設 `"preview"`（不寫入）；`"apply"` 才會實際寫入。
+- `syncToYouTube` 預設 `true`；preview 模式仍會預覽 YouTube 步驟，設 `false` 可只寫本機音樂庫。
+- `tags`／`category` 會成為使用者標籤（只增不覆寫既有使用者標籤）；`category` 同時決定目標播放清單名稱，`playlist` 可直接指定播放清單（名稱、URL 或 ID）。
+- 精確連結或 video ID 走 fast path；自由文字無法唯一綁定時回傳 `selection_required` 與 `candidates`，**不會**默默收藏搜尋第一名——請用回傳的 `videoId` 重新呼叫。
+- 本機音樂庫寫入與 YouTube 寫入是獨立步驟：一邊失敗時 receipt 會回報真實的 partial `writeState`（如 `UNKNOWN_AFTER_WRITE`、`PARTIAL_PLAYLIST_CREATED`）、`completedSteps` 與安全的 `nextStep`，不會把部分成功包成一般錯誤。重複收藏同一 `videoId` 是冪等的（`skipped_duplicate`）。
+
+若使用底層工具，對「歌曲名稱或搜尋文字」仍可採用兩階段流程：
 
 1. 呼叫 `youtube_identify_track`，取得候選影片與 `videoId`。
 2. 使用者確認候選後，把選定的 `videoId` 傳給 `youtube_save_track`，並設定 `mode: "apply"`。
@@ -15,6 +31,8 @@
 如果輸入本身是精確的 YouTube／YouTube Music 影片連結，可以直接套用；播放清單連結不能當成單一歌曲輸入。
 
 ## YouTube 工具
+
+- `save_music`：**建議的收藏入口**。辨識、綁定、canonical 去重、多維度分類、寫入本機音樂庫並可選同步 YouTube 播放清單，回傳含 exact IDs、duplicate level、syncState 與 nextStep 的完整 receipt。
 
 - `youtube_search_videos`：搜尋歌曲、藝人或影片。
 - `youtube_identify_track`：從 URL、YouTube Music URL、影片 ID 或文字搜尋辨識影片。
@@ -42,7 +60,7 @@
 
 ## 本機音樂庫
 
-Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作為 Personal Music Library 的持久層：YouTube 仍是播放器，本機 DB 負責保存曲目、來源對應、tags、播放清單 mapping、aliases 與 `sync_state`。現有 `youtube_save_track` 尚未寫入此庫；統一入口是後續的 `save_music`。
+Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作為 Personal Music Library 的持久層：YouTube 仍是播放器，本機 DB 負責保存曲目、來源對應、tags、播放清單 mapping、aliases 與 `sync_state`。`save_music` 會寫入此庫（tracks、sources、tags、播放清單 mapping 與分類 provenance）；底層的 `youtube_save_track` 仍只操作 YouTube。
 
 - 預設位置：使用者設定目錄下的 `music-playlist-organizer/library.sqlite`（Windows 為 `%APPDATA%\music-playlist-organizer\library.sqlite`；其他平台為 `~/.config/music-playlist-organizer/library.sqlite`）。
 - 覆寫路徑：設定環境變數 `MUSIC_LIBRARY_FILE`（相對路徑會解析為絕對路徑）。

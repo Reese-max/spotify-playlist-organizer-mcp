@@ -11,7 +11,7 @@
     "youtube:auth": "node scripts/youtube-auth.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",

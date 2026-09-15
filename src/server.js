@@ -1,3 +1,5 @@
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
@@ -15,6 +17,7 @@ import {
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
+import { openLibrary } from "./library.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -139,8 +142,17 @@ function youtubeDuplicate(loaded, videoId) {
   return loaded.items.find((item) => item.id === videoId) ?? null;
 }
 
-function createServer() {
+export function createServer(library) {
   const server = new McpServer({ name: "music-playlist-organizer", version: "0.2.0" });
+
+  server.registerTool(
+    "library_status",
+    {
+      description: "Report the local music library path, schema version, and track count. Never returns secrets or row contents.",
+      inputSchema: z.object({}),
+    },
+    safeTool(() => library.status()),
+  );
 
   server.registerTool(
     "spotify_search_tracks",
@@ -676,6 +688,22 @@ function createServer() {
   return server;
 }
 
-const server = createServer();
-const transport = new StdioServerTransport();
-await server.connect(transport);
+export async function main(env = process.env) {
+  const library = openLibrary(env);
+  const server = createServer(library);
+  const transport = new StdioServerTransport();
+  const shutdown = () => {
+    try { library.close(); } catch {}
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  process.stdin.once("end", shutdown);
+  process.stdin.once("close", shutdown);
+  await server.connect(transport);
+  return { library, server, transport };
+}
+
+const entry = process.argv[1] && path.resolve(process.argv[1]);
+if (entry && import.meta.url === pathToFileURL(entry).href) {
+  await main();
+}

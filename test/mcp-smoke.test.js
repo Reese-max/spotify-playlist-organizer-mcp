@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("starts an MCP stdio server and answers initialize", async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-smoke-"));
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: root,
+    env: { ...process.env, MUSIC_LIBRARY_FILE: join(directory, "library.sqlite") },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";
@@ -54,5 +58,6 @@ test("starts an MCP stdio server and answers initialize", async () => {
   } finally {
     child.kill();
     await once(child, "exit").catch(() => {});
+    await rm(directory, { recursive: true, force: true });
   }
 });

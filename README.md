@@ -27,10 +27,21 @@
 - `youtube_save_track`：辨識、分類、去重，並加入指定或自動建立的分類播放清單。
 - `youtube_auth_status`：查看憑證狀態，不會顯示 token。
 - `youtube_auth_revoke`：撤銷 OAuth 憑證並刪除本機加密憑證檔。
+- `library_status`：查看本機音樂庫路徑、schema version 與曲目數，不會回傳任何列內容或 secret。
+
+## 本機音樂庫
+
+Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作為 Personal Music Library 的持久層：YouTube 仍是播放器，本機 DB 負責保存曲目、來源對應、tags、播放清單 mapping、aliases 與 `sync_state`。現有 `youtube_save_track` 尚未寫入此庫；統一入口是後續的 `save_music`。
+
+- 預設位置：使用者設定目錄下的 `music-playlist-organizer/library.sqlite`（Windows 為 `%APPDATA%\music-playlist-organizer\library.sqlite`；其他平台為 `~/.config/music-playlist-organizer/library.sqlite`）。
+- 覆寫路徑：設定環境變數 `MUSIC_LIBRARY_FILE`（相對路徑會解析為絕對路徑）。
+- 備份：先關閉 server（關閉時會做 WAL checkpoint），再複製 `library.sqlite`；若仍看到 `-wal`/`-shm` 檔，請一併複製。
+- 重置：關閉 server，刪除 `library.sqlite`，重新啟動即會重建空 schema。
+- OAuth token、refresh token、client secret 與 `YOUTUBE_CREDENTIAL_PASSPHRASE` 一律留在加密憑證檔，不會寫入音樂庫 DB、log 或 MCP 輸出；寫入端也會拒絕疑似 secret 的欄位名稱。
 
 ## 需求
 
-- Node.js 20 或更新版本。
+- Node.js 24 或更新版本（`node:sqlite`）。
 - YouTube Data API key：用於公開搜尋與影片資訊；若不設定，catalog read 會改用 YouTube OAuth。
 - Google OAuth 2.0 client：列出、建立與修改自己的播放清單時需要。
 - OAuth scope：`https://www.googleapis.com/auth/youtube`。

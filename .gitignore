@@ -1,5 +1,10 @@
 node_modules/
+.worktrees/
 .env
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 youtube-credentials.json
 .youtube-credentials*
 .DS_Store

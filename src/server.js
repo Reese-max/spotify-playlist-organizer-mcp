@@ -31,6 +31,7 @@ import {
   updateMusicTags,
 } from "./library-query.js";
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
+import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -890,6 +891,49 @@ export function createServer(library) {
     safeTool((args, extra) => (
       reconcileTrack({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
     )),
+  );
+
+  server.registerTool(
+    "preview_import",
+    {
+      description: "Resolve a mixed batch of YouTube/YouTube Music video URLs, video IDs, free-text lines, and/or one playlist URL/ID into an import plan (new/exact_duplicate/canonical_duplicate/unresolved/unavailable). Writes nothing; stores the plan under a batchId for import_music_batch.",
+      inputSchema: z.object({
+        items: z.array(z.string().min(1)).max(2000).optional(),
+        playlist: z.string().min(1).optional(),
+        syncPlaylist: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      previewImport({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "import_music_batch",
+    {
+      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch). Only resolved items are written; per-item results are returned and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly.",
+      inputSchema: z.object({
+        items: z.array(z.string().min(1)).max(2000).optional(),
+        playlist: z.string().min(1).optional(),
+        batchId: z.string().min(1).optional(),
+        resume: z.boolean().default(false),
+        syncPlaylist: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      importMusicBatch({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "import_status",
+    {
+      description: "Read-only progress of a stored import batch: total counts plus done/pending item tallies.",
+      inputSchema: z.object({
+        batchId: z.string().min(1),
+      }),
+    },
+    safeTool((args) => importStatus(library, args)),
   );
 
   return server;

@@ -95,6 +95,34 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
 
 同步狀態存在 `sync.<trackId>` marker（JSON，無 secrets），與 `list_unsynced_music` 的 `provider_unavailable` 過濾相容。schema v3 在 `track_sources` 增加 `status` 欄位（`ok`／`unavailable`），source 失效不等於歌曲消失。
 
+## HTTP 介面（本機限定）
+
+`src/http-server.js` 提供受保護的 REST facade，供手機／Web UI 操作**同一套** service layer——所有路由直接委派 `saveMusic`、`library-query`、`library-sync`，preview/apply、exact ID、reconciliation 語意與 stdio MCP 完全一致，不重複實作。
+
+啟動（只綁 localhost）：
+
+```bash
+node src/http-server.js                 # 127.0.0.1:8741
+MUSIC_HTTP_PORT=9000 node src/http-server.js
+```
+
+Session 流程：
+
+```bash
+curl -X POST http://127.0.0.1:8741/session \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<MUSIC_HTTP_BOOTSTRAP_TOKEN>"}'
+# → {"token":"<session>","expiresAt":"..."}
+curl http://127.0.0.1:8741/api/library/tracks -H "Authorization: Bearer <session>"
+curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>"   # revoke
+```
+
+環境變數：`MUSIC_HTTP_HOST`（預設 `127.0.0.1`，**不要**設 `0.0.0.0` 除非前面有 TLS + 反向代理＋自有認證層）、`MUSIC_HTTP_PORT`（預設 8741）、`MUSIC_HTTP_BOOTSTRAP_TOKEN`（未設時啟動產生隨機值印在 stderr）、`MUSIC_HTTP_ALLOWED_ORIGINS`（逗號分隔；預設只允許 `http://localhost`/`http://127.0.0.1`，攜帶其他 Origin 的瀏覽器請求一律 403）。
+
+安全界線：session token 與 YouTube OAuth 憑證完全分離，API 回應永不含 access/refresh token 或 credential passphrase；request body 上限 64 KB 且每個路由只收白名單欄位（client 無法注入 credential path）；effectful endpoint 併發上限 4，超出回 429；所有錯誤為 `{error:{code,message}}` 結構。
+
+路由：`GET /health`、`GET /version`（免認證）；`POST /session`、`DELETE /session`；`GET /api/library/{tracks,recent,search,unsynced,tracks/:id}`、`POST /api/library/tracks/:id/{tags,reclassify}`、`POST /api/library/remove`；`POST /api/save_music`；`GET /api/sync/status`、`POST /api/sync`、`POST /api/reconcile`。
+
 ## Canonical 曲目識別與去重
 
 音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：

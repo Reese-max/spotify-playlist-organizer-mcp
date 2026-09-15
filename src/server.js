@@ -18,6 +18,7 @@ import {
   YouTubeClient,
 } from "./youtube.js";
 import { openLibrary } from "./library.js";
+import { classifyMusic } from "./classify.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -683,6 +684,30 @@ export function createServer(library) {
         action: "added",
       };
     }),
+  );
+
+  server.registerTool(
+    "classify_track",
+    {
+      description: "Preview multi-dimensional music classification (genre, mood, language, activity, energy, era, artist, custom_tags) with per-value source and confidence. Read-only; writes nothing.",
+      inputSchema: z.object({
+        title: z.string().min(1),
+        artist: z.string().optional(),
+        channelTitle: z.string().optional(),
+        description: z.string().optional(),
+        userClassification: z.object({
+          genre: z.union([z.string(), z.array(z.string())]).optional(),
+          mood: z.union([z.string(), z.array(z.string())]).optional(),
+          language: z.union([z.string(), z.array(z.string())]).optional(),
+          activity: z.union([z.string(), z.array(z.string())]).optional(),
+          energy: z.union([z.string(), z.array(z.string())]).optional(),
+          era: z.union([z.string(), z.array(z.string())]).optional(),
+          artist: z.union([z.string(), z.array(z.string())]).optional(),
+          custom_tags: z.union([z.string(), z.array(z.string())]).optional(),
+        }).optional(),
+      }),
+    },
+    safeTool(async (args) => ({ mode: "preview", ...(await classifyMusic(args)) })),
   );
 
   return server;

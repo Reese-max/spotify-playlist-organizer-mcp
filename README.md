@@ -133,6 +133,13 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 取消／逾時：apply 每 25 項 chunk flush 一次 plan；caller abort 後回 `action:"cancelled"` ＋ `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。
 
+## 備份與還原
+
+`src/library-backup.js` 讓音樂庫可離線備份、搬移與還原，不綁死單一 SQLite 檔。
+
+- `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。匯出絕不含 OAuth token、refresh token、client secret、credential passphrase——`sync_state` 逐列過 secret-key 掃描，可疑列計入 `excluded.secrets` 而非輸出。
+- `restore_library`：預設 `preview` 回報 `insert`/`update`/`unchanged`/`conflict`/`unsupported` 計數，不寫任何東西；`apply` 在單一 transaction 內寫入（失敗整批 rollback，不會部分破壞）。同一 backup 重複 restore 冪等（`INSERT OR IGNORE`＋id/canonical_key 比對）；`schemaVersion` 不相容直接 fail safe。Restore **不觸發任何 provider 寫入**——還原後用 `sync_status`/`sync_youtube` 對帳。
+
 ## Canonical 曲目識別與去重
 
 音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：

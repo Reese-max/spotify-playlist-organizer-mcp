@@ -32,6 +32,7 @@ import {
 } from "./library-query.js";
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
+import { exportLibrary, restoreLibrary } from "./library-backup.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -934,6 +935,29 @@ export function createServer(library) {
       }),
     },
     safeTool((args) => importStatus(library, args)),
+  );
+
+  server.registerTool(
+    "export_library",
+    {
+      description: "Export the entire Personal Music Library as versioned JSON (lossless) or CSV (readable, lossy). Never includes OAuth tokens, refresh tokens, client secrets, or the credential passphrase.",
+      inputSchema: z.object({
+        format: z.enum(["json", "csv"]).default("json"),
+      }),
+    },
+    safeTool((args) => ({ format: args.format, content: exportLibrary(library, { format: args.format }) })),
+  );
+
+  server.registerTool(
+    "restore_library",
+    {
+      description: "Restore a versioned JSON backup produced by export_library. Default preview reports insert/update/unchanged/conflict/unsupported counts; apply writes inside one transaction. Restores no provider state — run sync_youtube afterwards to reconcile.",
+      inputSchema: z.object({
+        backup: z.union([z.string().min(1), z.record(z.unknown())]),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => restoreLibrary(library, args.backup, { mode: args.mode })),
   );
 
   return server;

@@ -197,6 +197,8 @@ function sourceRow(row) {
   };
 }
 
+const SECRETISH_KEY = /token|secret|passphrase|password|credential|oauth|api[-_]?key|authorization/i;
+
 function assertNoSecretKeys(value) {
   if (Array.isArray(value)) {
     for (const item of value) assertNoSecretKeys(item);
@@ -1578,6 +1580,323 @@ export class MusicLibrary {
       writeFailed(error);
     }
     return this.listTrackPlaylists(track.id);
+  }
+
+  // --- backup / restore -------------------------------------------------
+  // exportRows returns every table as plain column-name rows, sorted for
+  // deterministic output. sync_state rows are filtered through the same
+  // secret-key guard used on write, plus a key-name scan — credential-shaped
+  // data can never leave through a backup even if it bypassed setSyncState.
+  exportRows() {
+    this.assertOpen();
+    const all = (sql) => this.db.prepare(sql).all();
+    const syncState = [];
+    let skippedSecrets = 0;
+    for (const row of all("SELECT key, value, updated_at FROM sync_state ORDER BY key")) {
+      if (SECRETISH_KEY.test(row.key)) {
+        skippedSecrets += 1;
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(row.value);
+        assertNoSecretKeys(parsed);
+        syncState.push(row);
+      } catch {
+        skippedSecrets += 1;
+      }
+    }
+    return {
+      tracks: all("SELECT * FROM tracks ORDER BY id"),
+      sources: all("SELECT * FROM track_sources ORDER BY id"),
+      playlists: all("SELECT * FROM playlists ORDER BY id"),
+      trackPlaylists: all(
+        "SELECT * FROM track_playlists ORDER BY track_id, playlist_id",
+      ),
+      tags: all("SELECT * FROM tags ORDER BY id"),
+      trackTags: all("SELECT * FROM track_tags ORDER BY track_id, tag_id"),
+      aliases: all("SELECT * FROM aliases ORDER BY id"),
+      identityCandidates: all(
+        "SELECT * FROM identity_candidates ORDER BY track_id, candidate_track_id",
+      ),
+      syncState,
+      skippedSecrets,
+    };
+  }
+
+  // importRows restores a snapshot produced by exportRows. It classifies each
+  // track as insert / update / unchanged / conflict / unsupported, and when
+  // apply is true performs the writes inside a single transaction — a failed
+  // restore never leaves partial damage.
+  importRows(data, { apply = false } = {}) {
+    this.assertOpen();
+    const counts = { insert: 0, update: 0, unchanged: 0, conflict: 0, unsupported: 0 };
+    const conflicts = [];
+
+    const tracksById = new Map(
+      this.db.prepare("SELECT id, canonical_key FROM tracks").all()
+        .map((row) => [row.id, row.canonical_key]),
+    );
+    const trackIdByKey = new Map(
+      this.db.prepare("SELECT id, canonical_key FROM tracks WHERE canonical_key IS NOT NULL").all()
+        .map((row) => [row.canonical_key, row.id]),
+    );
+    const sourceOwner = new Map(
+      this.db.prepare("SELECT provider, source_id, track_id FROM track_sources").all()
+        .map((row) => [`${row.provider}|${row.source_id}`, row.track_id]),
+    );
+    const playlistIdByKey = new Map();
+    for (const row of this.db.prepare("SELECT id, provider, playlist_id, name FROM playlists").all()) {
+      const key = row.playlist_id != null
+        ? `${row.provider}|id|${row.playlist_id}`
+        : `${row.provider}|name|${row.name ?? ""}`;
+      playlistIdByKey.set(key, row.id);
+    }
+    const tagIdByName = new Map(
+      this.db.prepare("SELECT id, name FROM tags").all().map((row) => [row.name, row.id]),
+    );
+
+    const hasTrackTag = (trackId, tagId) => this.db
+      .prepare("SELECT 1 FROM track_tags WHERE track_id = ? AND tag_id = ?")
+      .get(trackId, tagId) != null;
+    const hasTrackPlaylist = (trackId, playlistRowId) => this.db
+      .prepare("SELECT 1 FROM track_playlists WHERE track_id = ? AND playlist_id = ?")
+      .get(trackId, playlistRowId) != null;
+    const hasAlias = (kind, value, trackId) => this.db
+      .prepare("SELECT 1 FROM aliases WHERE kind = ? AND value = ? AND track_id = ?")
+      .get(kind, value, trackId) != null;
+    const hasSyncKey = (key) => this.db
+      .prepare("SELECT 1 FROM sync_state WHERE key = ?").get(key) != null;
+    const hasCandidate = (trackId, candidateId) => this.db
+      .prepare("SELECT 1 FROM identity_candidates WHERE track_id = ? AND candidate_track_id = ?")
+      .get(trackId, candidateId) != null;
+
+    const idMap = new Map();   // backup track id -> local track id
+    const playlistMap = new Map();
+
+    // First pass: classify every track and build the id map.
+    const plan = [];
+    for (const row of data.tracks) {
+      if (!row.id || !row.canonical_title) {
+        counts.unsupported += 1;
+        continue;
+      }
+      const existingKey = tracksById.get(row.id);
+      if (existingKey !== undefined && row.canonical_key && existingKey !== row.canonical_key) {
+        counts.conflict += 1;
+        conflicts.push({ trackId: row.id, reason: "id_collision", existingKey, backupKey: row.canonical_key });
+        continue;
+      }
+      let localId = null;
+      if (existingKey !== undefined) localId = row.id;
+      else if (row.canonical_key && trackIdByKey.has(row.canonical_key)) {
+        localId = trackIdByKey.get(row.canonical_key);
+      }
+      plan.push({ row, localId, action: localId == null ? "insert" : "exists" });
+      if (localId != null) idMap.set(row.id, localId);
+    }
+
+    // Second pass: for existing tracks, decide update vs unchanged by checking
+    // whether any child row is missing.
+    const children = { sources: [], tags: [], playlists: [], aliases: [], candidates: [] };
+    for (const entry of plan) {
+      const backupId = entry.row.id;
+      const sources = data.sources.filter((source) => source.track_id === backupId);
+      const tags = data.trackTags
+        .filter((link) => link.track_id === backupId)
+        .map((link) => data.tags.find((tag) => tag.id === link.tag_id))
+        .filter(Boolean);
+      const playlists = data.trackPlaylists
+        .filter((link) => link.track_id === backupId)
+        .map((link) => ({
+          link,
+          playlist: data.playlists.find((playlist) => playlist.id === link.playlist_id),
+        }))
+        .filter((entry2) => entry2.playlist);
+      const aliases = data.aliases.filter((alias) => alias.track_id === backupId);
+      const syncKeys = data.syncState
+        .map((state) => state.key)
+        .filter((key) => key === `sync.${backupId}` || key === `classification.${backupId}`);
+
+      if (entry.action === "insert") {
+        counts.insert += 1;
+        children.sources.push(...sources.map((row) => ({ ...row, track_id: backupId })));
+        children.tags.push(...tags.map((row) => ({ trackId: backupId, name: row.name })));
+        children.playlists.push(...playlists.map((entry2) => ({ trackId: backupId, playlist: entry2.playlist, addedAt: entry2.link.added_at })));
+        children.aliases.push(...aliases.map((row) => ({ ...row, track_id: backupId })));
+        continue;
+      }
+
+      const localId = entry.localId;
+      const missingSources = sources.filter((source) => {
+        const owner = sourceOwner.get(`${source.provider}|${source.source_id}`);
+        if (owner !== undefined && owner !== localId) {
+          counts.conflict += 1;
+          conflicts.push({ sourceId: `${source.provider}:${source.source_id}`, reason: "source_owned_by_other_track" });
+          return false;
+        }
+        return owner === undefined;
+      });
+      const missingTags = tags.filter((tag) => {
+        const localTag = tagIdByName.get(tag.name);
+        return localTag === undefined || !hasTrackTag(localId, localTag);
+      });
+      const missingPlaylists = playlists.filter(({ playlist }) => {
+        const key = playlist.playlist_id != null
+          ? `${playlist.provider}|id|${playlist.playlist_id}`
+          : `${playlist.provider}|name|${playlist.name ?? ""}`;
+        const localRow = playlistIdByKey.get(key);
+        return localRow === undefined || !hasTrackPlaylist(localId, localRow);
+      });
+      const missingAliases = aliases.filter((alias) => !hasAlias(alias.kind, alias.value, localId));
+      const missingSync = syncKeys.filter(
+        (key) => !hasSyncKey(key.replace(/\.(\d+)$/, `.${localId}`)),
+      );
+      const missing = missingSources.length + missingTags.length + missingPlaylists.length
+        + missingAliases.length + missingSync.length;
+      if (missing === 0) counts.unchanged += 1;
+      else {
+        counts.update += 1;
+        children.sources.push(...missingSources.map((row) => ({ ...row, track_id: localId })));
+        children.tags.push(...missingTags.map((row) => ({ trackId: localId, name: row.name })));
+        children.playlists.push(...missingPlaylists.map((entry2) => ({ trackId: localId, playlist: entry2.playlist, addedAt: entry2.link.added_at })));
+        children.aliases.push(...missingAliases.map((row) => ({ ...row, track_id: localId })));
+      }
+    }
+
+    // Identity candidates where both ends mapped.
+    for (const row of data.identityCandidates) {
+      const trackId = idMap.get(row.track_id);
+      const candidateId = idMap.get(row.candidate_track_id);
+      if (trackId == null || candidateId == null) {
+        counts.unsupported += 1;
+        continue;
+      }
+      if (!hasCandidate(trackId, candidateId)) {
+        children.candidates.push({ ...row, track_id: trackId, candidate_track_id: candidateId });
+        if (!apply) continue;
+      }
+    }
+
+    if (!apply) {
+      return { counts, conflicts };
+    }
+
+    try {
+      this.db.exec("BEGIN");
+      const now = new Date().toISOString();
+      const insertTrack = this.db.prepare(
+        `INSERT INTO tracks (id, canonical_title, artist, language, genre, mood, activity,
+           energy, era, saved_at, updated_at, canonical_key, normalized_title,
+           normalized_artist, identity_locked, needs_review)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const insertSource = this.db.prepare(
+        `INSERT INTO track_sources (track_id, provider, source_id, url, version_type,
+           source_type, confidence, provenance, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const insertTag = this.db.prepare("INSERT OR IGNORE INTO tags (name) VALUES (?)");
+      const findTag = this.db.prepare("SELECT id FROM tags WHERE name = ?");
+      const linkTagRow = this.db.prepare(
+        "INSERT OR IGNORE INTO track_tags (track_id, tag_id) VALUES (?, ?)",
+      );
+      const insertPlaylist = this.db.prepare(
+        "INSERT OR IGNORE INTO playlists (provider, playlist_id, name) VALUES (?, ?, ?)",
+      );
+      const linkPlaylistRow = this.db.prepare(
+        "INSERT OR IGNORE INTO track_playlists (track_id, playlist_id, added_at) VALUES (?, ?, ?)",
+      );
+      const insertAlias = this.db.prepare(
+        "INSERT OR IGNORE INTO aliases (kind, value, track_id) VALUES (?, ?, ?)",
+      );
+      const insertSync = this.db.prepare(
+        "INSERT OR IGNORE INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)",
+      );
+      const insertCandidate = this.db.prepare(
+        `INSERT OR IGNORE INTO identity_candidates
+           (track_id, candidate_track_id, confidence, reason, decided_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      );
+
+      for (const entry of plan) {
+        if (entry.action !== "insert") continue;
+        const row = entry.row;
+        insertTrack.run(
+          row.id, row.canonical_title, row.artist ?? null, row.language ?? null,
+          row.genre ?? null, row.mood ?? null, row.activity ?? null, row.energy ?? null,
+          row.era ?? null, row.saved_at ?? now, row.updated_at ?? now,
+          row.canonical_key ?? null, row.normalized_title ?? null,
+          row.normalized_artist ?? null, row.identity_locked ? 1 : 0,
+          row.needs_review ? 1 : 0,
+        );
+        idMap.set(row.id, row.id);
+      }
+
+      for (const source of children.sources) {
+        const trackId = idMap.get(source.track_id) ?? source.track_id;
+        insertSource.run(
+          trackId, source.provider, source.source_id, source.url ?? null,
+          source.version_type ?? null, source.source_type ?? null,
+          source.confidence ?? null, source.provenance ?? null,
+          source.status ?? null,
+        );
+      }
+
+      for (const tag of children.tags) {
+        const trackId = idMap.get(tag.trackId) ?? tag.trackId;
+        insertTag.run(tag.name);
+        linkTagRow.run(trackId, findTag.get(tag.name).id);
+      }
+
+      for (const entry of children.playlists) {
+        const trackId = idMap.get(entry.trackId) ?? entry.trackId;
+        const playlist = entry.playlist;
+        insertPlaylist.run(playlist.provider, playlist.playlist_id ?? null, playlist.name ?? null);
+        const key = playlist.playlist_id != null
+          ? `${playlist.provider}|id|${playlist.playlist_id}`
+          : `${playlist.provider}|name|${playlist.name ?? ""}`;
+        let localRowId = playlistMap.get(playlist.id) ?? playlistIdByKey.get(key);
+        if (localRowId === undefined) {
+          localRowId = this.db
+            .prepare("SELECT id FROM playlists WHERE provider = ? AND playlist_id IS ? AND name IS ?")
+            .get(playlist.provider, playlist.playlist_id ?? null, playlist.name ?? null)?.id;
+        }
+        playlistMap.set(playlist.id, localRowId);
+        linkPlaylistRow.run(trackId, localRowId, entry.addedAt ?? now);
+      }
+
+      for (const alias of children.aliases) {
+        const trackId = idMap.get(alias.track_id) ?? alias.track_id;
+        insertAlias.run(alias.kind, alias.value, trackId);
+      }
+
+      // Track-scoped sync keys (`sync.<id>`, `classification.<id>`) are
+      // remapped through idMap; all other keys copy verbatim. INSERT OR
+      // IGNORE keeps re-restores idempotent and never clobbers live state.
+      for (const row of data.syncState) {
+        const match = /^(sync|classification)\.(\d+)$/.exec(row.key);
+        if (match && idMap.has(Number(match[2]))) {
+          insertSync.run(`${match[1]}.${idMap.get(Number(match[2]))}`, row.value, row.updated_at ?? now);
+        } else if (!match) {
+          insertSync.run(row.key, row.value, row.updated_at ?? now);
+        }
+      }
+
+      for (const candidate of children.candidates) {
+        insertCandidate.run(
+          candidate.track_id, candidate.candidate_track_id,
+          candidate.confidence, candidate.reason ?? null,
+          candidate.decided_at ?? now,
+        );
+      }
+
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+
+    return { counts, conflicts, idMap };
   }
 
   setSyncState(key, value) {

@@ -33,6 +33,13 @@ import {
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
 import { exportLibrary, restoreLibrary } from "./library-backup.js";
+import {
+  deletePlaylist,
+  getPlaylistAdmin,
+  listPlaylistItemsAdmin,
+  removeFromPlaylist,
+  renamePlaylistAdmin,
+} from "./playlist-admin.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -958,6 +965,78 @@ export function createServer(library) {
       }),
     },
     safeTool((args) => restoreLibrary(library, args.backup, { mode: args.mode })),
+  );
+
+  server.registerTool(
+    "youtube_get_playlist",
+    {
+      description: "Read-only playlist metadata by exact playlist ID or URL.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+      }),
+    },
+    safeTool((args, extra) => (
+      getPlaylistAdmin({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_list_playlist_items",
+    {
+      description: "Read-only bounded listing of playlist items by exact playlist ID or URL.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        ...pagingSchema,
+      }),
+    },
+    safeTool((args, extra) => (
+      listPlaylistItemsAdmin({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_rename_playlist",
+    {
+      description: "Rename a playlist by exact ID. Preview shows old/new names; apply verifies the result by exact-ID read-back and reports RENAMED or UNKNOWN_AFTER_WRITE.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        name: z.string().min(1).max(150),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args, extra) => (
+      renamePlaylistAdmin({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_remove_from_playlist",
+    {
+      description: "Remove one item from a playlist by exact playlist ID + videoId. Provider-only effect — the Personal Library canonical track is untouched. Apply verifies removal by read-back.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        videoId: z.string().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args, extra) => (
+      removeFromPlaylist({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_delete_playlist",
+    {
+      description: "Permanently delete a playlist. Preview reports exact ID, name, and item count; apply requires confirmPlaylistId equal to the exact playlist ID. Never triggered implicitly by sync or cleanup.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        confirmPlaylistId: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      deletePlaylist({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
   );
 
   return server;

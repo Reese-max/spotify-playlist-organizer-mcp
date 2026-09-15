@@ -140,6 +140,17 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 - `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。匯出絕不含 OAuth token、refresh token、client secret、credential passphrase——`sync_state` 逐列過 secret-key 掃描，可疑列計入 `excluded.secrets` 而非輸出。
 - `restore_library`：預設 `preview` 回報 `insert`/`update`/`unchanged`/`conflict`/`unsupported` 計數，不寫任何東西；`apply` 在單一 transaction 內寫入（失敗整批 rollback，不會部分破壞）。同一 backup 重複 restore 冪等（`INSERT OR IGNORE`＋id/canonical_key 比對）；`schemaVersion` 不相容直接 fail safe。Restore **不觸發任何 provider 寫入**——還原後用 `sync_status`/`sync_youtube` 對帳。
 
+## YouTube Playlist 管理
+
+`src/playlist-admin.js` 補齊日常 playlist 維護，provider mutation 與 Library CRUD 嚴格分離：
+
+- `youtube_get_playlist`／`youtube_list_playlist_items`：唯讀；items 有界分頁（`limit` ≤ 100）。
+- `youtube_rename_playlist`：preview 顯示 old/new name；apply 後 exact-ID read-back 驗證，回 `RENAMED` 或 `UNKNOWN_AFTER_WRITE`（lost response 但實際落地時，read-back 如實回報已改名）。
+- `youtube_remove_from_playlist`：依精確 playlist ID＋`videoId` 移除 playlist item；**只動 provider**，canonical track 不變（要刪本機曲目走 `remove_music` 的獨立授權）。重複 video item 以 playlistItemId 驗證，只移除一個實例。
+- `youtube_delete_playlist`：preview 回 exact ID／name／itemCount；apply 必須另傳 `confirmPlaylistId` 等於該精確 ID——獨立授權，sync/cleanup 絕不自動觸發。
+
+所有 mutation 遇 timeout/5xx/429 不盲目 retry：read-back 能確認就如實回報，無法確認回 `UNKNOWN_AFTER_WRITE`＋safe next step。
+
 ## Canonical 曲目識別與去重
 
 音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：

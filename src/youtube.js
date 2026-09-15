@@ -499,6 +499,27 @@ export class YouTubeClient {
     return { removed: true, playlistId, playlistItemId: itemId, videoId };
   }
 
+  async renamePlaylist(playlistId, name, { signal } = {}) {
+    const data = await this.request("/playlists", {
+      method: "PUT",
+      auth: "user",
+      query: { part: "snippet" },
+      body: { id: playlistId, snippet: { title: name } },
+      signal,
+    });
+    return youtubePlaylistSummary(data);
+  }
+
+  async deletePlaylist(playlistId, { signal } = {}) {
+    await this.request("/playlists", {
+      method: "DELETE",
+      auth: "user",
+      query: { id: playlistId },
+      signal,
+    });
+    return { deleted: true, playlistId };
+  }
+
   async credentialStatus() {
     const hasEnvironmentCredential = Boolean(
       this.env.YOUTUBE_ACCESS_TOKEN?.trim() || this.env.YOUTUBE_REFRESH_TOKEN?.trim(),

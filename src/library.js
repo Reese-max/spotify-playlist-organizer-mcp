@@ -9,6 +9,7 @@ import {
   tokenContainment,
   tokenSimilarity,
 } from "./canonical.js";
+import { canonicalValue } from "./taxonomy.js";
 
 const SECRET_KEY_PATTERN = /passphrase|secret|token|api[_-]?key|private[_-]?key|credential/i;
 
@@ -289,6 +290,28 @@ function writeFailed(error) {
 function readFailed(error) {
   if (error instanceof LibraryError) throw error;
   throw new LibraryError("LIBRARY_READ_FAILED", "The music library read failed.", { cause: error });
+}
+
+const MAX_QUERY_LIMIT = 100;
+
+// Dimension filters that map 1:1 onto `tracks` columns. Anything outside this
+// whitelist must never reach the SQL string.
+const SEARCH_DIMENSIONS = Object.freeze(["genre", "mood", "language", "activity"]);
+
+const UNSYNCED_REASONS = Object.freeze([
+  "not_synced",
+  "identity_conflict",
+  "provider_unavailable",
+]);
+
+function boundedPage({ limit, offset } = {}, defaultLimit = 20) {
+  const boundedLimit = Math.min(Math.max(Math.trunc(Number(limit)) || defaultLimit, 1), MAX_QUERY_LIMIT);
+  const boundedOffset = Math.max(Math.trunc(Number(offset)) || 0, 0);
+  return { limit: boundedLimit, offset: boundedOffset };
+}
+
+function escapeLike(value) {
+  return value.replace(/[\\%_]/g, (match) => "\\" + match);
 }
 
 export class MusicLibrary {
@@ -1260,6 +1283,207 @@ export class MusicLibrary {
     } catch (error) {
       readFailed(error);
     }
+  }
+
+  removeTag(trackId, tag) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    const name = optionalText(tag, "tag");
+    if (!name) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A non-empty tag is required.");
+    }
+    try {
+      this.db
+        .prepare(
+          `DELETE FROM track_tags
+           WHERE track_id = ? AND tag_id IN (SELECT id FROM tags WHERE name = ?)`,
+        )
+        .run(track.id, name);
+    } catch (error) {
+      writeFailed(error);
+    }
+    return this.listTags(track.id);
+  }
+
+  listTrackSources(trackId) {
+    this.assertOpen();
+    try {
+      return this.db
+        .prepare("SELECT * FROM track_sources WHERE track_id = ? ORDER BY id")
+        .all(this.requireTrack(trackId).id)
+        .map(sourceRow);
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  listTracks({ limit, offset } = {}) {
+    this.assertOpen();
+    const page = boundedPage({ limit, offset });
+    try {
+      const items = this.db
+        .prepare("SELECT * FROM tracks ORDER BY saved_at DESC, id DESC LIMIT ? OFFSET ?")
+        .all(page.limit, page.offset)
+        .map(trackRow);
+      const total = this.db.prepare("SELECT COUNT(*) AS count FROM tracks").get().count;
+      return { items, total, ...page };
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  searchTracks(filters = {}) {
+    this.assertOpen();
+    const page = boundedPage(filters);
+    const conditions = [];
+    const params = [];
+
+    for (const [filter, columns] of [
+      ["title", ["canonical_title", "normalized_title"]],
+      ["artist", ["artist", "normalized_artist"]],
+    ]) {
+      const raw = typeof filters[filter] === "string" ? filters[filter].trim() : "";
+      if (!raw) continue;
+      const normalized = normalizeText(raw);
+      if (normalized) {
+        conditions.push(`(${columns.map((c) => `t.${c} LIKE ? ESCAPE '\\'`).join(" OR ")})`);
+        params.push(`%${escapeLike(raw)}%`, `%${escapeLike(normalized)}%`);
+      } else {
+        conditions.push(`t.${columns[0]} LIKE ? ESCAPE '\\'`);
+        params.push(`%${escapeLike(raw)}%`);
+      }
+    }
+
+    const tag = typeof filters.tag === "string" ? filters.tag.trim() : "";
+    if (tag) {
+      conditions.push(
+        `EXISTS (SELECT 1 FROM track_tags tt JOIN tags g ON g.id = tt.tag_id
+                 WHERE tt.track_id = t.id AND g.name = ?)`,
+      );
+      params.push(tag);
+    }
+
+    for (const dimension of SEARCH_DIMENSIONS) {
+      const raw = typeof filters[dimension] === "string" ? filters[dimension].trim() : "";
+      if (!raw) continue;
+      conditions.push(`t.${dimension} = ?`);
+      params.push(canonicalValue(dimension, raw) ?? raw);
+    }
+
+    const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
+    try {
+      const items = this.db
+        .prepare(
+          `SELECT t.* FROM tracks t ${where}
+           ORDER BY t.saved_at DESC, t.id DESC LIMIT ? OFFSET ?`,
+        )
+        .all(...params, page.limit, page.offset)
+        .map(trackRow);
+      const total = this.db
+        .prepare(`SELECT COUNT(*) AS count FROM tracks t ${where}`)
+        .get(...params).count;
+      return { items, total, ...page };
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  listUnsynced({ reason, limit, offset } = {}) {
+    this.assertOpen();
+    const page = boundedPage({ limit, offset });
+    if (reason !== undefined && reason !== null && !UNSYNCED_REASONS.includes(reason)) {
+      throw new LibraryError(
+        "LIBRARY_INPUT_INVALID",
+        `reason must be one of: ${UNSYNCED_REASONS.join(", ")}.`,
+      );
+    }
+    const conditions = {
+      identity_conflict: "t.needs_review = 1",
+      not_synced: "NOT EXISTS (SELECT 1 FROM track_playlists tp WHERE tp.track_id = t.id)",
+      // Any per-track sync marker is a candidate; the parsed state decides.
+      provider_unavailable: "ss.value IS NOT NULL",
+    };
+    const where = reason
+      ? conditions[reason]
+      : `(${Object.values(conditions).join(") OR (")})`;
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT t.*, ss.value AS sync_value,
+                  EXISTS(SELECT 1 FROM track_playlists tp WHERE tp.track_id = t.id) AS has_playlist
+           FROM tracks t
+           LEFT JOIN sync_state ss ON ss.key = 'sync.' || t.id
+           WHERE ${where}
+           ORDER BY t.saved_at DESC, t.id DESC
+           LIMIT ? OFFSET ?`,
+        )
+        .all(page.limit, page.offset);
+      const total = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM tracks t
+           LEFT JOIN sync_state ss ON ss.key = 'sync.' || t.id
+           WHERE ${where}`,
+        )
+        .get().count;
+
+      const items = rows.map((row) => {
+        const reasons = [];
+        let sync = null;
+        if (row.needs_review) reasons.push("identity_conflict");
+        if (!row.has_playlist) reasons.push("not_synced");
+        if (typeof row.sync_value === "string" && row.sync_value) {
+          try {
+            sync = JSON.parse(row.sync_value);
+          } catch {
+            sync = null;
+          }
+          const state = sync?.state;
+          if (typeof state === "string" && !["synced", "ok"].includes(state)) {
+            reasons.push("provider_unavailable");
+          }
+        }
+        return { track: trackRow(row), reasons, sync };
+      });
+
+      // `provider_unavailable` is decided by the parsed marker, so the SQL
+      // candidate set can be wider than the final answer for that reason.
+      const filtered = reason ? items.filter((item) => item.reasons.includes(reason)) : items;
+      return { items: filtered, total, ...page };
+    } catch (error) {
+      readFailed(error);
+    }
+  }
+
+  removeTrack(trackId) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    const sources = this.listTrackSources(track.id);
+    const tags = this.listTags(track.id);
+    const playlists = this.listTrackPlaylists(track.id);
+    const deleted = {};
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      deleted.sources = this.db
+        .prepare("DELETE FROM track_sources WHERE track_id = ?").run(track.id).changes;
+      deleted.tags = this.db
+        .prepare("DELETE FROM track_tags WHERE track_id = ?").run(track.id).changes;
+      deleted.playlists = this.db
+        .prepare("DELETE FROM track_playlists WHERE track_id = ?").run(track.id).changes;
+      deleted.aliases = this.db
+        .prepare("DELETE FROM aliases WHERE track_id = ?").run(track.id).changes;
+      deleted.identityCandidates = this.db
+        .prepare("DELETE FROM identity_candidates WHERE track_id = ? OR candidate_track_id = ?")
+        .run(track.id, track.id).changes;
+      deleted.syncState = this.db
+        .prepare("DELETE FROM sync_state WHERE key IN (?, ?)")
+        .run(`classification.${track.id}`, `sync.${track.id}`).changes;
+      this.db.prepare("DELETE FROM tracks WHERE id = ?").run(track.id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return { track, sources, tags, playlists, deleted };
   }
 
   setSyncState(key, value) {

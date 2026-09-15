@@ -20,6 +20,16 @@ import {
 import { openLibrary } from "./library.js";
 import { classifyMusic } from "./classify.js";
 import { saveMusic } from "./save-music.js";
+import {
+  getMusic,
+  listMusic,
+  listUnsyncedMusic,
+  recentMusic,
+  reclassifyMusic,
+  removeMusic,
+  searchLibrary,
+  updateMusicTags,
+} from "./library-query.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
@@ -728,6 +738,113 @@ export function createServer(library) {
       }),
     },
     safeTool(async (args) => ({ mode: "preview", ...(await classifyMusic(args)) })),
+  );
+
+  const pagingSchema = {
+    limit: z.number().int().min(1).max(100).default(20),
+    offset: z.number().int().min(0).default(0),
+  };
+
+  server.registerTool(
+    "search_library",
+    {
+      description: "Read-only search of the local music library by title, artist, tag, genre, mood, language, or activity. Bounded pagination.",
+      inputSchema: z.object({
+        title: z.string().min(1).optional(),
+        artist: z.string().min(1).optional(),
+        tag: z.string().min(1).optional(),
+        genre: z.string().min(1).optional(),
+        mood: z.string().min(1).optional(),
+        language: z.string().min(1).optional(),
+        activity: z.string().min(1).optional(),
+        ...pagingSchema,
+      }),
+    },
+    safeTool((args) => searchLibrary(library, args)),
+  );
+
+  server.registerTool(
+    "list_music",
+    {
+      description: "Read-only listing of the local music library, newest first, with bounded pagination.",
+      inputSchema: z.object({ ...pagingSchema }),
+    },
+    safeTool((args) => listMusic(library, args)),
+  );
+
+  server.registerTool(
+    "recent_music",
+    {
+      description: "Read-only list of the most recently saved library tracks. Bounded limit.",
+      inputSchema: z.object({
+        limit: z.number().int().min(1).max(100).default(20),
+      }),
+    },
+    safeTool((args) => recentMusic(library, args)),
+  );
+
+  server.registerTool(
+    "get_music",
+    {
+      description: "Read a single library track by its local track ID: canonical fields, sources, tags, playlists, stored classification, and sync state.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+      }),
+    },
+    safeTool((args) => getMusic(library, args)),
+  );
+
+  server.registerTool(
+    "update_music_tags",
+    {
+      description: "Add and/or remove custom tags on one library track. Never overwrites classification dimensions or user-set metadata.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        add: z.array(z.string().min(1).max(200)).max(50).optional(),
+        remove: z.array(z.string().min(1).max(200)).max(50).optional(),
+      }),
+    },
+    safeTool((args) => updateMusicTags(library, args)),
+  );
+
+  server.registerTool(
+    "reclassify_music",
+    {
+      description: "Re-run automatic classification for one library track. User-set dimensions and tags are preserved; returns the before/after diff.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+      }),
+    },
+    safeTool((args) => reclassifyMusic(library, args)),
+  );
+
+  server.registerTool(
+    "remove_music",
+    {
+      description: "Preview or apply removal of a library track. Local deletion and YouTube playlist-item deletion are independent effects: each must be authorized explicitly and is reported separately.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        local: z.boolean().default(false),
+        youtubePlaylist: z.string().min(1).optional(),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      removeMusic({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "list_unsynced_music",
+    {
+      description: "Read-only list of library tracks needing attention: not synced to any provider playlist, identity conflicts, or provider-unavailable sync markers.",
+      inputSchema: z.object({
+        reason: z.enum(["not_synced", "identity_conflict", "provider_unavailable"]).optional(),
+        ...pagingSchema,
+      }),
+    },
+    safeTool((args) => listUnsyncedMusic(library, args)),
   );
 
   return server;

@@ -458,6 +458,46 @@ export class YouTubeClient {
     return youtubeVideoSummary(data);
   }
 
+  async removeVideoFromPlaylist(playlistId, videoId, { signal } = {}) {
+    // playlistItems.delete needs the playlist-item ID, which differs from the
+    // video ID — page the playlist until the matching item is found.
+    let pageToken;
+    let itemId = null;
+    while (itemId === null) {
+      const page = await this.request("/playlistItems", {
+        auth: "user",
+        query: {
+          part: "snippet,contentDetails",
+          playlistId,
+          maxResults: MAX_PAGE_SIZE,
+          pageToken,
+        },
+        signal,
+      });
+      const pageItems = page.items ?? [];
+      const found = pageItems.find(
+        (item) => (item.contentDetails?.videoId ?? item.snippet?.resourceId?.videoId) === videoId,
+      );
+      if (found) {
+        itemId = found.id;
+      } else if (page.nextPageToken && pageItems.length) {
+        pageToken = page.nextPageToken;
+      } else {
+        break;
+      }
+    }
+    if (itemId === null) {
+      return { removed: false, playlistId, videoId, reason: "not_in_playlist" };
+    }
+    await this.request("/playlistItems", {
+      method: "DELETE",
+      auth: "user",
+      query: { id: itemId },
+      signal,
+    });
+    return { removed: true, playlistId, playlistItemId: itemId, videoId };
+  }
+
   async credentialStatus() {
     const hasEnvironmentCredential = Boolean(
       this.env.YOUTUBE_ACCESS_TOKEN?.trim() || this.env.YOUTUBE_REFRESH_TOKEN?.trim(),

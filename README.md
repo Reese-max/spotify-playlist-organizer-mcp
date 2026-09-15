@@ -68,6 +68,19 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
 - 重置：關閉 server，刪除 `library.sqlite`，重新啟動即會重建空 schema。
 - OAuth token、refresh token、client secret 與 `YOUTUBE_CREDENTIAL_PASSPHRASE` 一律留在加密憑證檔，不會寫入音樂庫 DB、log 或 MCP 輸出；寫入端也會拒絕疑似 secret 的欄位名稱。
 
+## 音樂庫查詢與維護
+
+音樂庫內容透過以下工具查詢與整理（實作在 `src/library-query.js`，SQL 集中在 `MusicLibrary`）。所有查詢皆唯讀、分頁有界（`limit` ≤ 100），穩定識別一律用本機 `trackId` 與精確 YouTube ID，不用顯示名稱當唯一鍵：
+
+- `search_library`：依 `title`／`artist`（LIKE＋正規化，支援 CJK）、`tag`、`genre`、`mood`、`language`、`activity` 過濾，回傳 `items`＋`total`＋`hasMore`。
+- `list_music`：全庫分頁（`limit`／`offset`），最新收藏在前。
+- `recent_music`：最近收藏的曲目，有界。
+- `get_music`：單一 `trackId` 的完整檔案——canonical 欄位、sources、tags、playlists、分類記錄、`sync` 狀態與 identity review 項目。
+- `update_music_tags`：對單曲新增／移除自訂標籤，回傳 before/after；不碰其他維度或 user-set metadata。
+- `reclassify_music`：對單曲重跑自動分類，使用者設過的維度與標籤保留，回傳變更前後的 per-dimension diff。
+- `remove_music`：預設 `preview`。`apply` 只執行明確授權的 effect——`local: true` 刪本機曲目（連同 sources、tags、playlist mapping、aliases、identity candidates、sync_state）；`youtubePlaylist`（**精確 playlist ID 或 URL**，名稱會被拒絕）＋可選 `videoId` 刪 YouTube playlist item。兩個 effect 獨立執行、各自回報 `writeState`，一邊失敗不會回滾另一邊；未授權任何 effect 的 apply 是明確 no-op（`no_effect_authorized`）。
+- `list_unsynced_music`：列出需要注意的曲目——`not_synced`（不在任何 provider playlist）、`identity_conflict`（`needs_review`）、`provider_unavailable`（`sync.<trackId>` 標記為非 synced 狀態）；可用 `reason` 過濾。
+
 ## Canonical 曲目識別與去重
 
 音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：

@@ -1,4 +1,6 @@
 node_modules/
 .env
-*.log
+youtube-credentials.json
+.youtube-credentials*
+.DS_Store
 npm-debug.log*

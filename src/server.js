@@ -24,27 +24,33 @@ function jsonResult(value) {
 }
 
 function errorResult(error) {
+  const payload = {
+    error: error instanceof Error ? error.message : String(error),
+  };
+  if (typeof error?.code === "string") payload.code = error.code;
+  if (Number.isInteger(error?.status)) payload.status = error.status;
+  if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
   return {
     isError: true,
-    content: [{ type: "text", text: JSON.stringify({ error: error instanceof Error ? error.message : String(error) }) }],
+    content: [{ type: "text", text: JSON.stringify(payload) }],
   };
 }
 
 function safeTool(handler) {
-  return async (args) => {
+  return async (args, extra) => {
     try {
-      return jsonResult(await handler(args));
+      return jsonResult(await handler(args, extra));
     } catch (error) {
       return errorResult(error);
     }
   };
 }
 
-async function loadPlaylist(playlist) {
+async function loadPlaylist(playlist, { signal } = {}) {
   const id = parsePlaylistId(playlist);
   const [details, items] = await Promise.all([
-    client.getPlaylist(id),
-    client.getPlaylistItems(id),
+    client.getPlaylist(id, { signal }),
+    client.getPlaylistItems(id, { signal }),
   ]);
   return { id, details, items };
 }
@@ -62,24 +68,24 @@ function catalogQuery(value) {
   return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(compact) ? "isrc:" + compact : value;
 }
 
-async function replaceWithChunks(id, uris) {
-  await client.replacePlaylistItems(id, uris.slice(0, 100));
+async function replaceWithChunks(id, uris, { signal } = {}) {
+  await client.replacePlaylistItems(id, uris.slice(0, 100), { signal });
   for (let offset = 100; offset < uris.length; offset += 100) {
-    await client.addPlaylistItems(id, uris.slice(offset, offset + 100));
+    await client.addPlaylistItems(id, uris.slice(offset, offset + 100), { signal });
   }
 }
 
-async function loadYouTubePlaylist(reference, { allowMissing = false } = {}) {
+async function loadYouTubePlaylist(reference, { allowMissing = false, signal } = {}) {
   const parsed = parseYouTubePlaylistReference(reference);
   if (parsed.id) {
     const [details, items] = await Promise.all([
-      youtubeClient.getPlaylist(parsed.id),
-      youtubeClient.getPlaylistItems(parsed.id),
+      youtubeClient.getPlaylist(parsed.id, { signal }),
+      youtubeClient.getPlaylistItems(parsed.id, { signal }),
     ]);
     return { id: parsed.id, details, items };
   }
 
-  const available = await youtubeClient.listPlaylists({ limit: 500 });
+  const available = await youtubeClient.listPlaylists({ limit: 500, signal });
   const match = available.playlists.find(
     (playlist) => playlist.name.trim().toLocaleLowerCase() === parsed.name.trim().toLocaleLowerCase(),
   );
@@ -90,20 +96,31 @@ async function loadYouTubePlaylist(reference, { allowMissing = false } = {}) {
   return {
     id: match.id,
     details: match,
-    items: await youtubeClient.getPlaylistItems(match.id),
+    items: await youtubeClient.getPlaylistItems(match.id, { signal }),
   };
 }
 
-async function resolveYouTubeMatch(input, { limit = 5, regionCode } = {}) {
+async function resolveYouTubeMatch(input, { limit = 5, regionCode, signal, videoId } = {}) {
+  if (videoId) {
+    return {
+      source: {
+        kind: "youtube-video-selection",
+        id: videoId,
+        url: "https://www.youtube.com/watch?v=" + videoId,
+        input,
+      },
+      match: await youtubeClient.getVideo(videoId, { signal }),
+    };
+  }
   const source = parseLink(input);
   if (source.kind === "youtube-video") {
-    return { source, match: await youtubeClient.getVideo(source.id) };
+    return { source, match: await youtubeClient.getVideo(source.id, { signal }) };
   }
   if (source.kind === "youtube-playlist") {
     throw new Error("The supplied YouTube link is a playlist; provide a video link instead.");
   }
 
-  const search = await youtubeClient.searchVideos(input, { limit, regionCode });
+  const search = await youtubeClient.searchVideos(input, { limit, regionCode, signal });
   const match = search.videos[0];
   if (!match) throw new Error("No YouTube video matched the supplied input.");
   return { source, match, candidates: search.videos };
@@ -135,7 +152,9 @@ function createServer() {
         market: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(({ query, limit, market }) => client.searchTracks(query, { limit, market })),
+    safeTool(({ query, limit, market }, extra) => (
+      client.searchTracks(query, { limit, market, signal: extra?.signal })
+    )),
   );
 
   server.registerTool(
@@ -149,10 +168,10 @@ function createServer() {
         market: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(async ({ input, artist, limit, market }) => {
+    safeTool(async ({ input, artist, limit, market }, extra) => {
       const source = parseLink(input);
       if (source.kind === "spotify-track") {
-        return { source, match: await client.getTrack(source.id, market) };
+        return { source, match: await client.getTrack(source.id, market, { signal: extra?.signal }) };
       }
       if (source.kind === "spotify-playlist") {
         throw new Error("The supplied Spotify link is a playlist; provide a track link instead.");
@@ -161,11 +180,15 @@ function createServer() {
       let query = catalogQuery(source.query ?? input);
       let youtube = null;
       if (source.kind === "youtube-video") {
-        youtube = await fetchYouTubeMetadata(source.url);
+        youtube = await fetchYouTubeMetadata(source.url, globalThis.fetch, { signal: extra?.signal });
         query = [youtube.title, youtube.author].filter(Boolean).join(" ");
       }
       if (artist) query = (query + " " + artist).trim();
-      return { source, youtube, ...(await client.searchTracks(query, { limit, market })) };
+      return {
+        source,
+        youtube,
+        ...(await client.searchTracks(query, { limit, market, signal: extra?.signal })),
+      };
     }),
   );
 
@@ -178,13 +201,17 @@ function createServer() {
         market: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(async ({ links, market }) => {
+    safeTool(async ({ links, market }, extra) => {
       const results = [];
       for (const input of links) {
         try {
           const source = parseLink(input);
           if (source.kind === "spotify-track") {
-            results.push({ input, source, match: await client.getTrack(source.id, market) });
+            results.push({
+              input,
+              source,
+              match: await client.getTrack(source.id, market, { signal: extra?.signal }),
+            });
             continue;
           }
           if (source.kind === "spotify-playlist" || source.kind === "youtube-playlist") {
@@ -194,10 +221,15 @@ function createServer() {
           let query = catalogQuery(source.query ?? input);
           let youtube = null;
           if (source.kind === "youtube-video") {
-            youtube = await fetchYouTubeMetadata(source.url);
+            youtube = await fetchYouTubeMetadata(source.url, globalThis.fetch, { signal: extra?.signal });
             query = [youtube.title, youtube.author].filter(Boolean).join(" ");
           }
-          results.push({ input, source, youtube, ...(await client.searchTracks(query, { limit: 5, market })) });
+          results.push({
+            input,
+            source,
+            youtube,
+            ...(await client.searchTracks(query, { limit: 5, market, signal: extra?.signal })),
+          });
         } catch (error) {
           results.push({ input, error: error instanceof Error ? error.message : String(error) });
         }
@@ -212,8 +244,8 @@ function createServer() {
       description: "Find repeated tracks in a Spotify playlist without changing it.",
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
-    safeTool(async ({ playlist }) => {
-      const loaded = await loadPlaylist(playlist);
+    safeTool(async ({ playlist }, extra) => {
+      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
       return {
         playlist: {
           id: loaded.id,
@@ -234,8 +266,8 @@ function createServer() {
         rules: z.record(z.string(), z.array(z.string())).optional(),
       }),
     },
-    safeTool(async ({ playlist, rules }) => {
-      const loaded = await loadPlaylist(playlist);
+    safeTool(async ({ playlist, rules }, extra) => {
+      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       return {
         mode: "preview",
@@ -261,8 +293,8 @@ function createServer() {
         prefix: z.string().max(40).default(""),
       }),
     },
-    safeTool(async ({ playlist, mode, rules, public: isPublic, prefix }) => {
-      const loaded = await loadPlaylist(playlist);
+    safeTool(async ({ playlist, mode, rules, public: isPublic, prefix }, extra) => {
+      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       const plan = Object.entries(classification.categories)
         .map(([category, tracks]) => ({
@@ -281,8 +313,8 @@ function createServer() {
         };
       }
 
-      const user = await client.getCurrentUser();
-      const currentPlaylists = await client.listCurrentUserPlaylists();
+      const user = await client.getCurrentUser({ signal: extra?.signal });
+      const currentPlaylists = await client.listCurrentUserPlaylists({ signal: extra?.signal });
       const results = [];
       for (const entry of plan) {
         const existing = currentPlaylists.find(
@@ -293,8 +325,9 @@ function createServer() {
           entry.name,
           "Derived from " + loaded.details.name + " by music-playlist-organizer-mcp",
           isPublic,
+          { signal: extra?.signal },
         );
-        await replaceWithChunks(target.id, entry.uris);
+        await replaceWithChunks(target.id, entry.uris, { signal: extra?.signal });
         results.push({
           category: entry.category,
           trackCount: entry.uris.length,
@@ -327,7 +360,9 @@ function createServer() {
         order: z.enum(["relevance", "date", "rating", "title", "viewCount"]).default("relevance"),
       }),
     },
-    safeTool(({ query, limit, regionCode, order }) => youtubeClient.searchVideos(query, { limit, regionCode, order })),
+    safeTool(({ query, limit, regionCode, order }, extra) => (
+      youtubeClient.searchVideos(query, { limit, regionCode, order, signal: extra?.signal })
+    )),
   );
 
   server.registerTool(
@@ -340,7 +375,9 @@ function createServer() {
         regionCode: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(async ({ input, limit, regionCode }) => resolveYouTubeMatch(input, { limit, regionCode })),
+    safeTool(async ({ input, limit, regionCode }, extra) => (
+      resolveYouTubeMatch(input, { limit, regionCode, signal: extra?.signal })
+    )),
   );
 
   server.registerTool(
@@ -352,13 +389,22 @@ function createServer() {
         regionCode: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(async ({ links, regionCode }) => {
+    safeTool(async ({ links, regionCode }, extra) => {
       const results = [];
       for (const input of links) {
         try {
-          results.push({ input, ...(await resolveYouTubeMatch(input, { limit: 5, regionCode })) });
+          results.push({
+            input,
+            ...(await resolveYouTubeMatch(input, { limit: 5, regionCode, signal: extra?.signal })),
+          });
         } catch (error) {
-          results.push({ input, error: error instanceof Error ? error.message : String(error) });
+          if (error?.code === "CALLER_CANCELLED") throw error;
+          results.push({
+            input,
+            error: error instanceof Error ? error.message : String(error),
+            ...(typeof error?.code === "string" ? { code: error.code } : {}),
+            ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
+          });
         }
       }
       return { results };
@@ -373,7 +419,7 @@ function createServer() {
         limit: z.number().int().min(1).max(500).default(100),
       }),
     },
-    safeTool(({ limit }) => youtubeClient.listPlaylists({ limit })),
+    safeTool(({ limit }, extra) => youtubeClient.listPlaylists({ limit, signal: extra?.signal })),
   );
 
   server.registerTool(
@@ -386,9 +432,27 @@ function createServer() {
         privacyStatus: z.enum(["private", "unlisted", "public"]).default("private"),
       }),
     },
-    safeTool(({ name, description, privacyStatus }) => (
-      youtubeClient.createPlaylist(name, description, privacyStatus)
+    safeTool(({ name, description, privacyStatus }, extra) => (
+      youtubeClient.createPlaylist(name, description, privacyStatus, { signal: extra?.signal })
     )),
+  );
+
+  server.registerTool(
+    "youtube_auth_status",
+    {
+      description: "Report YouTube credential status without exposing any token or secret.",
+      inputSchema: z.object({}),
+    },
+    safeTool(() => youtubeClient.credentialStatus()),
+  );
+
+  server.registerTool(
+    "youtube_auth_revoke",
+    {
+      description: "Revoke the YouTube OAuth credential and delete the encrypted local credential record.",
+      inputSchema: z.object({}),
+    },
+    safeTool((_, extra) => youtubeClient.revokeUserCredentials({ signal: extra?.signal })),
   );
 
   server.registerTool(
@@ -397,8 +461,8 @@ function createServer() {
       description: "Find repeated videos in a YouTube playlist without changing it.",
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
-    safeTool(async ({ playlist }) => {
-      const loaded = await loadYouTubePlaylist(playlist);
+    safeTool(async ({ playlist }, extra) => {
+      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
       return {
         playlist: youtubePlaylistInfo(loaded, playlist),
         ...findDuplicates(loaded.items),
@@ -415,8 +479,8 @@ function createServer() {
         rules: z.record(z.string(), z.array(z.string())).optional(),
       }),
     },
-    safeTool(async ({ playlist, rules }) => {
-      const loaded = await loadYouTubePlaylist(playlist);
+    safeTool(async ({ playlist, rules }, extra) => {
+      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
       return {
         mode: "preview",
         playlist: youtubePlaylistInfo(loaded, playlist),
@@ -431,13 +495,23 @@ function createServer() {
       description: "Preview or add one YouTube video to an existing playlist, skipping an exact duplicate.",
       inputSchema: z.object({
         input: z.string().min(1),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
         playlist: z.string().min(1),
         mode: z.enum(["preview", "apply"]).default("preview"),
       }),
     },
-    safeTool(async ({ input, playlist, mode }) => {
-      const resolved = await resolveYouTubeMatch(input, { limit: 5 });
-      const loaded = await loadYouTubePlaylist(playlist);
+    safeTool(async ({ input, videoId, playlist, mode }, extra) => {
+      const resolved = await resolveYouTubeMatch(input, { limit: 5, signal: extra?.signal, videoId });
+      if (mode === "apply" && resolved.source.kind === "query" && !videoId) {
+        return {
+          mode,
+          source: resolved.source,
+          candidates: resolved.candidates,
+          action: "selection_required",
+          message: "Free-text apply requires videoId from the selected preview candidate.",
+        };
+      }
+      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
       const duplicate = youtubeDuplicate(loaded, resolved.match.id);
       const result = {
         mode,
@@ -446,6 +520,7 @@ function createServer() {
         playlist: youtubePlaylistInfo(loaded, playlist),
         duplicate: Boolean(duplicate),
         existingItem: duplicate,
+        ...(resolved.candidates ? { candidates: resolved.candidates } : {}),
       };
       if (mode === "preview" || duplicate) {
         return {
@@ -453,8 +528,26 @@ function createServer() {
           action: duplicate ? "skipped_duplicate" : "would_add",
         };
       }
-      await youtubeClient.addVideoToPlaylist(loaded.id, resolved.match.id);
-      return { ...result, action: "added" };
+      try {
+        await youtubeClient.addVideoToPlaylist(loaded.id, resolved.match.id, { signal: extra?.signal });
+        return { ...result, action: "added" };
+      } catch (error) {
+        const ambiguous = ["TIMEOUT", "CALLER_CANCELLED", "NETWORK_ERROR"].includes(error?.code)
+          || error?.status === 429
+          || error?.status >= 500;
+        return {
+          ...result,
+          action: "reconciliation_required",
+          writeState: ambiguous ? "UNKNOWN_AFTER_WRITE" : "FAILED_NO_CONFIRMED_EFFECT",
+          completedSteps: [],
+          error: {
+            code: error?.code ?? "WRITE_FAILED",
+            message: error instanceof Error ? error.message : String(error),
+            ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
+          },
+          nextStep: "Re-run with the exact playlist ID and video ID; check the playlist before adding again.",
+        };
+      }
     }),
   );
 
@@ -464,6 +557,7 @@ function createServer() {
       description: "Identify a YouTube song/video, classify it, deduplicate it, and add it to a named or category playlist.",
       inputSchema: z.object({
         input: z.string().min(1),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
         playlist: z.string().min(1).optional(),
         category: z.string().min(1).max(80).optional(),
         mode: z.enum(["preview", "apply"]).default("preview"),
@@ -476,6 +570,7 @@ function createServer() {
     },
     safeTool(async ({
       input,
+      videoId,
       playlist,
       category,
       mode,
@@ -484,13 +579,25 @@ function createServer() {
       createIfMissing,
       privacyStatus,
       dedupe,
-    }) => {
-      const resolved = await resolveYouTubeMatch(input, { limit: 5 });
+    }, extra) => {
+      const resolved = await resolveYouTubeMatch(input, { limit: 5, signal: extra?.signal, videoId });
+      if (mode === "apply" && resolved.source.kind === "query" && !videoId) {
+        return {
+          mode,
+          source: resolved.source,
+          candidates: resolved.candidates,
+          action: "selection_required",
+          message: "Free-text apply requires videoId from the selected preview candidate.",
+        };
+      }
       const selectedCategory = category ?? classifyTrack(resolved.match, rules ?? DEFAULT_RULES);
       const effectivePrefix = prefix || youtubeClient.env.YOUTUBE_PLAYLIST_PREFIX || "";
       const generatedName = boundedName((effectivePrefix ? effectivePrefix + " · " : "") + selectedCategory);
       const targetReference = playlist ?? generatedName;
-      const loaded = await loadYouTubePlaylist(targetReference, { allowMissing: true });
+      const loaded = await loadYouTubePlaylist(targetReference, {
+        allowMissing: true,
+        signal: extra?.signal,
+      });
       const duplicate = loaded.id ? youtubeDuplicate(loaded, resolved.match.id) : null;
       const targetName = loaded.details?.name ?? loaded.name ?? targetReference;
       const preview = {
@@ -503,6 +610,7 @@ function createServer() {
         duplicate: Boolean(duplicate),
         existingItem: duplicate,
         dedupe,
+        ...(resolved.candidates ? { candidates: resolved.candidates } : {}),
       };
 
       if (mode === "preview") {
@@ -516,15 +624,45 @@ function createServer() {
       }
 
       let target = loaded;
-      if (!target.id) {
-        const created = await youtubeClient.createPlaylist(
-          targetName,
-          "Managed by music-playlist-organizer-mcp. Category: " + selectedCategory,
-          privacyStatus,
-        );
-        target = { id: created.id, details: created, items: [] };
+      let createdPlaylist = false;
+      try {
+        if (!target.id) {
+          const created = await youtubeClient.createPlaylist(
+            targetName,
+            "Managed by music-playlist-organizer-mcp. Category: " + selectedCategory,
+            privacyStatus,
+            { signal: extra?.signal },
+          );
+          target = { id: created.id, details: created, items: [] };
+          createdPlaylist = true;
+        }
+        await youtubeClient.addVideoToPlaylist(target.id, resolved.match.id, { signal: extra?.signal });
+      } catch (error) {
+        const ambiguous = ["TIMEOUT", "CALLER_CANCELLED", "NETWORK_ERROR"].includes(error?.code)
+          || error?.status === 429
+          || error?.status >= 500;
+        return {
+          ...preview,
+          playlist: youtubePlaylistInfo(target, targetName),
+          playlistAction: createdPlaylist ? "created" : loaded.id ? "use_existing" : "unknown",
+          videoId: resolved.match.id,
+          completedSteps: createdPlaylist ? ["playlist_created"] : [],
+          writeState: ambiguous
+            ? "UNKNOWN_AFTER_WRITE"
+            : createdPlaylist
+              ? "PARTIAL_PLAYLIST_CREATED"
+              : "FAILED_NO_CONFIRMED_EFFECT",
+          action: "reconciliation_required",
+          error: {
+            code: error?.code ?? "WRITE_FAILED",
+            message: error instanceof Error ? error.message : String(error),
+            ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
+          },
+          nextStep: createdPlaylist
+            ? "Use the returned playlist ID, read its items, and only retry if the exact video ID is absent."
+            : "Read the target playlist by exact ID before retrying; do not create another playlist.",
+        };
       }
-      await youtubeClient.addVideoToPlaylist(target.id, resolved.match.id);
       return {
         ...preview,
         mode,

@@ -1,20 +1,29 @@
 import { parseLink } from "./core.js";
+import { CredentialStore, credentialsFromTokenResponse } from "./credentials.js";
+import {
+  awaitWithDeadline,
+  fetchWithDeadline,
+  retryDelayMs,
+  timeoutFromEnv,
+  waitForRetry,
+} from "./http.js";
 
 const API_BASE = "https://www.googleapis.com/youtube/v3";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const MAX_PAGE_SIZE = 50;
 
 export class YouTubeApiError extends Error {
-  constructor(status, message, body = null) {
+  constructor(status, message, body = null, code = null) {
     super(message);
     this.name = "YouTubeApiError";
     this.status = status;
     this.body = body;
+    this.code = code;
   }
 }
 
-async function readResponse(response) {
-  const text = await response.text();
+async function readResponse(response, options = {}) {
+  const text = await awaitWithDeadline(response.text(), options);
   if (!text) return null;
   try {
     return JSON.parse(text);
@@ -143,10 +152,31 @@ export class YouTubeClient {
     this.env = env;
     this.fetch = fetchImpl;
     this.refreshingUserToken = null;
+    this.timeoutMs = timeoutFromEnv(this.env);
+    this.maxReadRetries = Math.min(Math.max(Number(this.env.PROVIDER_MAX_READ_RETRIES) || 1, 0), 2);
+    this.credentials = new CredentialStore(this.env);
+    this.storedCredentials = undefined;
   }
 
-  async refreshUserToken() {
-    if (!this.env.YOUTUBE_REFRESH_TOKEN?.trim()) return null;
+  async loadStoredCredentials() {
+    if (this.storedCredentials !== undefined) return this.storedCredentials;
+    if (!(await this.credentials.exists())) {
+      this.storedCredentials = null;
+      return null;
+    }
+    this.storedCredentials = await this.credentials.load();
+    return this.storedCredentials;
+  }
+
+  async getRefreshToken() {
+    if (this.env.YOUTUBE_REFRESH_TOKEN?.trim()) return this.env.YOUTUBE_REFRESH_TOKEN.trim();
+    const stored = await this.loadStoredCredentials();
+    return stored?.refreshToken ?? null;
+  }
+
+  async refreshUserToken({ signal } = {}) {
+    const refreshToken = await this.getRefreshToken();
+    if (!refreshToken) return null;
     if (this.refreshingUserToken) return this.refreshingUserToken;
 
     this.refreshingUserToken = (async () => {
@@ -160,22 +190,41 @@ export class YouTubeClient {
         ["GOOGLE_CLIENT_SECRET", "YOUTUBE_CLIENT_SECRET"],
         "GOOGLE_CLIENT_SECRET or YOUTUBE_CLIENT_SECRET",
       );
-      const response = await this.fetch(TOKEN_URL, {
+      const response = await fetchWithDeadline(this.fetch, TOKEN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           client_id: clientId,
           client_secret: clientSecret,
-          refresh_token: this.env.YOUTUBE_REFRESH_TOKEN.trim(),
+          refresh_token: refreshToken,
           grant_type: "refresh_token",
         }),
+      }, {
+        signal,
+        timeoutMs: this.timeoutMs,
+        operation: "YouTube OAuth token request",
       });
-      const data = await readResponse(response);
+      const data = await readResponse(response, {
+        signal,
+        timeoutMs: this.timeoutMs,
+        operation: "YouTube OAuth token response",
+      });
       if (!response.ok) {
-        throw new YouTubeApiError(response.status, "YouTube OAuth token refresh failed.", data);
+        throw new YouTubeApiError(
+          response.status,
+          "YouTube OAuth token refresh failed.",
+          data,
+          "AUTH_REFRESH_FAILED",
+        );
       }
-      this.env.YOUTUBE_ACCESS_TOKEN = data.access_token;
-      return data.access_token;
+      const previous = await this.loadStoredCredentials();
+      const credentials = credentialsFromTokenResponse(data, previous ?? { refreshToken });
+      if (this.credentials.passphraseConfigured && credentials.refreshToken) {
+        await this.credentials.save(credentials);
+        this.storedCredentials = credentials;
+      }
+      this.env.YOUTUBE_ACCESS_TOKEN = credentials.accessToken;
+      return credentials.accessToken;
     })();
 
     try {
@@ -185,61 +234,103 @@ export class YouTubeClient {
     }
   }
 
-  async getUserToken() {
+  async getUserToken({ signal } = {}) {
     if (this.env.YOUTUBE_ACCESS_TOKEN?.trim()) return this.env.YOUTUBE_ACCESS_TOKEN.trim();
-    const refreshed = await this.refreshUserToken();
+    const stored = await this.loadStoredCredentials();
+    if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now())) {
+      return stored.accessToken;
+    }
+    const refreshed = await this.refreshUserToken({ signal });
     if (refreshed) return refreshed;
     throw new Error(
-      "A YouTube user token is required. Set YOUTUBE_ACCESS_TOKEN or YOUTUBE_REFRESH_TOKEN.",
+      "A YouTube user token is required. Configure the encrypted credential store or set the explicit environment fallback.",
     );
   }
 
-  async request(path, { method = "GET", query, body, auth = "catalog", retry = true } = {}) {
+  async request(path, {
+    method = "GET",
+    query,
+    body,
+    auth = "catalog",
+    retry = true,
+    signal,
+  } = {}) {
     const queryParams = { ...(query ?? {}) };
     const hasApiKey = Boolean(this.env.YOUTUBE_API_KEY?.trim());
     const useUserAuth = auth === "user" || (auth === "catalog" && !hasApiKey);
-    const headers = {
-      Accept: "application/json",
-    };
+    const maxAttempts = method === "GET" && retry ? 1 + this.maxReadRetries : 1;
+    let attempt = 0;
+    let refreshed = false;
 
-    if (useUserAuth) {
-      headers.Authorization = "Bearer " + await this.getUserToken();
-    } else {
-      queryParams.key = requiredAny(
-        this.env,
-        ["YOUTUBE_API_KEY"],
-        "YOUTUBE_API_KEY or YouTube OAuth credentials",
-      );
-    }
+    while (true) {
+      const headers = { Accept: "application/json" };
+      if (useUserAuth) {
+        headers.Authorization = "Bearer " + await this.getUserToken({ signal });
+      } else {
+        queryParams.key = requiredAny(
+          this.env,
+          ["YOUTUBE_API_KEY"],
+          "YOUTUBE_API_KEY or YouTube OAuth credentials",
+        );
+      }
 
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    const queryString = asQuery(queryParams);
-    const url = API_BASE + path + (queryString ? "?" + queryString : "");
-    const response = await this.fetch(url, {
-      method,
-      headers,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    const data = await readResponse(response);
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const queryString = asQuery(queryParams);
+      const url = API_BASE + path + (queryString ? "?" + queryString : "");
+      const response = await fetchWithDeadline(this.fetch, url, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }, {
+        signal,
+        timeoutMs: this.timeoutMs,
+        operation: "YouTube API " + method + " " + path,
+      });
+      const data = await readResponse(response, {
+        signal,
+        timeoutMs: this.timeoutMs,
+        operation: "YouTube API " + method + " " + path + " response",
+      });
 
-    if (response.status === 401 && useUserAuth && retry && this.env.YOUTUBE_REFRESH_TOKEN?.trim()) {
-      await this.refreshUserToken();
-      return this.request(path, { method, query, body, auth: "user", retry: false });
+      if (
+        response.status === 401
+        && useUserAuth
+        && retry
+        && !refreshed
+        && await this.getRefreshToken()
+      ) {
+        refreshed = true;
+        await this.refreshUserToken({ signal });
+        continue;
+      }
+
+      const retryable = response.status === 429 || response.status >= 500;
+      if (retryable && method === "GET" && attempt < maxAttempts - 1) {
+        await waitForRetry(
+          retryDelayMs(response, attempt),
+          signal,
+          "YouTube API read retry",
+        );
+        attempt += 1;
+        continue;
+      }
+
+      if (!response.ok) {
+        const detail = typeof data === "object"
+          ? data?.error?.message ?? data?.error?.errors?.[0]?.reason
+          : null;
+        throw new YouTubeApiError(
+          response.status,
+          "YouTube API request failed" + (detail ? ": " + detail : ""),
+          data,
+          response.status === 429 ? "HTTP_429" : response.status >= 500 ? "HTTP_5XX" : null,
+        );
+      }
+      return data;
     }
-    if (!response.ok) {
-      const detail = typeof data === "object"
-        ? data?.error?.message ?? data?.error?.errors?.[0]?.reason
-        : null;
-      throw new YouTubeApiError(
-        response.status,
-        "YouTube API request failed" + (detail ? ": " + detail : ""),
-        data,
-      );
-    }
-    return data;
   }
 
-  async searchVideos(query, { limit = 10, regionCode, order = "relevance" } = {}) {
+  async searchVideos(query, { limit = 10, regionCode, order = "relevance", signal } = {}) {
     const boundedLimit = Math.min(Math.max(Number(limit) || 10, 1), MAX_PAGE_SIZE);
     const data = await this.request("/search", {
       query: {
@@ -250,6 +341,7 @@ export class YouTubeClient {
         regionCode: regionCode ?? this.env.YOUTUBE_REGION ?? "TW",
         order,
       },
+      signal,
     });
     return {
       query,
@@ -258,19 +350,20 @@ export class YouTubeClient {
     };
   }
 
-  async getVideo(id) {
+  async getVideo(id, { signal } = {}) {
     const data = await this.request("/videos", {
       query: {
         part: "snippet,contentDetails,statistics,status",
         id,
       },
+      signal,
     });
     const item = data.items?.[0];
     if (!item) throw new Error("YouTube video was not found: " + id);
     return youtubeVideoSummary(item, 1);
   }
 
-  async listPlaylists({ limit = 100 } = {}) {
+  async listPlaylists({ limit = 100, signal } = {}) {
     const playlists = [];
     const target = Math.max(Number(limit) || 100, 1);
     let pageToken;
@@ -284,6 +377,7 @@ export class YouTubeClient {
           maxResults: Math.min(MAX_PAGE_SIZE, target - playlists.length),
           pageToken,
         },
+        signal,
       });
       const pageItems = page.items ?? [];
       playlists.push(...pageItems.map(youtubePlaylistSummary));
@@ -294,7 +388,7 @@ export class YouTubeClient {
     return { total: playlists.length, playlists: playlists.slice(0, target) };
   }
 
-  async getPlaylist(id) {
+  async getPlaylist(id, { signal } = {}) {
     const data = await this.request("/playlists", {
       auth: "user",
       query: {
@@ -302,13 +396,14 @@ export class YouTubeClient {
         id,
         maxResults: 1,
       },
+      signal,
     });
     const item = data.items?.[0];
     if (!item) throw new Error("YouTube playlist was not found: " + id);
     return youtubePlaylistSummary(item);
   }
 
-  async getPlaylistItems(id, { limit = 5000 } = {}) {
+  async getPlaylistItems(id, { limit = 5000, signal } = {}) {
     const items = [];
     const target = Math.max(Number(limit) || 5000, 1);
     let pageToken;
@@ -322,6 +417,7 @@ export class YouTubeClient {
           maxResults: Math.min(MAX_PAGE_SIZE, target - items.length),
           pageToken,
         },
+        signal,
       });
       const pageItems = page.items ?? [];
       items.push(...pageItems.map((item, index) => youtubeVideoSummary(item, items.length + index + 1)));
@@ -332,7 +428,7 @@ export class YouTubeClient {
     return items.slice(0, target);
   }
 
-  async createPlaylist(name, description = "", privacyStatus = "private") {
+  async createPlaylist(name, description = "", privacyStatus = "private", { signal } = {}) {
     const data = await this.request("/playlists", {
       method: "POST",
       auth: "user",
@@ -341,11 +437,12 @@ export class YouTubeClient {
         snippet: { title: name, description },
         status: { privacyStatus },
       },
+      signal,
     });
     return youtubePlaylistSummary(data);
   }
 
-  async addVideoToPlaylist(playlistId, videoId) {
+  async addVideoToPlaylist(playlistId, videoId, { signal } = {}) {
     const data = await this.request("/playlistItems", {
       method: "POST",
       auth: "user",
@@ -356,8 +453,79 @@ export class YouTubeClient {
           resourceId: { kind: "youtube#video", videoId },
         },
       },
+      signal,
     });
     return youtubeVideoSummary(data);
+  }
+
+  async credentialStatus() {
+    const hasEnvironmentCredential = Boolean(
+      this.env.YOUTUBE_ACCESS_TOKEN?.trim() || this.env.YOUTUBE_REFRESH_TOKEN?.trim(),
+    );
+    if (hasEnvironmentCredential) {
+      return {
+        status: "READY",
+        source: "environment",
+        filePath: this.credentials.filePath,
+        refreshable: Boolean(this.env.YOUTUBE_REFRESH_TOKEN?.trim()),
+      };
+    }
+    return this.credentials.status();
+  }
+
+  async revokeUserCredentials({ signal } = {}) {
+    const hasEnvironmentCredential = Boolean(
+      this.env.YOUTUBE_ACCESS_TOKEN?.trim() || this.env.YOUTUBE_REFRESH_TOKEN?.trim(),
+    );
+    const hasFileCredential = await this.credentials.exists();
+    let stored = null;
+    if (this.credentials.passphraseConfigured) {
+      stored = await this.loadStoredCredentials();
+    }
+    const refreshToken = this.env.YOUTUBE_REFRESH_TOKEN?.trim() || stored?.refreshToken || null;
+    const accessToken = this.env.YOUTUBE_ACCESS_TOKEN?.trim() || stored?.accessToken || null;
+    const token = refreshToken || accessToken;
+    if (!token) {
+      return {
+        status: hasFileCredential ? "UNKNOWN" : "MISSING",
+        source: hasFileCredential ? "encrypted_file" : "none",
+        localCredentialsDeleted: false,
+        ...(hasFileCredential ? { reason: "CREDENTIAL_PASSPHRASE_REQUIRED" } : {}),
+      };
+    }
+
+    const response = await fetchWithDeadline(this.fetch, "https://oauth2.googleapis.com/revoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }),
+    }, {
+      signal,
+      timeoutMs: this.timeoutMs,
+      operation: "YouTube OAuth revoke request",
+    });
+    const data = await readResponse(response, {
+      signal,
+      timeoutMs: this.timeoutMs,
+      operation: "YouTube OAuth revoke response",
+    });
+    if (!response.ok && response.status !== 400) {
+      throw new YouTubeApiError(response.status, "YouTube OAuth revoke failed.", data, "AUTH_REVOKE_FAILED");
+    }
+
+    const deleted = await this.credentials.remove();
+    this.storedCredentials = null;
+    delete this.env.YOUTUBE_ACCESS_TOKEN;
+    delete this.env.YOUTUBE_REFRESH_TOKEN;
+    return {
+      status: "REVOKED",
+      source: hasEnvironmentCredential && hasFileCredential
+        ? "environment_and_encrypted_file"
+        : hasEnvironmentCredential
+          ? "environment"
+          : "encrypted_file",
+      localCredentialsDeleted: deleted,
+      environmentCredentialsCleared: hasEnvironmentCredential,
+    };
   }
 
   async findPlaylistByName(name, { playlists } = {}) {

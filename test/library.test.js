@@ -655,3 +655,128 @@ test("previewIdentity is read-only and reports the would-be decision", async () 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("sourceType live hint does not silent-merge into the studio track", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const studio = library.upsertTrack({
+      title: "Hello",
+      artist: "Band",
+      source: { provider: "youtube", sourceId: "studio-1" },
+    });
+    const live = library.upsertTrack({
+      title: "Hello",
+      artist: "Band",
+      source: { provider: "youtube", sourceId: "live-hint", sourceType: "live" },
+    });
+    assert.notEqual(live.track.id, studio.track.id);
+    assert.equal(live.identity.state, "possible_match");
+    assert.notEqual(live.track.canonicalKey, studio.track.canonicalKey);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("exact-source re-upsert does not rewrite canonical identity fields", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const first = library.upsertTrack({
+      title: "Song",
+      artist: "Artist",
+      genre: "pop",
+      source: { provider: "youtube", sourceId: "same-1" },
+    });
+    const again = library.upsertTrack({
+      title: "Totally Different",
+      artist: "Other",
+      mood: "chill",
+      source: { provider: "youtube", sourceId: "same-1" },
+    });
+    assert.equal(again.identity.level, "EXACT_SOURCE_DUPLICATE");
+    assert.equal(again.track.canonicalTitle, "Song");
+    assert.equal(again.track.artist, "Artist");
+    assert.equal(again.track.canonicalKey, first.track.canonicalKey);
+    assert.equal(again.track.genre, "pop");
+    assert.equal(again.track.mood, "chill");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("cleared needs_review survives reopen and locked alias is not auto-attached", async () => {
+  const { directory, filePath } = await tempLibrary();
+  let library = openLibrary(filePath);
+  try {
+    const studio = library.upsertTrack({
+      title: "Song",
+      artist: "Artist",
+      source: { provider: "youtube", sourceId: "studio-lock" },
+    });
+    const live = library.upsertTrack({
+      title: "Song (Live)",
+      artist: "Artist",
+      source: { provider: "youtube", sourceId: "live-lock" },
+    });
+    library.mergeTracks(studio.track.id, live.track.id);
+    library.setIdentityLocked(studio.track.id, true);
+    library.setNeedsReview(studio.track.id, false);
+    library.close();
+
+    library = openLibrary(filePath);
+    assert.equal(library.getTrackById(studio.track.id).needsReview, false);
+
+    const again = library.upsertTrack({
+      title: "Song (Live)",
+      artist: "Artist",
+      source: { provider: "youtube", sourceId: "live-lock-2" },
+    });
+    assert.equal(again.identity.state, "possible_match");
+    assert.equal(again.identity.candidates[0].reason, "identity_locked");
+    assert.notEqual(again.track.id, studio.track.id);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("split without title override uses moved source_type and keeps playlist links", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const studio = library.upsertTrack({
+      title: "Song",
+      artist: "Artist",
+      source: { provider: "youtube", sourceId: "studio-split" },
+      playlist: { provider: "youtube", name: "Saved" },
+      tags: ["keep"],
+    });
+    const live = library.upsertTrack({
+      title: "Song (Live)",
+      artist: "Artist",
+      source: { provider: "youtube", sourceId: "live-split" },
+    });
+    library.mergeTracks(studio.track.id, live.track.id);
+    const liveSourceId = library.source("youtube", "live-split").id;
+    const split = library.splitTrack(studio.track.id, [liveSourceId]);
+    assert.match(split.track.canonicalKey, /\|live$/);
+    assert.notEqual(split.track.canonicalKey, studio.track.canonicalKey);
+    assert.deepEqual(library.listTrackPlaylists(split.track.id), [
+      { provider: "youtube", playlistId: null, name: "Saved" },
+    ]);
+    assert.deepEqual(library.listTags(split.track.id), ["keep"]);
+
+    const anotherLive = library.upsertTrack({
+      title: "Song (Live)",
+      artist: "Artist",
+      source: { provider: "youtube", sourceId: "live-split-2" },
+    });
+    assert.notEqual(anotherLive.track.id, studio.track.id);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

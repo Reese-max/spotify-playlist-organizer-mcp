@@ -41,6 +41,18 @@ test("live, cover, remix, and remaster change the canonical key", () => {
   const plainLive = canonicalizeSource({ title: "Song (Live)", artist: "Artist" });
   assert.equal(wembley.version, "live:at wembley");
   assert.equal(plainLive.version, "live");
+
+  const hintedLive = canonicalizeSource({
+    title: "Song",
+    artist: "Artist",
+    sourceType: "live",
+  });
+  assert.equal(hintedLive.version, "live");
+  assert.notEqual(hintedLive.canonicalKey, base.canonicalKey);
+  assert.equal(
+    canonicalizeSource({ title: "Song", artist: "Artist", versionType: "cover" }).version,
+    "cover",
+  );
 });
 
 test("punctuation, case, and feat. differences do not change the key", () => {

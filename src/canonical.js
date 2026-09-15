@@ -23,6 +23,19 @@ export const SOURCE_TYPES = Object.freeze([
   "unknown",
 ]);
 
+export const VERSION_TYPES = Object.freeze([
+  "live",
+  "cover",
+  "remix",
+  "remaster",
+  "acoustic",
+  "instrumental",
+  "karaoke",
+  "demo",
+  "spedup",
+  "slowed",
+]);
+
 // Version qualifiers describe a different performance/recording of a song, so
 // they are part of the canonical key: a "live" source must never silently merge
 // into the studio track.
@@ -206,9 +219,14 @@ export function canonicalizeSource(input = {}) {
   const normalizedTitle = normalizeText(working) || normalizeText(rawTitle);
   const normalizedArtist = normalizeArtist(artist) || normalizeArtist(channelTitle);
 
-  const version = versions.length
+  let version = versions.length
     ? (versions[0].detail ? `${versions[0].type}:${versions[0].detail}` : versions[0].type)
     : "";
+  if (!version) {
+    const fromSource = VERSION_TYPES.includes(sourceTypeHint) ? sourceTypeHint : "";
+    const fromHint = normalizeText(versionTypeHint).replace(WHITESPACE, "_");
+    version = fromSource || (VERSION_TYPES.includes(fromHint) ? fromHint : "");
+  }
 
   let sourceType = SOURCE_TYPES.includes(sourceTypeHint) ? sourceTypeHint : null;
   if (!sourceType && versionTypeHint) {

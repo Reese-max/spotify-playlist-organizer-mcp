@@ -408,7 +408,6 @@ export class MusicLibrary {
         .all(key);
       const keeper = rows[0].id;
       for (const { id } of rows.slice(1)) {
-        this.db.prepare("UPDATE tracks SET needs_review = 1 WHERE id = ?").run(id);
         this.db
           .prepare(
             `INSERT OR IGNORE INTO identity_candidates
@@ -459,6 +458,7 @@ export class MusicLibrary {
         const params = [now];
         for (const [field, column] of Object.entries(TRACK_COLUMNS)) {
           if (normalized.fields[field] === undefined) continue;
+          if (field === "canonicalTitle" || field === "artist") continue;
           assignments.push(`${column} = ?`);
           params.push(normalized.fields[field]);
         }
@@ -513,12 +513,12 @@ export class MusicLibrary {
             .prepare(
               `UPDATE tracks SET updated_at = ?,
                  artist = COALESCE(artist, ?),
-                 language = COALESCE(?, language),
-                 genre = COALESCE(?, genre),
-                 mood = COALESCE(?, mood),
-                 activity = COALESCE(?, activity),
-                 energy = COALESCE(?, energy),
-                 era = COALESCE(?, era)
+                 language = COALESCE(language, ?),
+                 genre = COALESCE(genre, ?),
+                 mood = COALESCE(mood, ?),
+                 activity = COALESCE(activity, ?),
+                 energy = COALESCE(energy, ?),
+                 era = COALESCE(era, ?)
                WHERE id = ?`,
             )
             .run(
@@ -646,14 +646,26 @@ export class MusicLibrary {
          ORDER BY t.id`,
       )
       .all(canonical.canonicalKey);
-    if (aliasRows.length) {
+    const unlockedAliases = aliasRows.filter((row) => !row.identity_locked);
+    if (unlockedAliases.length) {
       return {
         action: "attach",
-        target: aliasRows[0],
+        target: unlockedAliases[0],
         matchedBy: "canonical_alias",
         confidence: 1,
-        collisions: aliasRows.slice(1),
+        collisions: unlockedAliases.filter((row) => row.id !== unlockedAliases[0].id),
         candidates: [],
+      };
+    }
+    if (aliasRows.length) {
+      return {
+        action: "review",
+        matchedBy: "canonical_alias",
+        candidates: aliasRows.map((row) => ({
+          trackId: row.id,
+          confidence: 1,
+          reason: "identity_locked",
+        })),
       };
     }
 
@@ -965,7 +977,16 @@ export class MusicLibrary {
       : overrides.canonicalTitle;
     const title = titleInput ?? original.canonicalTitle;
     const artist = overrides.artist !== undefined ? overrides.artist : original.artist;
-    const canonical = canonicalizeSource({ title, artist });
+    const movedSources = this.db
+      .prepare(
+        `SELECT id, source_type FROM track_sources WHERE track_id = ? AND id IN (${placeholders})`,
+      )
+      .all(original.id, ...uniqueIds);
+    const canonical = canonicalizeSource({
+      title,
+      artist,
+      sourceType: movedSources[0]?.source_type,
+    });
     const now = new Date().toISOString();
 
     let newTrackId;
@@ -998,6 +1019,18 @@ export class MusicLibrary {
       this.db
         .prepare(`UPDATE track_sources SET track_id = ? WHERE id IN (${placeholders})`)
         .run(newTrackId, ...uniqueIds);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO track_playlists (track_id, playlist_id, added_at)
+           SELECT ?, playlist_id, added_at FROM track_playlists WHERE track_id = ?`,
+        )
+        .run(newTrackId, original.id);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO track_tags (track_id, tag_id)
+           SELECT ?, tag_id FROM track_tags WHERE track_id = ?`,
+        )
+        .run(newTrackId, original.id);
       // A split revokes earlier merge memory: the original track must stop
       // claiming the moved sources' canonical key.
       this.db

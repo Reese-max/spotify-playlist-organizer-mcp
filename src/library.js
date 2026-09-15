@@ -1692,7 +1692,25 @@ export class MusicLibrary {
         localId = trackIdByKey.get(row.canonical_key);
       }
       plan.push({ row, localId, action: localId == null ? "insert" : "exists" });
-      if (localId != null) idMap.set(row.id, localId);
+      // Inserts reuse the backup id, so every planned track maps immediately —
+      // identity candidates can resolve both ends before any write happens.
+      idMap.set(row.id, localId ?? row.id);
+    }
+
+    // Identity candidates: remap both ends through the id map; rows whose
+    // tracks were refused (conflict/unsupported) can't be restored either.
+    const candidatesByTrack = new Map();
+    for (const row of data.identityCandidates) {
+      const trackId = idMap.get(row.track_id);
+      const candidateId = idMap.get(row.candidate_track_id);
+      if (trackId == null || candidateId == null) {
+        counts.unsupported += 1;
+        continue;
+      }
+      if (hasCandidate(trackId, candidateId)) continue;
+      const list = candidatesByTrack.get(row.track_id) ?? [];
+      list.push({ ...row, track_id: trackId, candidate_track_id: candidateId });
+      candidatesByTrack.set(row.track_id, list);
     }
 
     // Second pass: for existing tracks, decide update vs unchanged by checking
@@ -1723,6 +1741,7 @@ export class MusicLibrary {
         children.tags.push(...tags.map((row) => ({ trackId: backupId, name: row.name })));
         children.playlists.push(...playlists.map((entry2) => ({ trackId: backupId, playlist: entry2.playlist, addedAt: entry2.link.added_at })));
         children.aliases.push(...aliases.map((row) => ({ ...row, track_id: backupId })));
+        children.candidates.push(...(candidatesByTrack.get(backupId) ?? []));
         continue;
       }
 
@@ -1751,8 +1770,9 @@ export class MusicLibrary {
       const missingSync = syncKeys.filter(
         (key) => !hasSyncKey(key.replace(/\.(\d+)$/, `.${localId}`)),
       );
+      const missingCandidates = candidatesByTrack.get(backupId) ?? [];
       const missing = missingSources.length + missingTags.length + missingPlaylists.length
-        + missingAliases.length + missingSync.length;
+        + missingAliases.length + missingSync.length + missingCandidates.length;
       if (missing === 0) counts.unchanged += 1;
       else {
         counts.update += 1;
@@ -1760,20 +1780,7 @@ export class MusicLibrary {
         children.tags.push(...missingTags.map((row) => ({ trackId: localId, name: row.name })));
         children.playlists.push(...missingPlaylists.map((entry2) => ({ trackId: localId, playlist: entry2.playlist, addedAt: entry2.link.added_at })));
         children.aliases.push(...missingAliases.map((row) => ({ ...row, track_id: localId })));
-      }
-    }
-
-    // Identity candidates where both ends mapped.
-    for (const row of data.identityCandidates) {
-      const trackId = idMap.get(row.track_id);
-      const candidateId = idMap.get(row.candidate_track_id);
-      if (trackId == null || candidateId == null) {
-        counts.unsupported += 1;
-        continue;
-      }
-      if (!hasCandidate(trackId, candidateId)) {
-        children.candidates.push({ ...row, track_id: trackId, candidate_track_id: candidateId });
-        if (!apply) continue;
+        children.candidates.push(...missingCandidates);
       }
     }
 
@@ -1829,7 +1836,6 @@ export class MusicLibrary {
           row.normalized_artist ?? null, row.identity_locked ? 1 : 0,
           row.needs_review ? 1 : 0,
         );
-        idMap.set(row.id, row.id);
       }
 
       for (const source of children.sources) {

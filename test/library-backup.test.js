@@ -189,6 +189,41 @@ test("restore never triggers provider writes and marks sync state as a snapshot"
   assert.match(result.nextStep, /sync_youtube/);
 });
 
+test("restore preserves manual identity decisions on freshly inserted tracks", async (t) => {
+  const { library: source, saved } = await seededLibrary(t);
+  const second = source.getTrackBySource("youtube", VID_2);
+  source.db
+    .prepare(
+      `INSERT INTO identity_candidates (track_id, candidate_track_id, confidence, reason, decided_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(saved.track.id, second.id, 0.62, "possible_duplicate", "2026-01-01T00:00:00.000Z");
+  const backup = exportLibrary(source, { format: "json" });
+
+  const { directory, filePath } = await tempLibrary();
+  const target = openLibrary(filePath);
+  t.after(async () => {
+    target.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const preview = restoreLibrary(target, backup, { mode: "preview" });
+  assert.equal(preview.counts.unsupported, 0, "candidates between restored tracks must not be unsupported");
+
+  restoreLibrary(target, backup, { mode: "apply" });
+  const restoredFirst = target.getTrackBySource("youtube", VID_1);
+  const restoredSecond = target.getTrackBySource("youtube", VID_2);
+  const row = target.db
+    .prepare(
+      `SELECT confidence, reason FROM identity_candidates
+       WHERE track_id = ? AND candidate_track_id = ?`,
+    )
+    .get(restoredFirst.id, restoredSecond.id);
+  assert.ok(row, "identity_candidates row must survive a restore onto an empty library");
+  assert.equal(row.confidence, 0.62);
+  assert.equal(row.reason, "possible_duplicate");
+});
+
 test("CSV export is a readable analysis format, not a lossless backup", async (t) => {
   const { library } = await seededLibrary(t);
   const csv = exportLibrary(library, { format: "csv" });

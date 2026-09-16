@@ -1134,6 +1134,39 @@ export class MusicLibrary {
     }
   }
 
+  dismissIdentityCandidate(trackId, candidateTrackId) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    const candidate = this.requireTrack(candidateTrackId);
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          `DELETE FROM identity_candidates
+           WHERE (track_id = ? AND candidate_track_id = ?)
+              OR (track_id = ? AND candidate_track_id = ?)`,
+        )
+        .run(track.id, candidate.id, candidate.id, track.id);
+      for (const id of [track.id, candidate.id]) {
+        const remaining = this.db
+          .prepare(
+            `SELECT COUNT(*) AS count FROM identity_candidates
+             WHERE track_id = ? OR candidate_track_id = ?`,
+          )
+          .get(id, id).count;
+        this.db
+          .prepare("UPDATE tracks SET needs_review = ?, updated_at = ? WHERE id = ?")
+          .run(remaining ? 1 : 0, now, id);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return { trackId: track.id, candidateTrackId: candidate.id };
+  }
+
   requireTrack(trackId) {
     const id = Number(trackId);
     if (!Number.isInteger(id)) {

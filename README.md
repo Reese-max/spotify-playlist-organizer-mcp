@@ -176,6 +176,18 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 - `previewIdentity(input)` 為唯讀預覽：回傳正規化結果與將採用的去重決策，不寫入任何資料。
 - `identityReviewQueue()` 列出所有待審候選配對（含信心值與原因）；`setNeedsReview(trackId, false)` 可手動清除標記。
 
+## 識別審核 MCP 工具
+
+上述 domain 能力已透過 MCP 工具開放（`src/identity-admin.js`，全部 preview-first、只用穩定 ID，不碰 provider playlist）：
+
+| 工具 | 行為 |
+|---|---|
+| `list_identity_reviews` | 列出待審候選配對：confidence、reason、雙方 exact sources |
+| `merge_music_tracks` | preview 列出 sources/tags/playlists/aliases 變化與 `from` 刪除；apply 併入並記住 canonical key alias |
+| `split_music_track` | preview 驗證 `sourceIds`（track_sources row id）歸屬並列出移動項；apply 拆出 `identity_locked` 新曲目，保留 tags/playlists |
+| `resolve_identity_review` | preview/apply 將配對駁回為 distinct；`lock:true` 同時鎖定雙方避免再次被自動合併 |
+| `set_identity_lock` | 切換 `identity_locked`（回報 before/after）；鎖定後相同來源只進 review 不自動掛載 |
+
 ## 需求
 
 - Node.js 24 或更新版本（`node:sqlite`）。

@@ -35,6 +35,13 @@ import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
 import { exportLibrary, restoreLibrary } from "./library-backup.js";
 import {
+  listIdentityReviews,
+  mergeMusicTracks,
+  resolveIdentityReview,
+  setIdentityLock,
+  splitMusicTrack,
+} from "./identity-admin.js";
+import {
   deletePlaylist,
   getPlaylistAdmin,
   listPlaylistItemsAdmin,
@@ -856,6 +863,69 @@ export function createServer(library) {
       }),
     },
     safeTool((args) => listUnsyncedMusic(library, args)),
+  );
+
+  server.registerTool(
+    "list_identity_reviews",
+    {
+      description: "Read-only list of pending identity-review pairs: possible-match candidates with confidence, reason, and both sides' exact sources.",
+      inputSchema: z.object({}),
+    },
+    safeTool(() => listIdentityReviews(library)),
+  );
+
+  server.registerTool(
+    "merge_music_tracks",
+    {
+      description: "Preview or apply merging one library track into another. Sources, tags, playlists, and aliases move to the kept track; the merged-away track is deleted. Provider playlists are never touched.",
+      inputSchema: z.object({
+        intoTrackId: z.number().int().min(1),
+        fromTrackId: z.number().int().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => mergeMusicTracks(library, args)),
+  );
+
+  server.registerTool(
+    "split_music_track",
+    {
+      description: "Preview or apply moving exact track_sources rows out of a track into a new identity-locked track. sourceIds are track_sources row IDs, not video IDs.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        sourceIds: z.array(z.number().int().min(1)).min(1).max(100),
+        fields: z.record(z.string(), z.string()).optional(),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => splitMusicTrack(library, args)),
+  );
+
+  server.registerTool(
+    "resolve_identity_review",
+    {
+      description: "Preview or apply dismissing an identity-candidate pair as distinct tracks. Optionally locks both tracks so future sources never silently auto-merge them.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        candidateTrackId: z.number().int().min(1),
+        decision: z.enum(["distinct"]).default("distinct"),
+        lock: z.boolean().default(false),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => resolveIdentityReview(library, args)),
+  );
+
+  server.registerTool(
+    "set_identity_lock",
+    {
+      description: "Set or clear the identity lock on one library track. Locked tracks never accept silent auto-merges — identical sources become review candidates instead.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        locked: z.boolean().default(true),
+      }),
+    },
+    safeTool((args) => setIdentityLock(library, args)),
   );
 
   server.registerTool(

@@ -11,6 +11,7 @@ import {
   parseLink,
   parsePlaylistId,
 } from "./core.js";
+import { loadEnvFile } from "./env.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "./spotify.js";
 import {
   parseYouTubePlaylistReference,
@@ -1043,6 +1044,7 @@ export function createServer(library) {
 }
 
 export async function main(env = process.env) {
+  if (env === process.env) loadEnvFile();
   const library = openLibrary(env);
   const server = createServer(library);
   const transport = new StdioServerTransport();

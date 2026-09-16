@@ -19,6 +19,7 @@ import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { loadEnvFile } from "./env.js";
 import { LibraryError, openLibrary } from "./library.js";
 import {
   getMusic,
@@ -335,6 +336,7 @@ function bearerToken(request) {
 }
 
 export async function main(env = process.env) {
+  if (env === process.env) loadEnvFile();
   const library = openLibrary(env);
   const host = env.MUSIC_HTTP_HOST || "127.0.0.1";
   const port = Number(env.MUSIC_HTTP_PORT || 8741);

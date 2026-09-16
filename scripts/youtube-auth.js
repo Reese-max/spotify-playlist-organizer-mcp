@@ -3,14 +3,19 @@ import http from "node:http";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { CredentialStore, credentialsFromTokenResponse } from "../src/credentials.js";
+import { loadEnvFile } from "../src/env.js";
 import { awaitWithDeadline, fetchWithDeadline, timeoutFromEnv } from "../src/http.js";
+
+loadEnvFile();
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 
 function required(name) {
   const value = process.env[name]?.trim();
-  if (!value) throw new Error(name + " is required.");
+  if (!value) {
+    throw new Error(name + " is required — set it in .env or the environment.");
+  }
   return value;
 }
 

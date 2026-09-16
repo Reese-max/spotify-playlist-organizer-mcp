@@ -57,7 +57,13 @@ test("starts an MCP stdio server and answers initialize", async () => {
     assert.equal(response.result.serverInfo.name, "music-playlist-organizer");
   } finally {
     child.kill();
-    await once(child, "exit").catch(() => {});
+    let timer;
+    const exited = await Promise.race([
+      once(child, "exit").then(() => true).catch(() => true),
+      new Promise((resolveWait) => { timer = setTimeout(() => resolveWait(false), 5_000); }),
+    ]);
+    clearTimeout(timer);
+    if (!exited) child.kill("SIGKILL");
     await rm(directory, { recursive: true, force: true });
   }
 });

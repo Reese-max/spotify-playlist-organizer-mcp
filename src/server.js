@@ -1048,6 +1048,7 @@ export async function main(env = process.env) {
   const transport = new StdioServerTransport();
   const shutdown = () => {
     try { library.close(); } catch {}
+    process.exit(0);
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

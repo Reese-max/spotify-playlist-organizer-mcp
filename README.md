@@ -309,7 +309,7 @@ stdio MCP 與 HTTP facade 共用同一套 service layer；手機／Web 收藏介
 npm test                # 每個 commit 必跑（node:test）
 npm run smoke           # MCP stdio server 啟動煙霧測試
 npm run lint            # ESLint flat config（CI 也跑）
-npm run test:coverage   # 測試 + V8 coverage + 棘輪門檻（行≥80/分支≥75/函數≥90）
+npm run test:coverage   # 測試 + V8 coverage + 棘輪門檻（行≥80/分支≥75/函數≥88，校準於 CI Node 24）
 npm run crap            # CRAP 分數：cyclomatic complexity × coverage
 npm run crap -- --gate 30   # 有任何函數 CRAP > 30 就 exit 1（可做門檻）
 npm run mutate          # Stryker mutation testing（全檔很慢，見下）

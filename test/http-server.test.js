@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -313,4 +314,49 @@ test("reconcile endpoint resolves a track by exact ids over HTTP", async (t) => 
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.sync.state, "synced");
+});
+
+test("main() boots a real server that serves health and session exchange", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "music-http-main-"));
+  const port = 18000 + Math.floor(Math.random() * 2000);
+  const child = spawn(process.execPath, ["src/http-server.js"], {
+    env: {
+      ...process.env,
+      MUSIC_HTTP_PORT: String(port),
+      MUSIC_HTTP_BOOTSTRAP_TOKEN: "test-bootstrap-token",
+      MUSIC_LIBRARY_FILE: path.join(directory, "library.db"),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => {
+    child.kill("SIGKILL");
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+        if (stderr.includes("listening on")) resolve();
+      });
+      child.once("exit", (code) =>
+        reject(new Error(`server exited ${code} before listening: ${stderr}`)));
+      child.once("error", reject);
+      setTimeout(() => reject(new Error(`server never listened: ${stderr}`)), 10_000);
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.status, 200);
+    const res = await fetch(`${base}/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "test-bootstrap-token" }),
+    });
+    assert.equal(res.status, 200);
+    const sessionBody = await res.json();
+    assert.ok(sessionBody.token);
+  } finally {
+    child.kill("SIGKILL");
+    await new Promise((resolve) => child.once("exit", resolve));
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });

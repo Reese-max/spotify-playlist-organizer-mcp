@@ -281,7 +281,8 @@ export class YouTubeClient {
 
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const queryString = asQuery(queryParams);
-      const url = API_BASE + path + (queryString ? "?" + queryString : "");
+      const apiBase = this.env.YOUTUBE_API_BASE?.trim() || API_BASE;
+      const url = apiBase + path + (queryString ? "?" + queryString : "");
       const response = await fetchWithDeadline(this.fetch, url, {
         method,
         headers,

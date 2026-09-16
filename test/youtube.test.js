@@ -254,18 +254,53 @@ test("renamePlaylist and deletePlaylist issue exact-ID PUT/DELETE calls", async 
     if (options.method === "PUT") {
       return response({ id: "PL_RENAMED001", snippet: { title: "New Name" }, status: {} });
     }
-    return response(null);
+    if (options.method === "DELETE") {
+      return response(null);
+    }
+    return response({ items: [{ id: "PL_RENAMED001", snippet: { title: "Old Name" } }] });
   });
 
   const renamed = await client.renamePlaylist("PL_RENAMED001", "New Name");
   const deleted = await client.deletePlaylist("PL_RENAMED001");
   assert.equal(renamed.name, "New Name");
-  assert.equal(calls[0].method, "PUT");
-  assert.equal(calls[0].body.id, "PL_RENAMED001");
-  assert.equal(calls[0].body.snippet.title, "New Name");
-  assert.equal(calls[1].method, "DELETE");
-  assert.match(calls[1].url, /id=PL_RENAMED001/);
+  const put = calls.find((call) => call.method === "PUT");
+  assert.equal(put.body.id, "PL_RENAMED001");
+  assert.equal(put.body.snippet.title, "New Name");
+  const del = calls.find((call) => call.method === "DELETE");
+  assert.match(del.url, /id=PL_RENAMED001/);
   assert.deepEqual(deleted, { deleted: true, playlistId: "PL_RENAMED001" });
+});
+
+test("renamePlaylist preserves existing description and mutable snippet fields", async () => {
+  const puts = [];
+  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
+    if (options.method === "PUT") {
+      puts.push(JSON.parse(options.body));
+      return response({
+        id: "PL_KEEP000001",
+        snippet: { title: "New Name", description: "keep me", tags: ["lofi"] },
+        status: {},
+      });
+    }
+    return response({
+      items: [{
+        id: "PL_KEEP000001",
+        snippet: {
+          title: "Old Name",
+          description: "keep me",
+          tags: ["lofi"],
+          channelTitle: "Some Channel",
+        },
+      }],
+    });
+  });
+
+  const renamed = await client.renamePlaylist("PL_KEEP000001", "New Name");
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].snippet.title, "New Name");
+  assert.equal(puts[0].snippet.description, "keep me");
+  assert.deepEqual(puts[0].snippet.tags, ["lofi"]);
+  assert.equal(renamed.description, "keep me");
 });
 
 test("revokeUserCredentials revokes the token and clears env credentials", async () => {

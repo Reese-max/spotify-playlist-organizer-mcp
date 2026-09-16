@@ -500,11 +500,20 @@ export class YouTubeClient {
   }
 
   async renamePlaylist(playlistId, name, { signal } = {}) {
+    // playlists.update replaces the whole snippet part, so the writable
+    // fields we are not changing must be sent back or they are cleared.
+    const current = await this.request("/playlists", {
+      auth: "user",
+      query: { part: "snippet", id: playlistId, maxResults: 1 },
+      signal,
+    });
+    const item = current.items?.[0];
+    if (!item) throw new Error("YouTube playlist was not found: " + playlistId);
     const data = await this.request("/playlists", {
       method: "PUT",
       auth: "user",
       query: { part: "snippet" },
-      body: { id: playlistId, snippet: { title: name } },
+      body: { id: playlistId, snippet: { ...(item.snippet ?? {}), title: name } },
       signal,
     });
     return youtubePlaylistSummary(data);

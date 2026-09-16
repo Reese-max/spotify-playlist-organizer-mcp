@@ -1,3 +1,5 @@
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
@@ -9,15 +11,44 @@ import {
   parseLink,
   parsePlaylistId,
 } from "./core.js";
+import { loadEnvFile } from "./env.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "./spotify.js";
 import {
   parseYouTubePlaylistReference,
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
-
-const client = new SpotifyClient();
-const youtubeClient = new YouTubeClient();
+import { openLibrary } from "./library.js";
+import { classifyMusic } from "./classify.js";
+import { saveMusic } from "./save-music.js";
+import {
+  getMusic,
+  listMusic,
+  listUnsyncedMusic,
+  recentMusic,
+  reclassifyMusic,
+  removeMusic,
+  searchLibrary,
+  updateMusicClassification,
+  updateMusicTags,
+} from "./library-query.js";
+import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
+import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
+import { exportLibrary, restoreLibrary } from "./library-backup.js";
+import {
+  listIdentityReviews,
+  mergeMusicTracks,
+  resolveIdentityReview,
+  setIdentityLock,
+  splitMusicTrack,
+} from "./identity-admin.js";
+import {
+  deletePlaylist,
+  getPlaylistAdmin,
+  listPlaylistItemsAdmin,
+  removeFromPlaylist,
+  renamePlaylistAdmin,
+} from "./playlist-admin.js";
 
 function jsonResult(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
@@ -46,7 +77,7 @@ function safeTool(handler) {
   };
 }
 
-async function loadPlaylist(playlist, { signal } = {}) {
+async function loadPlaylist(client, playlist, { signal } = {}) {
   const id = parsePlaylistId(playlist);
   const [details, items] = await Promise.all([
     client.getPlaylist(id, { signal }),
@@ -68,14 +99,14 @@ function catalogQuery(value) {
   return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(compact) ? "isrc:" + compact : value;
 }
 
-async function replaceWithChunks(id, uris, { signal } = {}) {
+async function replaceWithChunks(client, id, uris, { signal } = {}) {
   await client.replacePlaylistItems(id, uris.slice(0, 100), { signal });
   for (let offset = 100; offset < uris.length; offset += 100) {
     await client.addPlaylistItems(id, uris.slice(offset, offset + 100), { signal });
   }
 }
 
-async function loadYouTubePlaylist(reference, { allowMissing = false, signal } = {}) {
+async function loadYouTubePlaylist(youtubeClient, reference, { allowMissing = false, signal } = {}) {
   const parsed = parseYouTubePlaylistReference(reference);
   if (parsed.id) {
     const [details, items] = await Promise.all([
@@ -100,7 +131,7 @@ async function loadYouTubePlaylist(reference, { allowMissing = false, signal } =
   };
 }
 
-async function resolveYouTubeMatch(input, { limit = 5, regionCode, signal, videoId } = {}) {
+async function resolveYouTubeMatch(youtubeClient, input, { limit = 5, regionCode, signal, videoId } = {}) {
   if (videoId) {
     return {
       source: {
@@ -139,8 +170,21 @@ function youtubeDuplicate(loaded, videoId) {
   return loaded.items.find((item) => item.id === videoId) ?? null;
 }
 
-function createServer() {
+export function createServer(library) {
+  // Constructed here — after main() has loaded .env — so constructor-snapshotted
+  // configuration (credential file path, timeouts, retry bounds) sees it.
+  const client = new SpotifyClient();
+  const youtubeClient = new YouTubeClient();
   const server = new McpServer({ name: "music-playlist-organizer", version: "0.2.0" });
+
+  server.registerTool(
+    "library_status",
+    {
+      description: "Report the local music library path, schema version, and track count. Never returns secrets or row contents.",
+      inputSchema: z.object({}),
+    },
+    safeTool(() => library.status()),
+  );
 
   server.registerTool(
     "spotify_search_tracks",
@@ -245,7 +289,7 @@ function createServer() {
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
     safeTool(async ({ playlist }, extra) => {
-      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       return {
         playlist: {
           id: loaded.id,
@@ -267,7 +311,7 @@ function createServer() {
       }),
     },
     safeTool(async ({ playlist, rules }, extra) => {
-      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       return {
         mode: "preview",
@@ -294,7 +338,7 @@ function createServer() {
       }),
     },
     safeTool(async ({ playlist, mode, rules, public: isPublic, prefix }, extra) => {
-      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       const plan = Object.entries(classification.categories)
         .map(([category, tracks]) => ({
@@ -327,7 +371,7 @@ function createServer() {
           isPublic,
           { signal: extra?.signal },
         );
-        await replaceWithChunks(target.id, entry.uris, { signal: extra?.signal });
+        await replaceWithChunks(client, target.id, entry.uris, { signal: extra?.signal });
         results.push({
           category: entry.category,
           trackCount: entry.uris.length,
@@ -376,7 +420,7 @@ function createServer() {
       }),
     },
     safeTool(async ({ input, limit, regionCode }, extra) => (
-      resolveYouTubeMatch(input, { limit, regionCode, signal: extra?.signal })
+      resolveYouTubeMatch(youtubeClient, input, { limit, regionCode, signal: extra?.signal })
     )),
   );
 
@@ -395,7 +439,7 @@ function createServer() {
         try {
           results.push({
             input,
-            ...(await resolveYouTubeMatch(input, { limit: 5, regionCode, signal: extra?.signal })),
+            ...(await resolveYouTubeMatch(youtubeClient, input, { limit: 5, regionCode, signal: extra?.signal })),
           });
         } catch (error) {
           if (error?.code === "CALLER_CANCELLED") throw error;
@@ -462,7 +506,7 @@ function createServer() {
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
     safeTool(async ({ playlist }, extra) => {
-      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadYouTubePlaylist(youtubeClient, playlist, { signal: extra?.signal });
       return {
         playlist: youtubePlaylistInfo(loaded, playlist),
         ...findDuplicates(loaded.items),
@@ -480,7 +524,7 @@ function createServer() {
       }),
     },
     safeTool(async ({ playlist, rules }, extra) => {
-      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadYouTubePlaylist(youtubeClient, playlist, { signal: extra?.signal });
       return {
         mode: "preview",
         playlist: youtubePlaylistInfo(loaded, playlist),
@@ -501,7 +545,7 @@ function createServer() {
       }),
     },
     safeTool(async ({ input, videoId, playlist, mode }, extra) => {
-      const resolved = await resolveYouTubeMatch(input, { limit: 5, signal: extra?.signal, videoId });
+      const resolved = await resolveYouTubeMatch(youtubeClient, input, { limit: 5, signal: extra?.signal, videoId });
       if (mode === "apply" && resolved.source.kind === "query" && !videoId) {
         return {
           mode,
@@ -511,7 +555,7 @@ function createServer() {
           message: "Free-text apply requires videoId from the selected preview candidate.",
         };
       }
-      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadYouTubePlaylist(youtubeClient, playlist, { signal: extra?.signal });
       const duplicate = youtubeDuplicate(loaded, resolved.match.id);
       const result = {
         mode,
@@ -580,7 +624,7 @@ function createServer() {
       privacyStatus,
       dedupe,
     }, extra) => {
-      const resolved = await resolveYouTubeMatch(input, { limit: 5, signal: extra?.signal, videoId });
+      const resolved = await resolveYouTubeMatch(youtubeClient, input, { limit: 5, signal: extra?.signal, videoId });
       if (mode === "apply" && resolved.source.kind === "query" && !videoId) {
         return {
           mode,
@@ -594,7 +638,7 @@ function createServer() {
       const effectivePrefix = prefix || youtubeClient.env.YOUTUBE_PLAYLIST_PREFIX || "";
       const generatedName = boundedName((effectivePrefix ? effectivePrefix + " · " : "") + selectedCategory);
       const targetReference = playlist ?? generatedName;
-      const loaded = await loadYouTubePlaylist(targetReference, {
+      const loaded = await loadYouTubePlaylist(youtubeClient, targetReference, {
         allowMissing: true,
         signal: extra?.signal,
       });
@@ -673,9 +717,441 @@ function createServer() {
     }),
   );
 
+  server.registerTool(
+    "save_music",
+    {
+      description: "Unified entry point: identify a song from a name or YouTube/YouTube Music link, canonicalize, dedupe, classify, save to the local music library, and optionally sync to a YouTube playlist. Returns a complete receipt; previews by default.",
+      inputSchema: z.object({
+        input: z.string().min(1),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
+        tags: z.array(z.string().min(1).max(200)).max(50).optional(),
+        category: z.string().min(1).max(80).optional(),
+        playlist: z.string().min(1).optional(),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        syncToYouTube: z.boolean().default(true),
+      }),
+    },
+    safeTool((args, extra) => (
+      saveMusic({ youtube: youtubeClient, library }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "classify_track",
+    {
+      description: "Preview multi-dimensional music classification (genre, mood, language, activity, energy, era, artist, custom_tags) with per-value source and confidence. Read-only; writes nothing.",
+      inputSchema: z.object({
+        title: z.string().min(1),
+        artist: z.string().optional(),
+        channelTitle: z.string().optional(),
+        description: z.string().optional(),
+        userClassification: z.object({
+          genre: z.union([z.string(), z.array(z.string())]).optional(),
+          mood: z.union([z.string(), z.array(z.string())]).optional(),
+          language: z.union([z.string(), z.array(z.string())]).optional(),
+          activity: z.union([z.string(), z.array(z.string())]).optional(),
+          energy: z.union([z.string(), z.array(z.string())]).optional(),
+          era: z.union([z.string(), z.array(z.string())]).optional(),
+          artist: z.union([z.string(), z.array(z.string())]).optional(),
+          custom_tags: z.union([z.string(), z.array(z.string())]).optional(),
+        }).optional(),
+      }),
+    },
+    safeTool(async (args) => ({ mode: "preview", ...(await classifyMusic(args)) })),
+  );
+
+  const pagingSchema = {
+    limit: z.number().int().min(1).max(100).default(20),
+    offset: z.number().int().min(0).default(0),
+  };
+
+  server.registerTool(
+    "search_library",
+    {
+      description: "Read-only search of the local music library by title, artist, tag, genre, mood, language, or activity. Bounded pagination.",
+      inputSchema: z.object({
+        title: z.string().min(1).optional(),
+        artist: z.string().min(1).optional(),
+        tag: z.string().min(1).optional(),
+        genre: z.string().min(1).optional(),
+        mood: z.string().min(1).optional(),
+        language: z.string().min(1).optional(),
+        activity: z.string().min(1).optional(),
+        ...pagingSchema,
+      }),
+    },
+    safeTool((args) => searchLibrary(library, args)),
+  );
+
+  server.registerTool(
+    "list_music",
+    {
+      description: "Read-only listing of the local music library, newest first, with bounded pagination.",
+      inputSchema: z.object({ ...pagingSchema }),
+    },
+    safeTool((args) => listMusic(library, args)),
+  );
+
+  server.registerTool(
+    "recent_music",
+    {
+      description: "Read-only list of the most recently saved library tracks. Bounded limit.",
+      inputSchema: z.object({
+        limit: z.number().int().min(1).max(100).default(20),
+      }),
+    },
+    safeTool((args) => recentMusic(library, args)),
+  );
+
+  server.registerTool(
+    "get_music",
+    {
+      description: "Read a single library track by its local track ID: canonical fields, sources, tags, playlists, stored classification, and sync state.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+      }),
+    },
+    safeTool((args) => getMusic(library, args)),
+  );
+
+  server.registerTool(
+    "update_music_tags",
+    {
+      description: "Add and/or remove custom tags on one library track. Never overwrites classification dimensions or user-set metadata.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        add: z.array(z.string().min(1).max(200)).max(50).optional(),
+        remove: z.array(z.string().min(1).max(200)).max(50).optional(),
+      }),
+    },
+    safeTool((args) => updateMusicTags(library, args)),
+  );
+
+  server.registerTool(
+    "update_music_classification",
+    {
+      description: "Preview or apply a persistent user edit to a track's classification dimensions. `set` values are validated through the taxonomy (unknown values divert to custom tags and review); `clear` explicitly removes user-set dimensions. User values carry provenance and survive reclassify.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        set: z.record(
+          z.enum(["genre", "mood", "language", "activity", "energy", "era", "artist", "custom_tags"]),
+          z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+        ).optional(),
+        clear: z.array(
+          z.enum(["genre", "mood", "language", "activity", "energy", "era", "artist", "custom_tags"]),
+        ).max(8).optional(),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => updateMusicClassification(library, args)),
+  );
+
+  server.registerTool(
+    "reclassify_music",
+    {
+      description: "Re-run automatic classification for one library track. User-set dimensions and tags are preserved; returns the before/after diff.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+      }),
+    },
+    safeTool((args) => reclassifyMusic(library, args)),
+  );
+
+  server.registerTool(
+    "remove_music",
+    {
+      description: "Preview or apply removal of a library track. Local deletion and YouTube playlist-item deletion are independent effects: each must be authorized explicitly and is reported separately.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        local: z.boolean().default(false),
+        youtubePlaylist: z.string().min(1).optional(),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      removeMusic({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "list_unsynced_music",
+    {
+      description: "Read-only list of library tracks needing attention: not synced to any provider playlist, identity conflicts, or provider-unavailable sync markers.",
+      inputSchema: z.object({
+        reason: z.enum(["not_synced", "identity_conflict", "provider_unavailable"]).optional(),
+        ...pagingSchema,
+      }),
+    },
+    safeTool((args) => listUnsyncedMusic(library, args)),
+  );
+
+  server.registerTool(
+    "list_identity_reviews",
+    {
+      description: "Read-only list of pending identity-review pairs: possible-match candidates with confidence, reason, and both sides' exact sources.",
+      inputSchema: z.object({}),
+    },
+    safeTool(() => listIdentityReviews(library)),
+  );
+
+  server.registerTool(
+    "merge_music_tracks",
+    {
+      description: "Preview or apply merging one library track into another. Sources, tags, playlists, and aliases move to the kept track; the merged-away track is deleted. Provider playlists are never touched.",
+      inputSchema: z.object({
+        intoTrackId: z.number().int().min(1),
+        fromTrackId: z.number().int().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => mergeMusicTracks(library, args)),
+  );
+
+  server.registerTool(
+    "split_music_track",
+    {
+      description: "Preview or apply moving exact track_sources rows out of a track into a new identity-locked track. sourceIds are track_sources row IDs, not video IDs.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        sourceIds: z.array(z.number().int().min(1)).min(1).max(100),
+        fields: z.record(z.string(), z.string()).optional(),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => splitMusicTrack(library, args)),
+  );
+
+  server.registerTool(
+    "resolve_identity_review",
+    {
+      description: "Preview or apply dismissing an identity-candidate pair as distinct tracks. Optionally locks both tracks so future sources never silently auto-merge them.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        candidateTrackId: z.number().int().min(1),
+        decision: z.enum(["distinct"]).default("distinct"),
+        lock: z.boolean().default(false),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => resolveIdentityReview(library, args)),
+  );
+
+  server.registerTool(
+    "set_identity_lock",
+    {
+      description: "Set or clear the identity lock on one library track. Locked tracks never accept silent auto-merges — identical sources become review candidates instead.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        locked: z.boolean().default(true),
+      }),
+    },
+    safeTool((args) => setIdentityLock(library, args)),
+  );
+
+  server.registerTool(
+    "sync_status",
+    {
+      description: "Read-only scan comparing the local library with managed YouTube playlists. Reports per-track status (in_sync, local_only, conflict, unknown_after_write, unknown) and per-video status (youtube_only, unlinked, unavailable).",
+      inputSchema: z.object({
+        playlist: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      syncStatus({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "sync_youtube",
+    {
+      description: "Preview or apply synchronization between the library and YouTube. direction=push adds missing local tracks to playlists (and optionally removes unknown remote items when allowRemoval=true); pull imports YouTube-only videos into the library; reconcile repairs local sync state (playlist renames, unavailable sources, unlinked memberships, unknown_after_write markers) without provider writes.",
+      inputSchema: z.object({
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        direction: z.enum(["push", "pull", "reconcile"]).default("push"),
+        playlist: z.string().min(1).optional(),
+        allowRemoval: z.boolean().default(false),
+      }),
+    },
+    safeTool((args, extra) => (
+      syncYoutube({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "reconcile_track",
+    {
+      description: "Exact-ID read-back for one library track (or youtube videoId): checks each source against the provider, marks deleted/private videos unavailable without deleting the canonical track, and resolves unknown_after_write markers to synced/local_only/unavailable.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1).optional(),
+        videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
+        playlistId: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      reconcileTrack({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "preview_import",
+    {
+      description: "Resolve a mixed batch of YouTube/YouTube Music video URLs, video IDs, free-text lines, and/or one playlist URL/ID into an import plan (new/exact_duplicate/canonical_duplicate/unresolved/unavailable). Writes nothing; stores the plan under a batchId for import_music_batch.",
+      inputSchema: z.object({
+        items: z.array(z.string().min(1)).max(2000).optional(),
+        playlist: z.string().min(1).optional(),
+        syncPlaylist: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      previewImport({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "import_music_batch",
+    {
+      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch). Only resolved items are written; per-item results are returned and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly.",
+      inputSchema: z.object({
+        items: z.array(z.string().min(1)).max(2000).optional(),
+        playlist: z.string().min(1).optional(),
+        batchId: z.string().min(1).optional(),
+        resume: z.boolean().default(false),
+        syncPlaylist: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      importMusicBatch({ library, youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "import_status",
+    {
+      description: "Read-only progress of a stored import batch: total counts plus done/pending item tallies.",
+      inputSchema: z.object({
+        batchId: z.string().min(1),
+      }),
+    },
+    safeTool((args) => importStatus(library, args)),
+  );
+
+  server.registerTool(
+    "export_library",
+    {
+      description: "Export the entire Personal Music Library as versioned JSON (lossless) or CSV (readable, lossy). Never includes OAuth tokens, refresh tokens, client secrets, or the credential passphrase.",
+      inputSchema: z.object({
+        format: z.enum(["json", "csv"]).default("json"),
+      }),
+    },
+    safeTool((args) => ({ format: args.format, content: exportLibrary(library, { format: args.format }) })),
+  );
+
+  server.registerTool(
+    "restore_library",
+    {
+      description: "Restore a versioned JSON backup produced by export_library. Default preview reports insert/update/unchanged/conflict/unsupported counts; apply writes inside one transaction. Restores no provider state — run sync_youtube afterwards to reconcile.",
+      inputSchema: z.object({
+        backup: z.union([z.string().min(1), z.record(z.unknown())]),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => restoreLibrary(library, args.backup, { mode: args.mode })),
+  );
+
+  server.registerTool(
+    "youtube_get_playlist",
+    {
+      description: "Read-only playlist metadata by exact playlist ID or URL.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+      }),
+    },
+    safeTool((args, extra) => (
+      getPlaylistAdmin({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_list_playlist_items",
+    {
+      description: "Read-only bounded listing of playlist items by exact playlist ID or URL.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        ...pagingSchema,
+      }),
+    },
+    safeTool((args, extra) => (
+      listPlaylistItemsAdmin({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_rename_playlist",
+    {
+      description: "Rename a playlist by exact ID. Preview shows old/new names; apply verifies the result by exact-ID read-back and reports RENAMED or UNKNOWN_AFTER_WRITE.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        name: z.string().min(1).max(150),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args, extra) => (
+      renamePlaylistAdmin({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_remove_from_playlist",
+    {
+      description: "Remove one item from a playlist by exact playlist ID + videoId. Provider-only effect — the Personal Library canonical track is untouched. Apply verifies removal by read-back.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        videoId: z.string().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args, extra) => (
+      removeFromPlaylist({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
+  server.registerTool(
+    "youtube_delete_playlist",
+    {
+      description: "Permanently delete a playlist. Preview reports exact ID, name, and item count; apply requires confirmPlaylistId equal to the exact playlist ID. Never triggered implicitly by sync or cleanup.",
+      inputSchema: z.object({
+        playlist: z.string().min(1),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+        confirmPlaylistId: z.string().min(1).optional(),
+      }),
+    },
+    safeTool((args, extra) => (
+      deletePlaylist({ youtube: youtubeClient }, args, { signal: extra?.signal })
+    )),
+  );
+
   return server;
 }
 
-const server = createServer();
-const transport = new StdioServerTransport();
-await server.connect(transport);
+export async function main(env = process.env) {
+  if (env === process.env) loadEnvFile();
+  const library = openLibrary(env);
+  const server = createServer(library);
+  const transport = new StdioServerTransport();
+  const shutdown = () => {
+    try { library.close(); } catch {}
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  process.stdin.once("end", shutdown);
+  process.stdin.once("close", shutdown);
+  await server.connect(transport);
+  return { library, server, transport };
+}
+
+const entry = process.argv[1] && path.resolve(process.argv[1]);
+if (entry && import.meta.url === pathToFileURL(entry).href) {
+  await main();
+}

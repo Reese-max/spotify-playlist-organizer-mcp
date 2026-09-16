@@ -8,13 +8,22 @@
     "start": "node src/server.js",
     "test": "node --test",
     "smoke": "node --test test/mcp-smoke.test.js",
-    "youtube:auth": "node scripts/youtube-auth.js"
+    "youtube:auth": "node scripts/youtube-auth.js",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=**/spotify.js --test-coverage-lines=80 --test-coverage-branches=75 --test-coverage-functions=88",
+    "crap": "node scripts/crap.mjs",
+    "mutate": "stryker run",
+    "lint": "eslint src test scripts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stryker-mutator/core": "^10.0.0",
+    "eslint": "^10.10.0"
   }
 }

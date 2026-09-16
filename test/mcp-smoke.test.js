@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("starts an MCP stdio server and answers initialize", async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-smoke-"));
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: root,
+    env: { ...process.env, MUSIC_LIBRARY_FILE: join(directory, "library.sqlite") },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";
@@ -53,6 +57,13 @@ test("starts an MCP stdio server and answers initialize", async () => {
     assert.equal(response.result.serverInfo.name, "music-playlist-organizer");
   } finally {
     child.kill();
-    await once(child, "exit").catch(() => {});
+    let timer;
+    const exited = await Promise.race([
+      once(child, "exit").then(() => true).catch(() => true),
+      new Promise((resolveWait) => { timer = setTimeout(() => resolveWait(false), 5_000); }),
+    ]);
+    clearTimeout(timer);
+    if (!exited) child.kill("SIGKILL");
+    await rm(directory, { recursive: true, force: true });
   }
 });

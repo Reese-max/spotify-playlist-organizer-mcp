@@ -2,11 +2,12 @@
 // Personal Music Library. All SQL lives in MusicLibrary (src/library.js);
 // this module only orchestrates public library APIs, classification, and
 // the optional YouTube remove effect. Queries are read-only; the only write
-// paths are updateMusicTags, reclassifyMusic, and removeMusic, and removal
-// stays preview/apply with per-effect authorization.
+// paths are updateMusicTags, updateMusicClassification, reclassifyMusic, and
+// removeMusic, and removal stays preview/apply with per-effect authorization.
 
 import { LibraryError } from "./library.js";
 import {
+  applyUserEdit,
   classificationSyncKey,
   classifyMusic,
   persistClassification,
@@ -194,6 +195,88 @@ export async function reclassifyMusic(library, args = {}) {
     after: saved.classification,
     diff: classificationDiff(before, saved.classification),
     preserved: saved.preserved ?? [],
+  };
+}
+
+const TRACK_FIELD_DIMENSIONS = Object.freeze([
+  "genre", "mood", "language", "activity", "energy", "era", "artist",
+]);
+
+// Persist a user classification edit on an existing track. `set` values are
+// validated through the taxonomy (unknown values divert to custom_tags +
+// needsReview); `clear` removes user entries only from the named dimensions.
+// Automatic entries are never touched, so reclassify keeps working and
+// user values keep winning via provenance.
+export function updateMusicClassification(library, args = {}) {
+  const track = requireTrack(library, args.trackId);
+  const set = args.set && typeof args.set === "object" ? args.set : {};
+  const clear = Array.isArray(args.clear) ? args.clear : [];
+  const before = readStoredClassification(library, track.id);
+  let next;
+  try {
+    next = applyUserEdit(before, { set, clear });
+  } catch (error) {
+    throw new LibraryError("LIBRARY_INPUT_INVALID", error.message);
+  }
+  const diff = classificationDiff(before, next);
+
+  if (args.mode !== "apply") {
+    return {
+      mode: "preview",
+      trackId: track.id,
+      before,
+      after: next,
+      diff,
+      provenance: { before: before?.provenance ?? null, after: next.provenance },
+      nextStep: "Re-run with mode \"apply\" to save this classification.",
+    };
+  }
+
+  // Only touched dimensions are written back; untouched fields keep their
+  // stored values. A cleared dimension falls back to its top automatic
+  // entry or becomes NULL.
+  const touched = new Set([
+    ...clear,
+    ...Object.keys(set).filter((dimension) => {
+      const raw = set[dimension];
+      return raw !== undefined && raw !== null && !(Array.isArray(raw) && raw.length === 0);
+    }),
+  ]);
+  const fields = {};
+  for (const dimension of touched) {
+    if (!TRACK_FIELD_DIMENSIONS.includes(dimension)) continue;
+    fields[dimension] = next.dimensions[dimension]?.[0]?.value ?? null;
+  }
+  const updatedTrack = library.updateTrackFields(track.id, fields);
+
+  const currentTags = library.listTags(track.id);
+  const nextTagValues = new Set((next.dimensions.custom_tags ?? []).map((entry) => entry.value));
+  for (const value of nextTagValues) {
+    if (!currentTags.includes(value)) library.addTag(track.id, value);
+  }
+  for (const entry of before?.dimensions?.custom_tags ?? []) {
+    if (entry?.source === "user" && !nextTagValues.has(entry.value)) {
+      library.removeTag(track.id, entry.value);
+    }
+  }
+
+  library.setSyncState(classificationSyncKey(track.id), {
+    taxonomyVersion: next.taxonomyVersion,
+    dimensions: next.dimensions,
+    provenance: next.provenance,
+    needsReview: next.needsReview,
+  });
+
+  return {
+    mode: "apply",
+    trackId: track.id,
+    track: updatedTrack,
+    before,
+    after: next,
+    diff,
+    provenance: { before: before?.provenance ?? null, after: next.provenance },
+    needsReview: next.needsReview,
+    note: "User edits carry provenance \"user\" — reclassify_music will not overwrite them. Provider playlists were not touched.",
   };
 }
 

@@ -77,6 +77,7 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
 - `recent_music`：最近收藏的曲目，有界。
 - `get_music`：單一 `trackId` 的完整檔案——canonical 欄位、sources、tags、playlists、分類記錄、`sync` 狀態與 identity review 項目。
 - `update_music_tags`：對單曲新增／移除自訂標籤，回傳 before/after；不碰其他維度或 user-set metadata。
+- `update_music_classification`：對單曲做持久化人工分類修正，`set` 寫入維度（genre/mood/language/activity/energy/era/artist，值過 taxonomy 驗證——未知值導向 custom tags＋review，不擴張官方維度），`clear` 明確移除使用者設過的維度；`mode` 預設 preview 顯示 before/after/provenance diff。人工值記為 `source: user`，`reclassify_music` 不會覆寫；空值不算清除（清除只能走 `clear`）。
 - `reclassify_music`：對單曲重跑自動分類，使用者設過的維度與標籤保留，回傳變更前後的 per-dimension diff。
 - `remove_music`：預設 `preview`。`apply` 只執行明確授權的 effect——`local: true` 刪本機曲目（連同 sources、tags、playlist mapping、aliases、identity candidates、sync_state）；`youtubePlaylist`（**精確 playlist ID 或 URL**，名稱會被拒絕）＋可選 `videoId` 刪 YouTube playlist item。兩個 effect 獨立執行、各自回報 `writeState`，一邊失敗不會回滾另一邊；未授權任何 effect 的 apply 是明確 no-op（`no_effect_authorized`）。
 - `list_unsynced_music`：列出需要注意的曲目——`not_synced`（不在任何 provider playlist）、`identity_conflict`（`needs_review`）、`provider_unavailable`（`sync.<trackId>` 標記為非 synced 狀態）；可用 `reason` 過濾。

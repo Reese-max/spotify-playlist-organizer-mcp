@@ -1088,6 +1088,26 @@ export class MusicLibrary {
     };
   }
 
+  updateTrackFields(trackId, fields = {}) {
+    this.assertOpen();
+    const track = this.requireTrack(trackId);
+    const assignments = ["updated_at = ?"];
+    const params = [new Date().toISOString()];
+    for (const [field, column] of Object.entries(TRACK_COLUMNS)) {
+      if (fields[field] === undefined) continue;
+      if (field === "canonicalTitle") continue;
+      assignments.push(`${column} = ?`);
+      params.push(fields[field]);
+    }
+    params.push(track.id);
+    try {
+      this.db.prepare(`UPDATE tracks SET ${assignments.join(", ")} WHERE id = ?`).run(...params);
+    } catch (error) {
+      writeFailed(error);
+    }
+    return this.getTrackById(track.id);
+  }
+
   setIdentityLocked(trackId, locked = true) {
     this.assertOpen();
     const track = this.requireTrack(trackId);

@@ -395,6 +395,59 @@ export function mergeClassification(prior, next) {
   return merged;
 }
 
+// Apply a persistent user edit to a stored classification record.
+// `set` replaces the user entries on each provided dimension (automatic
+// entries are kept); `clear` explicitly removes user entries from the named
+// dimensions. Empty/null set values are ignored — they never silently clear.
+// Unknown values follow the same rule as classifyMusic: diverted to
+// custom_tags with a needsReview entry, never inventing taxonomy values.
+export function applyUserEdit(prior, { set = {}, clear = [] } = {}) {
+  const clearSet = new Set(Array.isArray(clear) ? clear : []);
+  const setKeys = Object.keys(set && typeof set === "object" ? set : {});
+  for (const dimension of [...clearSet, ...setKeys]) {
+    if (!DIMENSIONS.includes(dimension)) {
+      throw new Error(`Unknown classification dimension: ${dimension}`);
+    }
+  }
+
+  const dimensions = {};
+  for (const dimension of DIMENSIONS) {
+    dimensions[dimension] = [...(prior?.dimensions?.[dimension] ?? [])];
+  }
+  const review = [...(prior?.needsReview ?? [])];
+
+  for (const dimension of clearSet) {
+    dimensions[dimension] = dimensions[dimension].filter((entry) => entry?.source !== "user");
+  }
+
+  // Validate the requested values through the same path classifyMusic uses
+  // for user input — closed-dimension misses become custom_tags + review.
+  const requested = emptyDimensions();
+  const requestedReview = [];
+  applyExplicit(requested, requestedReview, set, "user", 1);
+  review.push(...requestedReview);
+
+  for (const dimension of setKeys) {
+    const raw = set[dimension];
+    const provided = raw !== undefined
+      && raw !== null
+      && !(Array.isArray(raw) && raw.length === 0);
+    if (!provided) continue;
+    const nonUser = dimensions[dimension].filter((entry) => entry?.source !== "user");
+    dimensions[dimension] = capCardinality(dimension, [...requested[dimension], ...nonUser]);
+  }
+  if (requested.custom_tags.length) {
+    dimensions.custom_tags = dedupeEntries([...dimensions.custom_tags, ...requested.custom_tags]);
+  }
+
+  return validateClassification({
+    taxonomyVersion: TAXONOMY_VERSION,
+    dimensions,
+    provenance: computeProvenance(dimensions),
+    needsReview: dedupeReview(review),
+  });
+}
+
 // Map a classification result onto `upsertTrack` fields. Only non-empty
 // dimensions appear, so absent dimensions never clear stored values.
 export function classificationToTrackFields(result) {

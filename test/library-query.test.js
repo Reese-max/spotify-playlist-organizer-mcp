@@ -13,6 +13,7 @@ import {
   reclassifyMusic,
   removeMusic,
   searchLibrary,
+  updateMusicClassification,
   updateMusicTags,
 } from "../src/library-query.js";
 
@@ -393,6 +394,145 @@ test("list_unsynced_music reports not-synced, identity-conflict, and provider-un
     const onlyConflict = listUnsyncedMusic(library, { reason: "identity_conflict" });
     assert.equal(onlyConflict.items.length, 1);
     assert.equal(onlyConflict.items[0].track.id, conflict.id);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("update_music_classification preview shows before/after diff without writing", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "Edit Me", videoId: "ED123456789" });
+    const preview = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { genre: "j-pop", language: "ja", mood: "energetic" },
+    });
+    assert.equal(preview.mode, "preview");
+    assert.equal(preview.after.provenance.genre, "user");
+    assert.equal(preview.diff.genre.added[0], "j-pop");
+    // Preview wrote nothing: no stored record, no field change.
+    assert.equal(getMusic(library, { trackId: track.id }).classification, null);
+    assert.equal(library.getTrackById(track.id).genre, null);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("user-set dimensions persist as source user and survive reclassify", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "Stay JPop", videoId: "JP123456789" });
+    const applied = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { genre: "j-pop", language: "ja" },
+      mode: "apply",
+    });
+    assert.equal(applied.mode, "apply");
+    assert.equal(applied.track.genre, "j-pop");
+    assert.equal(applied.track.language, "ja");
+    const stored = getMusic(library, { trackId: track.id }).classification;
+    assert.equal(stored.provenance.genre, "user");
+    assert.equal(stored.dimensions.genre[0].source, "user");
+
+    const again = await reclassifyMusic(library, { trackId: track.id });
+    assert.equal(again.after.dimensions.genre[0].value, "j-pop");
+    assert.ok(again.preserved.includes("genre") || again.after.provenance.genre === "user");
+    assert.equal(library.getTrackById(track.id).genre, "j-pop");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("clear removes only the user dimension; other dims and tags untouched", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "Clear Mood", videoId: "CL123456789" });
+    updateMusicClassification(library, {
+      trackId: track.id,
+      set: { mood: "energetic", genre: "j-pop" },
+      mode: "apply",
+    });
+    const cleared = updateMusicClassification(library, {
+      trackId: track.id,
+      clear: ["mood"],
+      mode: "apply",
+    });
+    assert.equal(cleared.track.mood, null);
+    assert.equal(cleared.track.genre, "j-pop");
+    const stored = getMusic(library, { trackId: track.id }).classification;
+    assert.equal(stored.dimensions.mood.filter((e) => e.source === "user").length, 0);
+    assert.equal(stored.dimensions.genre[0].value, "j-pop");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("unknown values divert to custom_tags + needsReview, never pollute taxonomy", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "Odd Genre", videoId: "OD123456789" });
+    const applied = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { genre: "hyper-fusion-3000" },
+      mode: "apply",
+    });
+    const stored = getMusic(library, { trackId: track.id }).classification;
+    assert.equal(stored.dimensions.genre.length, 0); // not an official value
+    assert.ok(stored.dimensions.custom_tags.some((e) => e.value === "hyper-fusion-3000"));
+    assert.ok(applied.needsReview.some((e) => e.dimension === "genre"));
+    assert.ok(library.listTags(track.id).includes("hyper-fusion-3000"));
+    assert.equal(library.getTrackById(track.id).genre, null);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("empty or null set values never silently clear a dimension", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "No Sneak Clear", videoId: "NS123456789" });
+    updateMusicClassification(library, {
+      trackId: track.id,
+      set: { mood: "calm" },
+      mode: "apply",
+    });
+    const applied = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { mood: [] },
+      mode: "apply",
+    });
+    assert.equal(applied.track.mood, "calm");
+    const appliedNull = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { mood: null },
+      mode: "apply",
+    });
+    assert.equal(appliedNull.track.mood, "calm");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("synonyms normalize through the taxonomy; unknown dimension names are rejected", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "Synonym", videoId: "SY123456789" });
+    const applied = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { genre: "J-POP" },
+      mode: "apply",
+    });
+    assert.equal(applied.track.genre, "j-pop");
+    assert.throws(
+      () => updateMusicClassification(library, { trackId: track.id, set: { vibe: "x" } }),
+      /Unknown classification dimension/,
+    );
   } finally {
     library.close();
     await rm(directory, { recursive: true, force: true });

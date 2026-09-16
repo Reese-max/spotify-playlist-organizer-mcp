@@ -29,6 +29,7 @@ import {
   reclassifyMusic,
   removeMusic,
   searchLibrary,
+  updateMusicClassification,
   updateMusicTags,
 } from "./library-query.js";
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
@@ -823,6 +824,25 @@ export function createServer(library) {
       }),
     },
     safeTool((args) => updateMusicTags(library, args)),
+  );
+
+  server.registerTool(
+    "update_music_classification",
+    {
+      description: "Preview or apply a persistent user edit to a track's classification dimensions. `set` values are validated through the taxonomy (unknown values divert to custom tags and review); `clear` explicitly removes user-set dimensions. User values carry provenance and survive reclassify.",
+      inputSchema: z.object({
+        trackId: z.number().int().min(1),
+        set: z.record(
+          z.enum(["genre", "mood", "language", "activity", "energy", "era", "artist", "custom_tags"]),
+          z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+        ).optional(),
+        clear: z.array(
+          z.enum(["genre", "mood", "language", "activity", "energy", "era", "artist", "custom_tags"]),
+        ).max(8).optional(),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      }),
+    },
+    safeTool((args) => updateMusicClassification(library, args)),
   );
 
   server.registerTool(

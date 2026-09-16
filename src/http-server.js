@@ -15,6 +15,7 @@
 //   credential paths or other server-side parameters
 
 import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,6 +39,12 @@ import { YouTubeClient } from "./youtube.js";
 const SERVER_NAME = "music-playlist-organizer";
 const SERVER_VERSION = "0.2.0";
 const DEFAULT_BODY_LIMIT = 64 * 1024;
+const INDEX_HTML_PATH = new URL("../public/index.html", import.meta.url);
+const UI_HEADERS = {
+  "Content-Type": "text/html; charset=utf-8",
+  "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+  "X-Content-Type-Options": "nosniff",
+};
 const DEFAULT_MAX_WRITES = 4;
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -175,6 +182,7 @@ export function createHttpServer({
   const secret = typeof bootstrapToken === "string" && bootstrapToken
     ? bootstrapToken
     : crypto.randomBytes(24).toString("hex");
+  const indexHtml = readFileSync(INDEX_HTML_PATH, "utf8");
 
   const originAllowed = (origin) =>
     allowedOrigins.some((allowed) => origin === allowed || origin.startsWith(`${allowed}:`));
@@ -262,6 +270,15 @@ export function createHttpServer({
       }
 
       const url = new URL(request.url, "http://localhost");
+
+      // The collection UI is a static shell — it holds no data and no
+      // credentials, so it needs no session. Every API call it makes still
+      // requires a Bearer session token.
+      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+        response.writeHead(200, UI_HEADERS);
+        response.end(indexHtml);
+        return;
+      }
       const route = routes.find(([method, pattern]) => {
         if (method !== request.method) return false;
         return typeof pattern === "string" ? pattern === url.pathname : pattern.test(url.pathname);

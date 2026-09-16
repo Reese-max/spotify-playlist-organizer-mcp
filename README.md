@@ -124,6 +124,10 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 路由：`GET /health`、`GET /version`（免認證）；`POST /session`、`DELETE /session`；`GET /api/library/{tracks,recent,search,unsynced,tracks/:id}`、`POST /api/library/tracks/:id/{tags,reclassify}`、`POST /api/library/remove`；`POST /api/save_music`；`GET /api/sync/status`、`POST /api/sync`、`POST /api/reconcile`。
 
+### 收藏 UI（`GET /`）
+
+`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
+
 ## 批次匯入
 
 `src/batch-import.js` 把既有 YouTube / YouTube Music 收藏一次帶進音樂庫，不必逐首 `save_music`。管線：parse → resolve → canonicalize → dedupe → preview plan → apply → 可選 YouTube 同步。
@@ -293,7 +297,7 @@ youtube_save_track({
 }
 ```
 
-目前 server 使用 stdio MCP。Figma 手機頁面原型已建立，但要讓手機頁面直接操作 MCP，下一階段還需要受保護的 HTTP API／session layer；MCP 核心收藏流程已先完成。
+stdio MCP 與 HTTP facade 共用同一套 service layer；手機／Web 收藏介面由 `GET /` 提供（見「收藏 UI」），經 bootstrap→session Bearer 流程呼叫 `/api/*`。
 
 ## Spotify legacy provider
 

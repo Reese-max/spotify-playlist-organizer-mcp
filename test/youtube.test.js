@@ -4,6 +4,7 @@ import {
   parseYouTubePlaylistReference,
   parseYouTubeVideoReference,
   YouTubeClient,
+  youtubeVideoSummary,
 } from "../src/youtube.js";
 
 function response(data, status = 200) {
@@ -269,6 +270,23 @@ test("renamePlaylist and deletePlaylist issue exact-ID PUT/DELETE calls", async 
   const del = calls.find((call) => call.method === "DELETE");
   assert.match(del.url, /id=PL_RENAMED001/);
   assert.deepEqual(deleted, { deleted: true, playlistId: "PL_RENAMED001" });
+});
+
+test("youtubeVideoSummary keeps the playlist-item row ID for exact-row verification", () => {
+  const row = youtubeVideoSummary({
+    id: "row-9",
+    snippet: {
+      playlistId: "PL_X",
+      resourceId: { videoId: "V_ROW000001" },
+      title: "Song",
+    },
+    contentDetails: { videoId: "V_ROW000001" },
+  });
+  assert.equal(row.id, "V_ROW000001");
+  assert.equal(row.playlistItemId, "row-9");
+
+  const video = youtubeVideoSummary({ id: "V_PLAIN00001", snippet: { title: "Song" } });
+  assert.equal(video.playlistItemId, null);
 });
 
 test("renamePlaylist preserves existing description and mutable snippet fields", async () => {

@@ -80,6 +80,10 @@ export function youtubeVideoSummary(item, position = null) {
   return {
     position,
     id,
+    // playlistItems rows carry the row id in item.id — keep it so callers can
+    // verify the exact row deleted, not just "some row with this videoId".
+    playlistItemId: item?.playlistItemId
+      ?? (snippet.playlistId && typeof item?.id === "string" ? item.id : null),
     name: snippet.title ?? item?.name ?? item?.title ?? "Unknown video",
     artists: channel ? [channel] : [],
     album: null,

@@ -213,11 +213,17 @@ export async function removeFromPlaylist({ youtube }, args = {}, { signal } = {}
     mode: "apply",
     playlistId,
     videoId,
-    writeState: present === true ? "UNKNOWN_AFTER_WRITE" : "REMOVED",
+    // Only a positive "the exact row is gone" read-back verifies removal —
+    // true (still present) and null (read-back unavailable) are both unknown.
+    writeState: present === false ? "REMOVED" : "UNKNOWN_AFTER_WRITE",
     verified: present,
-    ...(present === true
-      ? { nextStep: "The item still appears in the playlist — verify before retrying." }
-      : {}),
+    ...(present === false
+      ? {}
+      : {
+          nextStep: present === true
+            ? "The item still appears in the playlist — verify before retrying."
+            : "Removal could not be verified — read back via youtube_list_playlist_items before retrying; do not blindly repeat the mutation.",
+        }),
   };
 }
 

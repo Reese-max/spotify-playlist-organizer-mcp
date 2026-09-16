@@ -26,6 +26,8 @@ class StubYouTube {
     this.renameCalls = 0;
     this.deleteCalls = 0;
     this.removeCalls = 0;
+    this.itemReadCalls = 0;
+    this.failItemReadOnCall = 0; // 1-based call number that throws; 0 = never
   }
   seedPlaylist(id, name, items = []) {
     this.playlists.set(id, { id, name });
@@ -42,6 +44,12 @@ class StubYouTube {
     return { ...playlist, itemCount: (this.items.get(id) ?? []).length };
   }
   async getPlaylistItems(id) {
+    this.itemReadCalls += 1;
+    if (this.itemReadCalls === this.failItemReadOnCall) {
+      const error = new Error("read-back unavailable");
+      error.code = "NETWORK_ERROR";
+      throw error;
+    }
     if (!this.playlists.has(id)) {
       const error = new Error("not found");
       error.code = "NOT_FOUND";
@@ -202,6 +210,36 @@ test("remove reports NOT_PRESENT for absent videos and REMOVED for one of duplic
   assert.equal(applied.writeState, "REMOVED");
   const remaining = await youtube.getPlaylistItems(PL_ADMIN);
   assert.equal(remaining.filter((item) => item.id === VID_1).length, 1);
+});
+
+test("remove reports UNKNOWN_AFTER_WRITE when post-write read-back is unavailable", async (t) => {
+  const { youtube } = await fixture(t);
+  youtube.failItemReadOnCall = 2; // match-read succeeds; read-back fails
+  const result = await removeFromPlaylist(
+    { youtube },
+    { playlist: PL_ADMIN, videoId: VID_1, mode: "apply" },
+  );
+  assert.equal(result.writeState, "UNKNOWN_AFTER_WRITE");
+  assert.equal(result.verified, null);
+  assert.match(result.nextStep, /verify|read.?back/i);
+});
+
+test("remove reports UNKNOWN_AFTER_WRITE when the exact deleted row is still present", async (t) => {
+  const { youtube } = await fixture(t);
+  // Stub delete reports success but leaves the row behind — read-back must
+  // find that exact playlistItemId and refuse to claim REMOVED.
+  youtube.removeVideoFromPlaylist = async (playlistId, videoId) => {
+    const list = youtube.items.get(playlistId) ?? [];
+    const found = list.find((item) => item.id === videoId);
+    youtube.removeCalls += 1;
+    return { removed: true, playlistItemId: found?.itemId ?? null, videoId };
+  };
+  const result = await removeFromPlaylist(
+    { youtube },
+    { playlist: PL_ADMIN, videoId: VID_1, mode: "apply" },
+  );
+  assert.equal(result.writeState, "UNKNOWN_AFTER_WRITE");
+  assert.equal(result.verified, true);
 });
 
 test("delete_playlist needs independent confirmation and previews exact id/name/itemCount", async (t) => {

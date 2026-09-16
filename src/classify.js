@@ -411,10 +411,32 @@ export function applyUserEdit(prior, { set = {}, clear = [] } = {}) {
   }
 
   const dimensions = {};
-  for (const dimension of DIMENSIONS) {
-    dimensions[dimension] = [...(prior?.dimensions?.[dimension] ?? [])];
-  }
   const review = [...(prior?.needsReview ?? [])];
+  const carriedTags = [];
+  for (const dimension of DIMENSIONS) {
+    const kept = [];
+    for (const entry of prior?.dimensions?.[dimension] ?? []) {
+      // A value official under an older taxonomy must not fail validation
+      // here — mirror mergeClassification: user values divert to custom_tags
+      // with a review entry, stale automatic values drop.
+      if (dimension === "custom_tags" || canonicalValue(dimension, entry?.value) !== null) {
+        kept.push(entry);
+        continue;
+      }
+      if (entry?.source === "user") {
+        review.push({
+          dimension, value: String(entry.value), source: "user", reason: "unknown_taxonomy_value",
+        });
+        carriedTags.push({
+          value: String(entry.value), source: "user", confidence: 1, needsReview: true,
+        });
+      }
+    }
+    dimensions[dimension] = kept;
+  }
+  if (carriedTags.length) {
+    dimensions.custom_tags = dedupeEntries([...dimensions.custom_tags, ...carriedTags]);
+  }
 
   for (const dimension of clearSet) {
     dimensions[dimension] = dimensions[dimension].filter((entry) => entry?.source !== "user");

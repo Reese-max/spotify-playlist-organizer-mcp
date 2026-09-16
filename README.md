@@ -306,7 +306,7 @@ stdio MCP 與 HTTP facade 共用同一套 service layer；手機／Web 收藏介
 ## 品質控制
 
 ```powershell
-npm test                # 每個 commit 必跑（node:test，135 tests）
+npm test                # 每個 commit 必跑（node:test）
 npm run smoke           # MCP stdio server 啟動煙霧測試
 npm run lint            # ESLint flat config（CI 也跑）
 npm run test:coverage   # 測試 + V8 coverage + 棘輪門檻（行≥80/分支≥75/函數≥90）

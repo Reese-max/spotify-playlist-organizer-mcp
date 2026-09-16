@@ -126,8 +126,9 @@ function classificationChips(classification) {
 function duplicateBadge(duplicate) {
   const level = duplicate?.level;
   if (level === "EXACT_SOURCE_DUPLICATE") return `<span class="badge b-warn">exact duplicate</span>`;
+  if (level === "SAME_CANONICAL_TRACK") return `<span class="badge b-info">same song — adds as another source</span>`;
   if (level === "POSSIBLE_MATCH") return `<span class="badge b-warn">possible duplicate — needs review</span>`;
-  if (level === "DISTINCT") return `<span class="badge b-ok">new track</span>`;
+  if (level === "DISTINCT_TRACK") return `<span class="badge b-ok">new track</span>`;
   return "";
 }
 

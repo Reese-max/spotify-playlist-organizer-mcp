@@ -93,6 +93,7 @@ function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload),
+    "X-Content-Type-Options": "nosniff",
     ...headers,
   });
   response.end(payload);
@@ -288,7 +289,10 @@ export function createHttpServer({
       // bootstrap secret rather than a session token.
       if (request.method === "POST" && url.pathname === "/session") {
         const body = await readJsonBody(request, bodyLimit);
-        if (body.token !== secret) {
+        const provided = typeof body.token === "string" ? Buffer.from(body.token) : null;
+        const expected = Buffer.from(secret);
+        if (!provided || provided.length !== expected.length
+            || !crypto.timingSafeEqual(provided, expected)) {
           throw new HttpError(401, "UNAUTHORIZED", "Invalid bootstrap token.");
         }
         const session = sessionStore.issue();

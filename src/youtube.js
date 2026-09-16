@@ -365,7 +365,13 @@ export class YouTubeClient {
       signal,
     });
     const item = data.items?.[0];
-    if (!item) throw new Error("YouTube video was not found: " + id);
+    if (!item) {
+      // The API answers deleted/unknown videos with 200 + empty items; tag
+      // it so read-backs can distinguish confirmed-absence from unreadable.
+      const error = new Error("YouTube video was not found: " + id);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
     return youtubeVideoSummary(item, 1);
   }
 
@@ -405,7 +411,11 @@ export class YouTubeClient {
       signal,
     });
     const item = data.items?.[0];
-    if (!item) throw new Error("YouTube playlist was not found: " + id);
+    if (!item) {
+      const error = new Error("YouTube playlist was not found: " + id);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
     return youtubePlaylistSummary(item);
   }
 
@@ -509,16 +519,29 @@ export class YouTubeClient {
     // fields we are not changing must be sent back or they are cleared.
     const current = await this.request("/playlists", {
       auth: "user",
-      query: { part: "snippet", id: playlistId, maxResults: 1 },
+      query: { part: "snippet,status", id: playlistId, maxResults: 1 },
       signal,
     });
     const item = current.items?.[0];
-    if (!item) throw new Error("YouTube playlist was not found: " + playlistId);
+    if (!item) {
+      const error = new Error("YouTube playlist was not found: " + playlistId);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
+    const prior = item.snippet ?? {};
+    const snippet = { title: name };
+    for (const field of ["description", "tags", "defaultLanguage"]) {
+      if (prior[field] !== undefined) snippet[field] = prior[field];
+    }
     const data = await this.request("/playlists", {
       method: "PUT",
       auth: "user",
-      query: { part: "snippet" },
-      body: { id: playlistId, snippet: { ...(item.snippet ?? {}), title: name } },
+      query: { part: "snippet,status" },
+      body: {
+        id: playlistId,
+        snippet,
+        ...(item.status ? { status: { privacyStatus: item.status.privacyStatus } } : {}),
+      },
       signal,
     });
     return youtubePlaylistSummary(data);

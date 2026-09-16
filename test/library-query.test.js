@@ -33,13 +33,16 @@ function stubYouTube(overrides = {}) {
     env: {},
     calls,
     items,
+    async getPlaylistItems(playlistId) {
+      return [...(items.get(playlistId) ?? [])];
+    },
     async removeVideoFromPlaylist(playlistId, videoId) {
       calls.push(["removeVideoFromPlaylist", playlistId, videoId]);
       const current = items.get(playlistId) ?? [];
-      const index = current.indexOf(videoId);
+      const index = current.findIndex((item) => item === videoId || item?.id === videoId);
       if (index === -1) return { removed: false, playlistId, videoId, reason: "not_in_playlist" };
-      current.splice(index, 1);
-      return { removed: true, playlistId, videoId };
+      const row = current.splice(index, 1)[0];
+      return { removed: true, playlistId, videoId, playlistItemId: row?.playlistItemId };
     },
     ...overrides,
   };
@@ -355,6 +358,54 @@ test("remove_music apply with only YouTube authorization keeps the local track",
   }
 });
 
+test("remove_music reports UNKNOWN_AFTER_WRITE when the provider row survives or read-back fails", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, {
+      title: "Remote Delete", videoId: "PPPPPPPPPPP",
+      playlist: { provider: "youtube", playlistId: "PL_REMOTE", name: "Theirs" },
+    });
+
+    // An adapter that claims success but leaves the exact row in place.
+    const lying = stubYouTube({
+      async removeVideoFromPlaylist(playlistId, videoId) {
+        return { removed: true, playlistId, videoId, playlistItemId: "PLI_ROW" };
+      },
+      async getPlaylistItems() {
+        return [{ id: "PPPPPPPPPPP", playlistItemId: "PLI_ROW" }];
+      },
+    });
+    const unverified = await removeMusic({ library, youtube: lying }, {
+      trackId: track.id,
+      mode: "apply",
+      youtubePlaylist: "PL_REMOTE",
+    });
+    assert.equal(unverified.effects.youtubePlaylistItem.writeState, "UNKNOWN_AFTER_WRITE");
+    assert.equal(unverified.effects.youtubePlaylistItem.verified.present, true);
+    assert.match(unverified.effects.youtubePlaylistItem.nextStep, /exact ID/);
+
+    // Read-back failure is uncertainty, not confirmation.
+    const unreadable = stubYouTube({
+      async removeVideoFromPlaylist(playlistId, videoId) {
+        return { removed: true, playlistId, videoId, playlistItemId: "PLI_ROW" };
+      },
+      async getPlaylistItems() {
+        throw new Error("read-back unavailable");
+      },
+    });
+    const unknown = await removeMusic({ library, youtube: unreadable }, {
+      trackId: track.id,
+      mode: "apply",
+      youtubePlaylist: "PL_REMOTE",
+    });
+    assert.equal(unknown.effects.youtubePlaylistItem.writeState, "UNKNOWN_AFTER_WRITE");
+    assert.equal(unknown.effects.youtubePlaylistItem.verified.present, null);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("remove_music apply without any authorized effect is an explicit no-op", async () => {
   const { directory, library } = await tempLibrary();
   const youtube = stubYouTube();
@@ -486,6 +537,40 @@ test("unknown values divert to custom_tags + needsReview, never pollute taxonomy
     assert.ok(applied.needsReview.some((e) => e.dimension === "genre"));
     assert.ok(library.listTags(track.id).includes("hyper-fusion-3000"));
     assert.equal(library.getTrackById(track.id).genre, null);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a prior user value retired from the taxonomy diverts instead of failing", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const track = await seedTrack(library, { title: "Retired", videoId: "RE123456789" });
+    // Simulate a stored record whose user value was official under an older
+    // taxonomy: any subsequent edit must divert it, not crash validation.
+    library.setSyncState(`classification.${track.id}`, {
+      taxonomyVersion: "v0-legacy",
+      dimensions: {
+        genre: [{ value: "retired-genre-x", source: "user", confidence: 1 }],
+        mood: [{ value: "calm", source: "user", confidence: 1 }],
+        custom_tags: [],
+      },
+      provenance: { genre: "user", mood: "user" },
+      needsReview: [],
+    });
+    const applied = updateMusicClassification(library, {
+      trackId: track.id,
+      set: { language: "ja" },
+      mode: "apply",
+    });
+    const stored = getMusic(library, { trackId: track.id }).classification;
+    assert.equal(stored.dimensions.genre.length, 0);
+    assert.ok(stored.dimensions.custom_tags.some((e) => e.value === "retired-genre-x"));
+    assert.ok(applied.needsReview.some((e) => e.dimension === "genre" && e.value === "retired-genre-x"));
+    assert.ok(library.listTags(track.id).includes("retired-genre-x"));
+    // A still-valid prior user value keeps its place untouched.
+    assert.equal(stored.dimensions.mood[0].value, "calm");
   } finally {
     library.close();
     await rm(directory, { recursive: true, force: true });

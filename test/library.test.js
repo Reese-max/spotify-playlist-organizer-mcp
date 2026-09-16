@@ -620,6 +620,93 @@ test("merge, split, and locked identity are respected by the auto flow", async (
   }
 });
 
+test("mergeTracks drops the merged-away track's sync_state rows and carries user classification", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const into = library.upsertTrack({
+      title: "Song", artist: "A",
+      source: { provider: "youtube", sourceId: "v-1" },
+    });
+    const from = library.upsertTrack({
+      title: "Song (Remix)", artist: "A",
+      source: { provider: "youtube", sourceId: "v-2" },
+    });
+    library.setSyncState(`sync.${from.track.id}`, { state: "synced", playlistId: "PL_X" });
+    library.setSyncState(`classification.${into.track.id}`, {
+      taxonomyVersion: "t1",
+      dimensions: { mood: [{ value: "calm", source: "user" }] },
+      provenance: { mood: "user" },
+      needsReview: false,
+    });
+    library.setSyncState(`classification.${from.track.id}`, {
+      taxonomyVersion: "t1",
+      dimensions: {
+        genre: [{ value: "lofi", source: "user" }],
+        mood: [{ value: "hype", source: "user" }],
+        language: [{ value: "auto-value", source: "model" }],
+      },
+      provenance: { genre: "user", mood: "user", language: "model" },
+      needsReview: false,
+    });
+
+    library.mergeTracks(into.track.id, from.track.id);
+
+    // `from`'s scoped keys are gone — not orphaned under a dead track id.
+    assert.equal(library.getSyncState(`sync.${from.track.id}`), null);
+    assert.equal(library.getSyncState(`classification.${from.track.id}`), null);
+
+    // `into` gains `from`'s user genre; its own user mood wins; `from`'s
+    // automatic entries are never carried.
+    const merged = JSON.parse(library.getSyncState(`classification.${into.track.id}`));
+    assert.deepEqual(
+      merged.dimensions.genre, [{ value: "lofi", source: "user" }],
+    );
+    assert.deepEqual(
+      merged.dimensions.mood, [{ value: "calm", source: "user" }],
+    );
+    assert.equal(merged.dimensions.language, undefined);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("mergeTracks adopts the user-only classification record when the target has none", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const into = library.upsertTrack({
+      title: "Song", artist: "A",
+      source: { provider: "youtube", sourceId: "v-1" },
+    });
+    const from = library.upsertTrack({
+      title: "Song (Remix)", artist: "A",
+      source: { provider: "youtube", sourceId: "v-2" },
+    });
+    library.setSyncState(`classification.${from.track.id}`, {
+      taxonomyVersion: "t1",
+      dimensions: {
+        genre: [{ value: "lofi", source: "user" }],
+        mood: [{ value: "auto-mood", source: "model" }],
+      },
+      provenance: { genre: "user", mood: "model" },
+      needsReview: true,
+    });
+
+    library.mergeTracks(into.track.id, from.track.id);
+
+    const adopted = JSON.parse(library.getSyncState(`classification.${into.track.id}`));
+    assert.deepEqual(adopted.dimensions, { genre: [{ value: "lofi", source: "user" }] });
+    assert.deepEqual(adopted.provenance, { genre: "user" });
+    assert.equal(adopted.needsReview, true);
+    assert.equal(library.getSyncState(`classification.${from.track.id}`), null);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("previewIdentity is read-only and reports the would-be decision", async () => {
   const { directory, filePath } = await tempLibrary();
   const library = openLibrary(filePath);

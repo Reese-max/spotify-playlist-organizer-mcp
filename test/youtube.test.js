@@ -198,6 +198,17 @@ test("getVideo throws when the provider returns no items", async () => {
   await assert.rejects(() => client.getVideo("V_MISSING001"), /not found/);
 });
 
+test("getVideo and getPlaylist tag empty-items errors NOT_FOUND for read-backs", async () => {
+  const client = new YouTubeClient(
+    env({ YOUTUBE_API_KEY: "k", YOUTUBE_ACCESS_TOKEN: "t" }),
+    async () => response({ items: [] }),
+  );
+  const videoError = await client.getVideo("V_MISSING001").catch((error) => error);
+  assert.equal(videoError.code, "NOT_FOUND");
+  const playlistError = await client.getPlaylist("PL_MISSING001").catch((error) => error);
+  assert.equal(playlistError.code, "NOT_FOUND");
+});
+
 test("getPlaylistItems follows pageToken and stops at the final page", async () => {
   const seenTokens = [];
   const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url) => {
@@ -318,6 +329,11 @@ test("renamePlaylist preserves existing description and mutable snippet fields",
   assert.equal(puts[0].snippet.title, "New Name");
   assert.equal(puts[0].snippet.description, "keep me");
   assert.deepEqual(puts[0].snippet.tags, ["lofi"]);
+  // Only writable fields go back — read-only fields like channelTitle and
+  // publishedAt are never echoed into the update body.
+  for (const readOnly of ["channelTitle", "channelId", "publishedAt", "localized", "thumbnails"]) {
+    assert.equal(puts[0].snippet[readOnly], undefined, "PUT echoed read-only " + readOnly);
+  }
   assert.equal(renamed.description, "keep me");
 });
 

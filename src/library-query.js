@@ -140,10 +140,12 @@ export function updateMusicTags(library, args = {}) {
   const remove = normalize(args.remove);
 
   const before = library.listTags(track.id);
-  // Removals run first, so a tag present in both lists ends up attached.
-  for (const tag of remove) library.removeTag(track.id, tag);
-  for (const tag of add) library.addTag(track.id, tag);
-  const after = library.listTags(track.id);
+  const after = library.withTransaction(() => {
+    // Removals run first, so a tag present in both lists ends up attached.
+    for (const tag of remove) library.removeTag(track.id, tag);
+    for (const tag of add) library.addTag(track.id, tag);
+    return library.listTags(track.id);
+  });
 
   return {
     trackId: track.id,
@@ -247,24 +249,30 @@ export function updateMusicClassification(library, args = {}) {
     if (!TRACK_FIELD_DIMENSIONS.includes(dimension)) continue;
     fields[dimension] = next.dimensions[dimension]?.[0]?.value ?? null;
   }
-  const updatedTrack = library.updateTrackFields(track.id, fields);
+  // One transaction for the whole apply — a crash between the field write,
+  // the tag sync, and the provenance record can never resurrect cleared
+  // user dimensions on the next reclassify.
+  const updatedTrack = library.withTransaction(() => {
+    const updated = library.updateTrackFields(track.id, fields);
 
-  const currentTags = library.listTags(track.id);
-  const nextTagValues = new Set((next.dimensions.custom_tags ?? []).map((entry) => entry.value));
-  for (const value of nextTagValues) {
-    if (!currentTags.includes(value)) library.addTag(track.id, value);
-  }
-  for (const entry of before?.dimensions?.custom_tags ?? []) {
-    if (entry?.source === "user" && !nextTagValues.has(entry.value)) {
-      library.removeTag(track.id, entry.value);
+    const currentTags = library.listTags(track.id);
+    const nextTagValues = new Set((next.dimensions.custom_tags ?? []).map((entry) => entry.value));
+    for (const value of nextTagValues) {
+      if (!currentTags.includes(value)) library.addTag(track.id, value);
     }
-  }
+    for (const entry of before?.dimensions?.custom_tags ?? []) {
+      if (entry?.source === "user" && !nextTagValues.has(entry.value)) {
+        library.removeTag(track.id, entry.value);
+      }
+    }
 
-  library.setSyncState(classificationSyncKey(track.id), {
-    taxonomyVersion: next.taxonomyVersion,
-    dimensions: next.dimensions,
-    provenance: next.provenance,
-    needsReview: next.needsReview,
+    library.setSyncState(classificationSyncKey(track.id), {
+      taxonomyVersion: next.taxonomyVersion,
+      dimensions: next.dimensions,
+      provenance: next.provenance,
+      needsReview: next.needsReview,
+    });
+    return updated;
   });
 
   return {
@@ -406,12 +414,35 @@ export async function removeMusic({ library, youtube }, args = {}, { signal } = 
     } else {
       try {
         const outcome = await youtube.removeVideoFromPlaylist(playlistId, videoId, { signal });
+        // A bare `removed: true` is not verification — read the playlist back
+        // and confirm the exact playlist-item row is gone, same contract as
+        // youtube_remove_from_playlist.
+        let present = null;
+        if (outcome.removed) {
+          try {
+            const items = await youtube.getPlaylistItems(playlistId, { signal });
+            present = outcome.playlistItemId
+              ? items.some((item) => item.playlistItemId === outcome.playlistItemId)
+              : items.some((item) => item.id === videoId);
+          } catch {
+            present = null; // unreadable
+          }
+        }
+        const verified = outcome.removed && present === false;
         effects.youtubePlaylistItem = {
           authorized: true,
           playlistId,
           videoId,
-          writeState: outcome.removed ? "REMOVED" : "NOT_PRESENT",
+          writeState: !outcome.removed
+            ? "NOT_PRESENT"
+            : verified
+              ? "REMOVED"
+              : "UNKNOWN_AFTER_WRITE",
+          verified: { present },
           result: outcome,
+          ...(outcome.removed && !verified
+            ? { nextStep: "Removal could not be verified — read the playlist items back by exact ID before retrying; do not retry blindly." }
+            : {}),
         };
         removed += 1;
       } catch (error) {

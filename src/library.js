@@ -971,6 +971,56 @@ export class MusicLibrary {
           from.era ?? null,
           into.id,
         );
+
+      // Carry `from`'s user-provenance classification entries into `into`'s
+      // stored record for dimensions where `into` has no user entries —
+      // manual classification is a user decision and survives the merge —
+      // then drop `from`'s dead sync_state rows rather than orphaning them.
+      let fromRecord = null;
+      try { fromRecord = JSON.parse(this.getSyncState(`classification.${from.id}`) ?? "null"); } catch { fromRecord = null; }
+      const fromUserDims = {};
+      for (const [dimension, entries] of Object.entries(fromRecord?.dimensions ?? {})) {
+        const userEntries = (entries ?? []).filter((entry) => entry?.source === "user");
+        if (userEntries.length) fromUserDims[dimension] = userEntries;
+      }
+      if (Object.keys(fromUserDims).length) {
+        let intoRecord = null;
+        try { intoRecord = JSON.parse(this.getSyncState(`classification.${into.id}`) ?? "null"); } catch { intoRecord = null; }
+        if (intoRecord?.dimensions) {
+          const nextDimensions = { ...intoRecord.dimensions };
+          for (const [dimension, userEntries] of Object.entries(fromUserDims)) {
+            const hasUser = (intoRecord.dimensions[dimension] ?? []).some(
+              (entry) => entry?.source === "user",
+            );
+            if (!hasUser) {
+              nextDimensions[dimension] = [...(intoRecord.dimensions[dimension] ?? []), ...userEntries];
+            }
+          }
+          this.db
+            .prepare(
+              `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+            )
+            .run(`classification.${into.id}`, JSON.stringify({ ...intoRecord, dimensions: nextDimensions }), now);
+        } else {
+          const provenance = {};
+          for (const dimension of Object.keys(fromUserDims)) provenance[dimension] = "user";
+          this.db
+            .prepare(
+              `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+            )
+            .run(`classification.${into.id}`, JSON.stringify({
+              taxonomyVersion: fromRecord.taxonomyVersion ?? null,
+              dimensions: fromUserDims,
+              provenance,
+              needsReview: Boolean(fromRecord.needsReview),
+            }), now);
+        }
+      }
+      this.db
+        .prepare("DELETE FROM sync_state WHERE key IN (?, ?)")
+        .run(`classification.${from.id}`, `sync.${from.id}`);
       this.db.prepare("DELETE FROM tracks WHERE id = ?").run(from.id);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -1108,6 +1158,23 @@ export class MusicLibrary {
     return this.getTrackById(track.id);
   }
 
+  // Runs fn inside BEGIN IMMEDIATE/COMMIT. Only for methods whose writes are
+  // bare statements (setSyncState, tag ops, updateTrackFields) — methods that
+  // open their own transaction (upsertTrack, mergeTracks, splitTrack) cannot
+  // nest and must stay outside.
+  withTransaction(fn) {
+    this.assertOpen();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
   setIdentityLocked(trackId, locked = true) {
     this.assertOpen();
     const track = this.requireTrack(trackId);
@@ -1154,7 +1221,7 @@ export class MusicLibrary {
     }
   }
 
-  dismissIdentityCandidate(trackId, candidateTrackId) {
+  dismissIdentityCandidate(trackId, candidateTrackId, { lock = false } = {}) {
     this.assertOpen();
     const track = this.requireTrack(trackId);
     const candidate = this.requireTrack(candidateTrackId);
@@ -1178,6 +1245,11 @@ export class MusicLibrary {
         this.db
           .prepare("UPDATE tracks SET needs_review = ?, updated_at = ? WHERE id = ?")
           .run(remaining ? 1 : 0, now, id);
+      }
+      if (lock) {
+        this.db
+          .prepare("UPDATE tracks SET identity_locked = 1, updated_at = ? WHERE id IN (?, ?)")
+          .run(now, track.id, candidate.id);
       }
       this.db.exec("COMMIT");
     } catch (error) {

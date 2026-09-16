@@ -50,9 +50,6 @@ import {
   renamePlaylistAdmin,
 } from "./playlist-admin.js";
 
-const client = new SpotifyClient();
-const youtubeClient = new YouTubeClient();
-
 function jsonResult(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
@@ -80,7 +77,7 @@ function safeTool(handler) {
   };
 }
 
-async function loadPlaylist(playlist, { signal } = {}) {
+async function loadPlaylist(client, playlist, { signal } = {}) {
   const id = parsePlaylistId(playlist);
   const [details, items] = await Promise.all([
     client.getPlaylist(id, { signal }),
@@ -102,14 +99,14 @@ function catalogQuery(value) {
   return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(compact) ? "isrc:" + compact : value;
 }
 
-async function replaceWithChunks(id, uris, { signal } = {}) {
+async function replaceWithChunks(client, id, uris, { signal } = {}) {
   await client.replacePlaylistItems(id, uris.slice(0, 100), { signal });
   for (let offset = 100; offset < uris.length; offset += 100) {
     await client.addPlaylistItems(id, uris.slice(offset, offset + 100), { signal });
   }
 }
 
-async function loadYouTubePlaylist(reference, { allowMissing = false, signal } = {}) {
+async function loadYouTubePlaylist(youtubeClient, reference, { allowMissing = false, signal } = {}) {
   const parsed = parseYouTubePlaylistReference(reference);
   if (parsed.id) {
     const [details, items] = await Promise.all([
@@ -134,7 +131,7 @@ async function loadYouTubePlaylist(reference, { allowMissing = false, signal } =
   };
 }
 
-async function resolveYouTubeMatch(input, { limit = 5, regionCode, signal, videoId } = {}) {
+async function resolveYouTubeMatch(youtubeClient, input, { limit = 5, regionCode, signal, videoId } = {}) {
   if (videoId) {
     return {
       source: {
@@ -174,6 +171,10 @@ function youtubeDuplicate(loaded, videoId) {
 }
 
 export function createServer(library) {
+  // Constructed here — after main() has loaded .env — so constructor-snapshotted
+  // configuration (credential file path, timeouts, retry bounds) sees it.
+  const client = new SpotifyClient();
+  const youtubeClient = new YouTubeClient();
   const server = new McpServer({ name: "music-playlist-organizer", version: "0.2.0" });
 
   server.registerTool(
@@ -288,7 +289,7 @@ export function createServer(library) {
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
     safeTool(async ({ playlist }, extra) => {
-      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       return {
         playlist: {
           id: loaded.id,
@@ -310,7 +311,7 @@ export function createServer(library) {
       }),
     },
     safeTool(async ({ playlist, rules }, extra) => {
-      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       return {
         mode: "preview",
@@ -337,7 +338,7 @@ export function createServer(library) {
       }),
     },
     safeTool(async ({ playlist, mode, rules, public: isPublic, prefix }, extra) => {
-      const loaded = await loadPlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       const plan = Object.entries(classification.categories)
         .map(([category, tracks]) => ({
@@ -370,7 +371,7 @@ export function createServer(library) {
           isPublic,
           { signal: extra?.signal },
         );
-        await replaceWithChunks(target.id, entry.uris, { signal: extra?.signal });
+        await replaceWithChunks(client, target.id, entry.uris, { signal: extra?.signal });
         results.push({
           category: entry.category,
           trackCount: entry.uris.length,
@@ -419,7 +420,7 @@ export function createServer(library) {
       }),
     },
     safeTool(async ({ input, limit, regionCode }, extra) => (
-      resolveYouTubeMatch(input, { limit, regionCode, signal: extra?.signal })
+      resolveYouTubeMatch(youtubeClient, input, { limit, regionCode, signal: extra?.signal })
     )),
   );
 
@@ -438,7 +439,7 @@ export function createServer(library) {
         try {
           results.push({
             input,
-            ...(await resolveYouTubeMatch(input, { limit: 5, regionCode, signal: extra?.signal })),
+            ...(await resolveYouTubeMatch(youtubeClient, input, { limit: 5, regionCode, signal: extra?.signal })),
           });
         } catch (error) {
           if (error?.code === "CALLER_CANCELLED") throw error;
@@ -505,7 +506,7 @@ export function createServer(library) {
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
     safeTool(async ({ playlist }, extra) => {
-      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadYouTubePlaylist(youtubeClient, playlist, { signal: extra?.signal });
       return {
         playlist: youtubePlaylistInfo(loaded, playlist),
         ...findDuplicates(loaded.items),
@@ -523,7 +524,7 @@ export function createServer(library) {
       }),
     },
     safeTool(async ({ playlist, rules }, extra) => {
-      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadYouTubePlaylist(youtubeClient, playlist, { signal: extra?.signal });
       return {
         mode: "preview",
         playlist: youtubePlaylistInfo(loaded, playlist),
@@ -544,7 +545,7 @@ export function createServer(library) {
       }),
     },
     safeTool(async ({ input, videoId, playlist, mode }, extra) => {
-      const resolved = await resolveYouTubeMatch(input, { limit: 5, signal: extra?.signal, videoId });
+      const resolved = await resolveYouTubeMatch(youtubeClient, input, { limit: 5, signal: extra?.signal, videoId });
       if (mode === "apply" && resolved.source.kind === "query" && !videoId) {
         return {
           mode,
@@ -554,7 +555,7 @@ export function createServer(library) {
           message: "Free-text apply requires videoId from the selected preview candidate.",
         };
       }
-      const loaded = await loadYouTubePlaylist(playlist, { signal: extra?.signal });
+      const loaded = await loadYouTubePlaylist(youtubeClient, playlist, { signal: extra?.signal });
       const duplicate = youtubeDuplicate(loaded, resolved.match.id);
       const result = {
         mode,
@@ -623,7 +624,7 @@ export function createServer(library) {
       privacyStatus,
       dedupe,
     }, extra) => {
-      const resolved = await resolveYouTubeMatch(input, { limit: 5, signal: extra?.signal, videoId });
+      const resolved = await resolveYouTubeMatch(youtubeClient, input, { limit: 5, signal: extra?.signal, videoId });
       if (mode === "apply" && resolved.source.kind === "query" && !videoId) {
         return {
           mode,
@@ -637,7 +638,7 @@ export function createServer(library) {
       const effectivePrefix = prefix || youtubeClient.env.YOUTUBE_PLAYLIST_PREFIX || "";
       const generatedName = boundedName((effectivePrefix ? effectivePrefix + " · " : "") + selectedCategory);
       const targetReference = playlist ?? generatedName;
-      const loaded = await loadYouTubePlaylist(targetReference, {
+      const loaded = await loadYouTubePlaylist(youtubeClient, targetReference, {
         allowMissing: true,
         signal: extra?.signal,
       });

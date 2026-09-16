@@ -123,6 +123,7 @@ test("GET / serves the mobile collection shell without a session and without sec
     "selection_required", "reconciliation_required", "skipped_duplicate",
     "partial_failure", "needs review", "Run reconcile", "/api/save_music",
     "/api/library/recent", "/api/library/unsynced",
+    "EXACT_SOURCE_DUPLICATE", "SAME_CANONICAL_TRACK", "DISTINCT_TRACK",
   ]) {
     assert.ok(html.includes(marker), "shell missing UI state " + marker);
   }

@@ -84,13 +84,36 @@ export function mergeMusicTracks(library, args = {}) {
       nextStep: "Re-run with mode \"apply\" to merge.",
     };
   }
+  const fromUserDims = readStoredUserDims(library, from.id);
   const merged = library.mergeTracks(into.id, from.id);
+  const intoUserDims = readStoredUserDims(library, into.id);
+  const carried = Object.keys(fromUserDims).filter(
+    (dimension) => intoUserDims[dimension]?.some(
+      (entry) => fromUserDims[dimension].some((prior) => prior.value === entry.value),
+    ),
+  );
+  const dropped = Object.keys(fromUserDims).filter((dimension) => !carried.includes(dimension));
   return {
     mode: "apply",
     mergedTrackIds: { into: into.id, from: from.id },
     track: trackSummary(library, merged),
+    classification: {
+      carriedUserDimensions: carried,
+      droppedUserDimensions: dropped,
+    },
     note: "Manual merge recorded — later sources matching the removed track's canonical key attach here. Provider playlists were not touched.",
   };
+}
+
+function readStoredUserDims(library, trackId) {
+  let record;
+  try { record = JSON.parse(library.getSyncState(`classification.${trackId}`) ?? "null"); } catch { record = null; }
+  const dims = {};
+  for (const [dimension, entries] of Object.entries(record?.dimensions ?? {})) {
+    const userEntries = (entries ?? []).filter((entry) => entry?.source === "user");
+    if (userEntries.length) dims[dimension] = userEntries;
+  }
+  return dims;
 }
 
 export function splitMusicTrack(library, args = {}) {
@@ -121,7 +144,7 @@ export function splitMusicTrack(library, args = {}) {
       movingSources: moving.map(sourceRef),
       remainingSources: remaining.map(sourceRef),
       newTrack: {
-        title: fields.title ?? original.canonicalTitle,
+        title: fields.title ?? fields.canonicalTitle ?? original.canonicalTitle,
         artist: fields.artist ?? original.artist ?? null,
         identityLocked: true,
         copiesTags: true,
@@ -175,13 +198,10 @@ export function resolveIdentityReview(library, args = {}) {
       nextStep: "Re-run with mode \"apply\" to record the decision.",
     };
   }
-  library.dismissIdentityCandidate(track.id, candidate.id);
-  let locked = null;
-  if (lock) {
-    library.setIdentityLocked(track.id, true);
-    library.setIdentityLocked(candidate.id, true);
-    locked = [track.id, candidate.id];
-  }
+  // Dismissal and both locks land in one transaction — a partial apply can
+  // never leave the pair dismissed-but-unlocked and silently re-mergeable.
+  library.dismissIdentityCandidate(track.id, candidate.id, { lock });
+  const locked = lock ? [track.id, candidate.id] : null;
   return {
     mode: "apply",
     dismissed: { trackId: track.id, candidateTrackId: candidate.id, pairWasPending: pending },

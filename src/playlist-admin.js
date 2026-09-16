@@ -171,7 +171,7 @@ export async function removeFromPlaylist({ youtube }, args = {}, { signal } = {}
     };
   }
 
-  let removedItemId = null;
+  let removedItemId;
   try {
     const outcome = await youtube.removeVideoFromPlaylist(playlistId, videoId, { signal });
     if (outcome?.removed === false || outcome?.reason === "not_in_playlist") {

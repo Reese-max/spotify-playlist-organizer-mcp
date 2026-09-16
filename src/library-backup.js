@@ -43,7 +43,7 @@ function parseBackup(input) {
 
 export function exportLibrary(library, { format = "json" } = {}) {
   const rows = library.exportRows();
-  if (format === "csv") return toCsv(rows, library);
+  if (format === "csv") return toCsv(rows);
   if (format !== "json") {
     throw new LibraryError("LIBRARY_INPUT_INVALID", "format must be \"json\" or \"csv\".");
   }
@@ -108,7 +108,7 @@ export function restoreLibrary(library, input, { mode = "preview" } = {}) {
 
 // Readable, intentionally lossy: one row per track with joined source ids,
 // tags, and playlist names. Restore must go through the JSON format.
-function toCsv(rows, library) {
+function toCsv(rows) {
   const escape = (value) => {
     const text = String(value ?? "");
     return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;

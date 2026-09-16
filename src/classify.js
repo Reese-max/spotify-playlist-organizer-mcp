@@ -2,7 +2,6 @@ import * as z from "zod/v4";
 import { DEFAULT_RULES } from "./core.js";
 import {
   DIMENSIONS,
-  TAG_KEYWORDS,
   TAXONOMY,
   TAXONOMY_VERSION,
   canonicalValue,

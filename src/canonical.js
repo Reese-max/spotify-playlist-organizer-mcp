@@ -1,11 +1,12 @@
 // Latin/Greek/Cyrillic diacritics only; CJK combining marks (e.g. dakuten
 // U+3099/U+309A) are phonemes, not decoration, and must survive normalization.
+// eslint-disable-next-line no-misleading-character-class -- combining marks are matched individually on purpose.
 const COMBINING_MARK = /[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF]/gu;
 const PUNCT_OR_SYMBOL = /[\p{P}\p{S}]/gu;
 const WHITESPACE = /\s+/g;
 const APOSTROPHE = /['ʼ`]/g;
 const CJK_QUOTE_MARK = /[「」『』《》]/g;
-const BRACKET_SEGMENT = /[\(\[\{【]([^()\[\]{}【】]*)[\)\]\}】]/g;
+const BRACKET_SEGMENT = /[([{【]([^()[\]{}【】]*)[)\]}】]/g;
 const FEATURE_TAIL = /(?:\s*[-–—:]\s*|\s+)(?:feat\.?|ft\.?|featuring)\s+(.+)$/i;
 const FEATURE_INNER = /^(?:feat\.?|ft\.?|featuring)\s+(.+)$/i;
 const ARTIST_TITLE_SPLIT = /^\s*(.+?)\s*[-–—]\s*(.+?)\s*$/;

@@ -257,6 +257,7 @@ test("apply by batchId only processes what preview resolved; YouTube sync is opt
     { library, youtube },
     { batchId: preview.batchId, resume: true, syncPlaylist: PL_SYNC },
   );
+  assert.equal(synced.action, "imported");
   assert.ok(youtube.addCalls.includes(`${PL_SYNC}:${VID_NEW1}`));
 });
 

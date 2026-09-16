@@ -78,7 +78,7 @@ test("export produces deterministic versioned JSON with metadata and zero secret
 });
 
 test("round-trip: an empty library restores tracks, sources, tags, and decisions", async (t) => {
-  const { library: source, saved } = await seededLibrary(t);
+  const { library: source } = await seededLibrary(t);
   const backup = exportLibrary(source, { format: "json" });
 
   const { directory, filePath } = await tempLibrary();

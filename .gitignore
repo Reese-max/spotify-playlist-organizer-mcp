@@ -9,3 +9,5 @@ youtube-credentials.json
 .youtube-credentials*
 .DS_Store
 npm-debug.log*
+reports/
+.stryker-tmp/

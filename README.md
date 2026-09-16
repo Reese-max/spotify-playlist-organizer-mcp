@@ -287,11 +287,29 @@ youtube_save_track({
 ## 品質控制
 
 ```powershell
-npm test
-npm run smoke
+npm test                # 每個 commit 必跑（node:test，122 tests）
+npm run smoke           # MCP stdio server 啟動煙霧測試
+npm run test:coverage   # 測試 + 原生 V8 coverage 報表（行/分支/函數）
+npm run crap            # CRAP 分數：cyclomatic complexity × coverage
+npm run crap -- --gate 30   # 有任何函數 CRAP > 30 就 exit 1（可做門檻）
+npm run mutate          # Stryker mutation testing（全檔很慢，見下）
+npx stryker run --mutate src/library.js   # 單檔 scope
 ```
 
-GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm test`，並對 job 設定時間上限與 read-only repository 權限。
+### 品質閘門定位
+
+| 工具 | 何時跑 | 量什麼 |
+|---|---|---|
+| `npm test` | 每個 commit（CI 也跑） | 行為正確性——spec 裡的每個驗收條件 |
+| `npm run test:coverage` | CI 每個 push | 行/分支/函數覆蓋率報表 |
+| `npm run crap` | PR 前／清理複雜度時 | CRAP = comp²×(1−cov)³+comp，找出「又複雜又沒測」的函數 |
+| `npm run mutate` | 定期深檢（約 7 分鐘/檔，不進 CI） | 變異測試分數——測試是否真的抓得到 bug |
+
+- **Mutation testing 刻意不進 CI**：`node --test` command runner 每個 mutant 跑整套測試，單檔約 7 分鐘、全 `src/` 估約 2 小時。用 `--mutate` scope 到正在改的檔案。
+- **CRAP 目前只做報表不做閘**：既有 `server.js`/`spotify.js`/`youtube.js` 有低覆蓋的歷史函數，`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看清基線再決定閘值，不在第一天就硬卡。
+- Baseline（2026-09）：全檔行覆蓋 ~72% / 分支 ~74% / 函數 ~84%；`src/core.js` mutation score 46.6%（268 mutants）。
+
+GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
 
 ## 官方文件
 

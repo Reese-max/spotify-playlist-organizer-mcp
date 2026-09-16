@@ -8,7 +8,10 @@
     "start": "node src/server.js",
     "test": "node --test",
     "smoke": "node --test test/mcp-smoke.test.js",
-    "youtube:auth": "node scripts/youtube-auth.js"
+    "youtube:auth": "node scripts/youtube-auth.js",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "crap": "node scripts/crap.mjs",
+    "mutate": "stryker run"
   },
   "engines": {
     "node": ">=24"
@@ -16,5 +19,9 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "eslint": "^10.10.0"
   }
 }

@@ -451,6 +451,73 @@ test("list_unsynced_music reports not-synced, identity-conflict, and provider-un
   }
 });
 
+test("list_unsynced_music filters synced/ok markers in SQL so total and pagination stay consistent", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const playlist = { provider: "youtube", playlistId: "PL_MIX", name: "Mixed" };
+    // Many fully-synced markers must not crowd out the few tracks that
+    // actually need attention — the filter runs before LIMIT/OFFSET.
+    const synced = [];
+    for (let i = 0; i < 5; i += 1) {
+      const track = await seedTrack(library, {
+        title: `Synced ${i}`, videoId: `SYNCED${i}XXXX`, playlist,
+      });
+      library.setSyncState(`sync.${track.id}`, { state: i === 4 ? "ok" : "synced" });
+      synced.push(track);
+    }
+    const broken = await seedTrack(library, { title: "Broken", videoId: "BROKEN12345", playlist });
+    library.setSyncState(`sync.${broken.id}`, "{not json");
+    const noState = await seedTrack(library, { title: "No State", videoId: "NOSTATE1234", playlist });
+    library.setSyncState(`sync.${noState.id}`, { playlistId: "PL_MIX" });
+    const unavailable = await seedTrack(library, { title: "Gone", videoId: "GONE1234567", playlist });
+    library.setSyncState(`sync.${unavailable.id}`, { state: "unavailable" });
+    const unknown = await seedTrack(library, { title: "Ambiguous", videoId: "AMBIG123456", playlist });
+    library.setSyncState(`sync.${unknown.id}`, { state: "unknown_after_write" });
+    const localOnly = await seedTrack(library, { title: "Local", videoId: "LOCAL123456" });
+    const conflict = await seedTrack(library, { title: "Conflicted", videoId: "CONFL123456", playlist });
+    library.setNeedsReview(conflict.id, true);
+
+    // Unfiltered: every listed track carries at least one reason, and the
+    // synced/ok/broken markers never surface on their own.
+    const all = listUnsyncedMusic(library, {});
+    const allIds = all.items.map((entry) => entry.track.id);
+    assert.deepEqual(
+      [...allIds].sort((a, b) => a - b),
+      [unavailable.id, unknown.id, localOnly.id, conflict.id].sort((a, b) => a - b),
+    );
+    for (const entry of all.items) assert.ok(entry.reasons.length > 0);
+    assert.equal(all.total, all.items.length);
+    assert.equal(all.hasMore, false);
+
+    // provider_unavailable: items/total/hasMore agree and no empty first page.
+    const pageOne = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1 });
+    assert.equal(pageOne.total, 2);
+    assert.equal(pageOne.items.length, 1);
+    assert.equal(pageOne.items[0].track.id, unknown.id);
+    assert.equal(pageOne.hasMore, true);
+    const pageTwo = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1, offset: 1 });
+    assert.equal(pageTwo.total, 2);
+    assert.equal(pageTwo.items.length, 1);
+    assert.equal(pageTwo.items[0].track.id, unavailable.id);
+    assert.equal(pageTwo.hasMore, false);
+    const pageEnd = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1, offset: 2 });
+    assert.equal(pageEnd.total, 2);
+    assert.equal(pageEnd.items.length, 0);
+    assert.equal(pageEnd.hasMore, false);
+
+    // The other reasons keep working alongside the tightened marker filter.
+    const notSynced = listUnsyncedMusic(library, { reason: "not_synced" });
+    assert.deepEqual(notSynced.items.map((entry) => entry.track.id), [localOnly.id]);
+    assert.equal(notSynced.total, 1);
+    const conflicts = listUnsyncedMusic(library, { reason: "identity_conflict" });
+    assert.deepEqual(conflicts.items.map((entry) => entry.track.id), [conflict.id]);
+    assert.equal(conflicts.total, 1);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("update_music_classification preview shows before/after diff without writing", async () => {
   const { directory, library } = await tempLibrary();
   try {

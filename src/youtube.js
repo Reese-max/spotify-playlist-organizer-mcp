@@ -1,8 +1,14 @@
 import { parseLink } from "./core.js";
-import { CredentialStore, credentialsFromTokenResponse } from "./credentials.js";
+import {
+  CredentialStore,
+  credentialsFromTokenResponse,
+  REQUIRED_YOUTUBE_SCOPE,
+  scopeCovers,
+} from "./credentials.js";
 import {
   awaitWithDeadline,
   fetchWithDeadline,
+  ProviderRequestError,
   retryDelayMs,
   timeoutFromEnv,
   waitForRetry,
@@ -174,10 +180,26 @@ export class YouTubeClient {
     return stored?.refreshToken ?? null;
   }
 
+  assertStoredScopeSufficient(stored) {
+    if (stored && !scopeCovers(stored.scope)) {
+      throw new ProviderRequestError(
+        "AUTH_SCOPE_INSUFFICIENT",
+        "Stored YouTube credentials do not grant the required scope ("
+          + REQUIRED_YOUTUBE_SCOPE
+          + "). Re-run npm run youtube:auth and approve YouTube access.",
+        { retryable: false },
+      );
+    }
+  }
+
   async refreshUserToken({ signal } = {}) {
+    if (this.refreshingUserToken) return this.refreshingUserToken;
     const refreshToken = await this.getRefreshToken();
     if (!refreshToken) return null;
-    if (this.refreshingUserToken) return this.refreshingUserToken;
+    const refreshFromStore = !this.env.YOUTUBE_REFRESH_TOKEN?.trim();
+    if (refreshFromStore) {
+      this.assertStoredScopeSufficient(await this.loadStoredCredentials());
+    }
 
     this.refreshingUserToken = (async () => {
       const clientId = requiredAny(
@@ -219,7 +241,7 @@ export class YouTubeClient {
       }
       const previous = await this.loadStoredCredentials();
       const credentials = credentialsFromTokenResponse(data, previous ?? { refreshToken });
-      if (this.credentials.passphraseConfigured && credentials.refreshToken) {
+      if (this.credentials.passphraseConfigured && credentials.refreshToken && (refreshFromStore || previous)) {
         await this.credentials.save(credentials);
         this.storedCredentials = credentials;
       }
@@ -237,7 +259,7 @@ export class YouTubeClient {
   async getUserToken({ signal } = {}) {
     if (this.env.YOUTUBE_ACCESS_TOKEN?.trim()) return this.env.YOUTUBE_ACCESS_TOKEN.trim();
     const stored = await this.loadStoredCredentials();
-    if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now())) {
+    if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now()) && scopeCovers(stored.scope)) {
       return stored.accessToken;
     }
     const refreshed = await this.refreshUserToken({ signal });
@@ -468,6 +490,8 @@ export class YouTubeClient {
         source: "environment",
         filePath: this.credentials.filePath,
         refreshable: Boolean(this.env.YOUTUBE_REFRESH_TOKEN?.trim()),
+        scopeSufficient: null,
+        warning: "INSECURE_ENVIRONMENT_FALLBACK",
       };
     }
     return this.credentials.status();
@@ -480,6 +504,7 @@ export class YouTubeClient {
     const hasFileCredential = await this.credentials.exists();
     let stored = null;
     if (this.credentials.passphraseConfigured) {
+      this.storedCredentials = undefined;
       stored = await this.loadStoredCredentials();
     }
     const refreshToken = this.env.YOUTUBE_REFRESH_TOKEN?.trim() || stored?.refreshToken || null;

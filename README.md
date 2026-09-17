@@ -69,7 +69,9 @@ npm run youtube:auth
 
 這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`；不要把 passphrase、`.env` 或憑證檔提交到 Git。
 
-`YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
+`YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository；使用 fallback 時 `youtube_auth_status` 會固定回報 `warning: "INSECURE_ENVIRONMENT_FALLBACK"`。
+
+`youtube_auth_status` 只回報狀態與非機密資訊（`READY | EXPIRED | REVOKED | MISSING | UNKNOWN`、授權 scopes、到期時間、頻道 fingerprint），不會輸出 token。若授權時未取得必要的 YouTube scope，憑證會被標記 `AUTH_SCOPE_INSUFFICIENT` 並拒絕使用（fail closed）：請重新執行 `npm run youtube:auth` 並核准 YouTube 權限。MCP 工具的成功與錯誤輸出都會經過 secret redaction，避免憑證外洩。
 
 ## 使用範例
 

@@ -27,6 +27,28 @@
 - `youtube_save_track`：辨識、分類、去重，並加入指定或自動建立的分類播放清單。
 - `youtube_auth_status`：查看憑證狀態，不會顯示 token。
 - `youtube_auth_revoke`：撤銷 OAuth 憑證並刪除本機加密憑證檔。
+- `library_status`：查看本機 Personal Music Library 狀態（schema 版本與各類記錄數），不會顯示任何 secret。
+
+## Personal Music Library（本機收藏庫）
+
+`youtube_save_track` 以 `mode: "apply"` 寫入 YouTube 成功後，會同時把歌曲、YouTube source、分類標籤、播放清單關聯與同步狀態寫進本機 SQLite Library。`mode: "preview"` 只讀取 Library（回傳 `library.existingTrackId`），不會寫入收藏資料。
+
+- 重複收藏同一 `videoId` 會對應到同一筆 track，不會產生重複記錄；同一首歌的多個 YouTube 版本會併入同一 track 的多筆 `track_sources`。
+- Library 寫入失敗時，工具仍會回報 YouTube 端結果，並附上 `library.status: "FAILED"` 與 `error.code`，不會假裝兩邊都成功。
+- 重啟 MCP 後收藏、標籤與 `sync_state` 仍存在；schema 由版本化 migration 管理，未來升級不需要手動刪除 DB。若 DB 的 schema 版本比 server 新，server 會回報 `LIBRARY_SCHEMA_TOO_NEW`，請升級 server 而不是刪除資料庫。
+- OAuth token、client secret 與 credential passphrase 一律沿用既有加密憑證子系統，不會寫入 Library DB。
+
+### 預設位置
+
+`MUSIC_LIBRARY_DB` 未設定時，DB 放在使用者設定目錄下的 `music-playlist-organizer/library.db`（與加密憑證檔同目錄；Windows 為 `%APPDATA%`，其餘平台為 `$XDG_CONFIG_HOME` 或 `~/.config`）。可用環境變數 `MUSIC_LIBRARY_DB` 指定其他路徑。
+
+### 備份
+
+關閉 MCP server 後直接複製 `library.db`（若同目錄存在 `library.db-wal`／`library.db-shm` 請一併複製），即可完整備份收藏庫。
+
+### 重設
+
+停止 MCP server，刪除 `library.db`（以及同目錄的 `library.db-wal`／`library.db-shm`），下次啟動會自動重建空白 schema。此動作只清掉本機收藏庫，不影響 YouTube 播放清單或 OAuth 憑證。
 
 ## 需求
 

@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
@@ -9,6 +11,7 @@ import {
   parseLink,
   parsePlaylistId,
 } from "./core.js";
+import { LibraryStore } from "./library.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "./spotify.js";
 import {
   parseYouTubePlaylistReference,
@@ -139,7 +142,58 @@ function youtubeDuplicate(loaded, videoId) {
   return loaded.items.find((item) => item.id === videoId) ?? null;
 }
 
-function createServer() {
+function libraryErrorPayload(error) {
+  return {
+    code: typeof error?.code === "string" ? error.code : "LIBRARY_WRITE_FAILED",
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function libraryLookup(store, videoId) {
+  try {
+    const existing = videoId ? store.findTrackByVideoId(videoId) : null;
+    return { status: "READY", existingTrackId: existing?.id ?? null };
+  } catch (error) {
+    return { status: "UNAVAILABLE", error: libraryErrorPayload(error) };
+  }
+}
+
+function libraryRecordSave(store, { resolved, target, targetName, category, detail }) {
+  try {
+    const result = store.saveTrack({
+      title: resolved.match.name,
+      artist: resolved.match.artists?.[0] ?? resolved.match.channel ?? null,
+      sources: [{
+        provider: "youtube",
+        videoId: resolved.match.id,
+        url: resolved.match.url,
+        channel: resolved.match.channel,
+        isPrimary: true,
+      }],
+      tags: category ? [category] : [],
+      playlists: [{
+        name: targetName,
+        provider: "youtube",
+        providerPlaylistId: target.id ?? null,
+        category: category ?? null,
+      }],
+      aliases: resolved.source.kind === "query"
+        ? [{ alias: resolved.source.query, kind: "query" }]
+        : [],
+      sync: {
+        provider: "youtube",
+        providerPlaylistId: target.id ?? "",
+        status: "synced",
+        detail,
+      },
+    });
+    return { status: "RECORDED", trackId: result.trackId, created: result.created };
+  } catch (error) {
+    return { status: "FAILED", error: libraryErrorPayload(error) };
+  }
+}
+
+export function createServer({ library = new LibraryStore() } = {}) {
   const server = new McpServer({ name: "music-playlist-organizer", version: "0.2.0" });
 
   server.registerTool(
@@ -614,13 +668,27 @@ function createServer() {
       };
 
       if (mode === "preview") {
-        return { ...preview, action: duplicate && dedupe ? "would_skip_duplicate" : "would_add" };
+        return {
+          ...preview,
+          library: libraryLookup(library, resolved.match.id),
+          action: duplicate && dedupe ? "would_skip_duplicate" : "would_add",
+        };
       }
       if (!loaded.id && !createIfMissing) {
         throw new Error("The target YouTube playlist does not exist and createIfMissing is false.");
       }
       if (duplicate && dedupe) {
-        return { ...preview, action: "skipped_duplicate" };
+        return {
+          ...preview,
+          action: "skipped_duplicate",
+          library: libraryRecordSave(library, {
+            resolved,
+            target: loaded,
+            targetName,
+            category: selectedCategory,
+            detail: "already_in_playlist",
+          }),
+        };
       }
 
       let target = loaded;
@@ -669,13 +737,33 @@ function createServer() {
         playlist: youtubePlaylistInfo(target, targetName),
         playlistAction: loaded.id ? "use_existing" : "created",
         action: "added",
+        library: libraryRecordSave(library, {
+          resolved,
+          target,
+          targetName,
+          category: selectedCategory,
+          detail: "added",
+        }),
       };
     }),
+  );
+
+  server.registerTool(
+    "library_status",
+    {
+      description: "Report the local Personal Music Library status: schema version and record counts. Never exposes tokens or secrets.",
+      inputSchema: z.object({}),
+    },
+    safeTool(() => library.status()),
   );
 
   return server;
 }
 
-const server = createServer();
-const transport = new StdioServerTransport();
-await server.connect(transport);
+const invokedAsMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsMain) {
+  const server = createServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

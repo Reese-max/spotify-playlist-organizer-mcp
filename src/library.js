@@ -1534,8 +1534,15 @@ export class MusicLibrary {
     const conditions = {
       identity_conflict: "t.needs_review = 1",
       not_synced: "NOT EXISTS (SELECT 1 FROM track_playlists tp WHERE tp.track_id = t.id)",
-      // Any per-track sync marker is a candidate; the parsed state decides.
-      provider_unavailable: "ss.value IS NOT NULL",
+      // Only markers whose parsed state still needs attention are candidates.
+      // This mirrors the reason check below (a string state other than
+      // synced/ok) so filtering happens before LIMIT/OFFSET and `total`
+      // counts exactly the rows that will be returned. json_valid gates the
+      // JSON functions — malformed marker values must not abort the query.
+      provider_unavailable: `CASE WHEN json_valid(ss.value)
+        THEN json_type(ss.value, '$.state') = 'text'
+             AND json_extract(ss.value, '$.state') NOT IN ('synced', 'ok')
+        ELSE 0 END`,
     };
     const where = reason
       ? conditions[reason]
@@ -1579,10 +1586,7 @@ export class MusicLibrary {
         return { track: trackRow(row), reasons, sync };
       });
 
-      // `provider_unavailable` is decided by the parsed marker, so the SQL
-      // candidate set can be wider than the final answer for that reason.
-      const filtered = reason ? items.filter((item) => item.reasons.includes(reason)) : items;
-      return { items: filtered, total, ...page };
+      return { items, total, ...page };
     } catch (error) {
       readFailed(error);
     }

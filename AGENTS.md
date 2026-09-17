@@ -26,6 +26,7 @@ Local-first Personal Music Library：canonical track 存 SQLite，多個 YouTube
 9. `save_music`：自由文字未綁 videoId 必須 `selection_required`，禁止默默存搜尋第一名；YouTube 與 Library 失敗要分開回報，不盲目 retry。
 10. Restore：`importRows` 的 idMap 必須在 first pass 就涵蓋 insert entry（insert 用原 id），否則 identity_candidates 靜默丟失。
 11. MCP stdio server 的 SIGTERM/SIGINT handler 必須 `process.exit(0)`——Windows `child.kill()` 是強殺但 Linux 送真 signal，不 exit 會讓 CI/test 掛死。
+12. `save_music` 的 remote dedupe 不能只查 Library `track_sources`：canonical policy 要同時把播放清單項目 metadata 過 `canonicalizeSource` 比對 key（Library 沒見過的上傳也抓得到）；`listTrackSources` 失敗要回報 `dedupeError`，不可靜默降級。
 
 ## 品質指令
 

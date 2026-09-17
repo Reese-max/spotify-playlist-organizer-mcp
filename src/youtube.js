@@ -37,7 +37,7 @@ function requiredAny(env, names, description) {
     const value = env[name]?.trim();
     if (value) return value;
   }
-  throw new Error(description + " is required for this operation.");
+  throw new Error(description + " is required for this operation. Set it in the environment or a .env file.");
 }
 
 function asQuery(params = {}) {
@@ -243,7 +243,7 @@ export class YouTubeClient {
     const refreshed = await this.refreshUserToken({ signal });
     if (refreshed) return refreshed;
     throw new Error(
-      "A YouTube user token is required. Configure the encrypted credential store or set the explicit environment fallback.",
+      "A YouTube user token is required. Set YOUTUBE_ACCESS_TOKEN or YOUTUBE_REFRESH_TOKEN in the environment or .env file, or complete npm run youtube:auth with YOUTUBE_CREDENTIAL_PASSPHRASE configured.",
     );
   }
 

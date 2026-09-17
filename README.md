@@ -67,7 +67,9 @@ PROVIDER_MAX_READ_RETRIES=1
 npm run youtube:auth
 ```
 
-這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`；不要把 passphrase、`.env` 或憑證檔提交到 Git。
+`npm run youtube:auth` 與 MCP server（`src/server.js`）啟動時都會自動載入 `.env`：先找工作目錄下的 `.env`，找不到再找專案根目錄的 `.env`；已存在於環境中的變數不會被覆蓋。要指定其他設定檔位置時，把 `MPO_ENV_FILE` 設成該檔案路徑即可。授權腳本啟動時會顯示實際載入的 `.env` 路徑；若缺少必要設定，錯誤訊息會直接指出缺少的 key，不需要猜 `.env` 有沒有被讀到。
+
+這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`（放在 `.env` 或環境變數皆可）；不要把 passphrase、`.env` 或憑證檔提交到 Git。
 
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
 

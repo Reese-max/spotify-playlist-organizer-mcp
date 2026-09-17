@@ -3,15 +3,33 @@ import http from "node:http";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { CredentialStore, credentialsFromTokenResponse } from "../src/credentials.js";
+import { loadEnvFile } from "../src/env.js";
 import { awaitWithDeadline, fetchWithDeadline, timeoutFromEnv } from "../src/http.js";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 
+const envFile = loadEnvFile();
+console.log(
+  envFile.loaded
+    ? "Loaded environment settings from " + envFile.filePath + "."
+    : "No .env file was found (looked at " + envFile.searched.join(", ") + "); using the shell environment only.",
+);
+
 function required(name) {
   const value = process.env[name]?.trim();
-  if (!value) throw new Error(name + " is required.");
-  return value;
+  if (value) return value;
+  if (process.env[name] !== undefined) {
+    throw new Error(
+      name + " is set in the environment but empty, which overrides any .env value. Unset it or give it a value.",
+    );
+  }
+  throw new Error(
+    name + " is required."
+    + (envFile.loaded
+      ? " " + envFile.filePath + " was loaded but does not define it; set it there or in the environment."
+      : " No .env file was found (looked at " + envFile.searched.join(", ") + "); set it in the environment or create one."),
+  );
 }
 
 function finish(server, message, exitCode) {
@@ -23,10 +41,10 @@ async function ensurePassphrase() {
   if (process.env.YOUTUBE_CREDENTIAL_PASSPHRASE) return;
   if (!input.isTTY || !output.isTTY) {
     throw new Error(
-      "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the local shell before running npm run youtube:auth.",
+      "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the environment or in the .env file before running npm run youtube:auth.",
     );
   }
-  const readline = createInterface({ input, output });
+  const readline = createInterface({ input, output, historySize: 0 });
   try {
     const passphrase = await readline.question("Credential passphrase (stored locally, never printed): ");
     if (!passphrase) throw new Error("A non-empty credential passphrase is required.");

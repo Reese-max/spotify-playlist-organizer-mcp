@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   parseYouTubePlaylistReference,
@@ -105,4 +108,20 @@ test("lists, creates, and adds to playlists with a user OAuth token", async () =
   assert.equal(calls[1].options.method, "POST");
   assert.equal(JSON.parse(calls[1].options.body).snippet.title, "Chill");
   assert.equal(JSON.parse(calls[2].options.body).snippet.resourceId.videoId, "dQw4w9WgXcQ");
+});
+
+test("names the missing environment keys when no user token is configured", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "youtube-no-token-"));
+  try {
+    const client = new YouTubeClient(
+      { YOUTUBE_CREDENTIAL_FILE: path.join(directory, "absent.json") },
+      async () => { throw new Error("fetch should not run"); },
+    );
+    await assert.rejects(
+      client.getUserToken(),
+      /YOUTUBE_ACCESS_TOKEN.*YOUTUBE_REFRESH_TOKEN.*YOUTUBE_CREDENTIAL_PASSPHRASE/s,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

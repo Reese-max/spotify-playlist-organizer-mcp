@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
+import { loadEnvFile } from "./env.js";
 import {
   classifyItems,
   classifyTrack,
@@ -15,6 +16,8 @@ import {
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
+
+loadEnvFile();
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();

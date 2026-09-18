@@ -12,6 +12,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
     cwd: root,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const exitPromise = once(child, "exit").catch(() => {});
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
@@ -53,6 +54,6 @@ test("starts an MCP stdio server and answers initialize", async () => {
     assert.equal(response.result.serverInfo.name, "music-playlist-organizer");
   } finally {
     child.kill();
-    await once(child, "exit").catch(() => {});
+    await exitPromise;
   }
 });

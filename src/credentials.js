@@ -5,6 +5,16 @@ import path from "node:path";
 
 const FILE_VERSION = 1;
 
+export const REQUIRED_YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube";
+
+export function grantedScopes(scope) {
+  return String(scope ?? "").split(/\s+/).filter(Boolean);
+}
+
+export function scopeCovers(scope, required = REQUIRED_YOUTUBE_SCOPE) {
+  return grantedScopes(scope).includes(required);
+}
+
 export class CredentialStoreError extends Error {
   constructor(code, message, options = {}) {
     super(message);
@@ -54,6 +64,8 @@ function normalizeCredentials(value) {
     scope: typeof value.scope === "string" ? value.scope : "",
     expiresAt: Number.isFinite(Number(value.expiresAt)) ? Number(value.expiresAt) : null,
     savedAt: typeof value.savedAt === "string" ? value.savedAt : null,
+    channelId: typeof value.channelId === "string" ? value.channelId : null,
+    channelTitle: typeof value.channelTitle === "string" ? value.channelTitle : null,
   };
 }
 
@@ -67,6 +79,8 @@ export function credentialsFromTokenResponse(data, previous = {}) {
       ? Date.now() + Math.max(Number(data.expires_in) - 60, 0) * 1000
       : previous.expiresAt ?? null,
     savedAt: new Date().toISOString(),
+    channelId: data?.channelId ?? previous.channelId ?? null,
+    channelTitle: data?.channelTitle ?? previous.channelTitle ?? null,
   });
 }
 
@@ -182,13 +196,28 @@ export class CredentialStore {
       const hasRefresh = Boolean(credentials.refreshToken);
       const hasAccess = Boolean(credentials.accessToken);
       const expired = credentials.expiresAt !== null && credentials.expiresAt <= Date.now();
+      const usable = hasRefresh || (hasAccess && !expired);
+      const scopes = grantedScopes(credentials.scope);
+      const scopeSufficient = scopeCovers(credentials.scope);
+      const insufficientScope = usable && !scopeSufficient;
+      const reason = !hasRefresh && !hasAccess
+        ? "NO_USABLE_TOKEN"
+        : insufficientScope
+          ? "AUTH_SCOPE_INSUFFICIENT"
+          : null;
       return {
-        status: hasRefresh || (hasAccess && !expired) ? "READY" : hasAccess ? "EXPIRED" : "UNKNOWN",
+        status: usable && !insufficientScope ? "READY" : hasAccess && !insufficientScope ? "EXPIRED" : "UNKNOWN",
         filePath: this.filePath,
         refreshable: hasRefresh,
         scope: credentials.scope || null,
+        grantedScopes: scopes,
+        requiredScope: REQUIRED_YOUTUBE_SCOPE,
+        scopeSufficient,
         expiresAt: credentials.expiresAt,
-        ...(hasRefresh || hasAccess ? {} : { reason: "NO_USABLE_TOKEN" }),
+        channel: credentials.channelId
+          ? { id: credentials.channelId, title: credentials.channelTitle }
+          : null,
+        ...(reason ? { reason } : {}),
       };
     } catch (error) {
       return {

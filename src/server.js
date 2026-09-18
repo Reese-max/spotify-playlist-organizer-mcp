@@ -15,36 +15,10 @@ import {
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
+import { safeTool } from "./redact.js";
 
 const client = new SpotifyClient();
 const youtubeClient = new YouTubeClient();
-
-function jsonResult(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
-}
-
-function errorResult(error) {
-  const payload = {
-    error: error instanceof Error ? error.message : String(error),
-  };
-  if (typeof error?.code === "string") payload.code = error.code;
-  if (Number.isInteger(error?.status)) payload.status = error.status;
-  if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
-  return {
-    isError: true,
-    content: [{ type: "text", text: JSON.stringify(payload) }],
-  };
-}
-
-function safeTool(handler) {
-  return async (args, extra) => {
-    try {
-      return jsonResult(await handler(args, extra));
-    } catch (error) {
-      return errorResult(error);
-    }
-  };
-}
 
 async function loadPlaylist(playlist, { signal } = {}) {
   const id = parsePlaylistId(playlist);

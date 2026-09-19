@@ -151,6 +151,7 @@ export class YouTubeClient {
     }
     this.env = env;
     this.fetch = fetchImpl;
+    this.apiBase = String(env.YOUTUBE_API_BASE_URL ?? "").trim().replace(/\/+$/, "") || API_BASE;
     this.refreshingUserToken = null;
     this.timeoutMs = timeoutFromEnv(this.env);
     this.maxReadRetries = Math.min(Math.max(Number(this.env.PROVIDER_MAX_READ_RETRIES) || 1, 0), 2);
@@ -276,7 +277,7 @@ export class YouTubeClient {
 
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const queryString = asQuery(queryParams);
-      const url = API_BASE + path + (queryString ? "?" + queryString : "");
+      const url = this.apiBase + path + (queryString ? "?" + queryString : "");
       const response = await fetchWithDeadline(this.fetch, url, {
         method,
         headers,

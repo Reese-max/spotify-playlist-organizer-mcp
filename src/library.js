@@ -1727,8 +1727,8 @@ export class MusicLibrary {
       } catch {
         // setSyncState also accepts plain strings such as youtube.lastPull.
         // A malformed object/array could hide credential fields, so exclude it.
-        if (typeof row.value === "string"
-          && (/^[\[{]/.test(row.value.trim()) || SECRETISH_KEY.test(row.value))) {
+        const first = typeof row.value === "string" ? row.value.trimStart()[0] : null;
+        if (first === "{" || first === "[" || (typeof row.value === "string" && SECRETISH_KEY.test(row.value))) {
           skippedSecrets += 1;
           continue;
         }

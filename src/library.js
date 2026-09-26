@@ -1794,7 +1794,7 @@ export class MusicLibrary {
       } catch {
         // Plain scalars are lossless. A value that looks like a broken JSON
         // object/array cannot be inspected safely for hidden credential keys.
-        malformedStructured = typeof row.value === "string" && /^[\s]*[\[{]/.test(row.value);
+        malformedStructured = typeof row.value === "string" && ["{", "["].includes(row.value.trimStart()[0]);
       }
       // Inspect both representations: raw text catches credential-shaped
       // strings, while parsed JSON catches escaped text inside nested values.

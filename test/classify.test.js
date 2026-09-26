@@ -256,3 +256,37 @@ test("classificationToTrackFields maps only populated dimensions", async () => {
     assert.ok(["genre", "mood", "language", "activity", "energy", "era", "artist"].includes(field));
   }
 });
+
+test("a new canonical source keeps the existing track's user classification", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const first = await classifyMusic({
+      title: "Shared Song", artist: "Shared Artist",
+      userClassification: { genre: "j-pop" },
+    });
+    const saved = persistClassification(library, {
+      title: "Shared Song", artist: "Shared Artist",
+      source: { provider: "youtube", sourceId: "V_FIRST0001" },
+    }, first);
+    const automatic = await classifyMusic({
+      title: "Shared Song", artist: "Shared Artist", description: "rock guitar drums",
+    });
+    assert.equal(automatic.dimensions.genre[0]?.value, "rock");
+
+    const second = persistClassification(library, {
+      title: "Shared Song", artist: "Shared Artist",
+      source: { provider: "youtube", sourceId: "V_NEXT00001" },
+    }, automatic);
+    assert.equal(second.trackId, saved.trackId);
+    assert.equal(second.track.genre, "j-pop");
+    assert.equal(second.classification.provenance.genre, "user");
+    assert.ok(second.preserved.includes("genre"));
+    const stored = JSON.parse(library.getSyncState(classificationSyncKey(saved.trackId)));
+    assert.equal(stored.dimensions.genre[0].value, "j-pop");
+    assert.equal(stored.dimensions.genre[0].source, "user");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

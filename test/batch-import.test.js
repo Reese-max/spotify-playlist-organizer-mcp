@@ -273,3 +273,49 @@ test("import_status summarizes a stored batch", async (t) => {
   const after = importStatus(library, { batchId: preview.batchId });
   assert.equal(after.done, 3);
 });
+
+test("transient apply verification remains pending and succeeds on resume", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Recoverable Song" });
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  youtube.getVideo = async () => {
+    throw Object.assign(new Error("provider timed out"), { code: "TIMEOUT" });
+  };
+
+  const partial = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(partial.action, "partial_failure");
+  assert.equal(partial.results[0].status, "retryable");
+  assert.equal(partial.remaining, 1);
+  assert.equal(importStatus(library, { batchId: preview.batchId }).pending, 1);
+  assert.equal(library.trackCount(), 0);
+
+  youtube.getVideo = originalGetVideo;
+  const resumed = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, resume: true },
+  );
+  assert.equal(resumed.action, "imported");
+  assert.equal(resumed.results[0].status, "imported");
+  assert.equal(library.trackCount(), 1);
+});
+
+test("a failed requested playlist add makes the batch partial and names reconciliation", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Sync Me" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const preview = await previewImport(
+    { library, youtube }, { items: [VID_NEW1], syncPlaylist: PL_SYNC },
+  );
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("write timed out"), { code: "TIMEOUT" });
+  };
+
+  const result = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(result.action, "partial_failure");
+  assert.equal(result.results[0].status, "imported");
+  assert.equal(result.sync.results[0].status, "failed");
+  assert.match(result.nextStep, /playlist.*membership|membership.*playlist/i);
+});

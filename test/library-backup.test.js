@@ -235,3 +235,21 @@ test("CSV export is a readable analysis format, not a lossless backup", async (t
   assert.ok(row.includes(VID_1));
   assert.ok(row.includes("backup"));
 });
+
+test("backup and restore retain safe scalar sync-state values", async (t) => {
+  const { library: source } = await seededLibrary(t);
+  const lastPull = "2026-09-15T00:00:00.000Z";
+  source.setSyncState("youtube.lastPull", lastPull);
+  const backup = exportLibrary(source, { format: "json" });
+  const exported = JSON.parse(backup);
+  assert.equal(exported.data.syncState.find((row) => row.key === "youtube.lastPull")?.value, lastPull);
+
+  const { directory, filePath } = await tempLibrary();
+  const target = openLibrary(filePath);
+  t.after(async () => {
+    target.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  restoreLibrary(target, backup, { mode: "apply" });
+  assert.equal(target.getSyncState("youtube.lastPull"), lastPull);
+});

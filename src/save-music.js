@@ -415,7 +415,33 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     }
   }
 
+  if (mode === "apply" && libraryStep.writeState === "SAVED"
+    && youtubeStep.action === "skipped_canonical_duplicate") {
+    const matched = youtubeStep.existingItem;
+    try {
+      const linked = library.attachCanonicalSource(libraryStep.trackId, {
+        provider: "youtube",
+        sourceId: youtubeStep.matchedVideoId,
+        title: matched?.name,
+        channelTitle: matched?.channel,
+        url: matched?.url ?? youtubeVideoUrl(youtubeStep.matchedVideoId),
+      });
+      libraryStep.remoteSource = {
+        action: linked.action,
+        sourceId: youtubeStep.matchedVideoId,
+      };
+      if (linked.action === "linked") completedSteps.push("canonical_remote_source_linked");
+    } catch (error) {
+      libraryStep.remoteSource = {
+        action: "failed",
+        sourceId: youtubeStep.matchedVideoId,
+        error: errorInfo(error),
+      };
+    }
+  }
+
   const libraryOk = libraryStep.writeState === "SAVED";
+  const sourceLinkFailed = libraryStep.remoteSource?.action === "failed";
   const youtubeSkipped = ["skipped_duplicate", "skipped_canonical_duplicate"]
     .includes(youtubeStep.action);
   const youtubeOk = !syncToYouTube
@@ -429,6 +455,8 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     action = identity?.level === "EXACT_SOURCE_DUPLICATE" && youtubeStep.duplicate
       ? "would_skip_duplicate"
       : "would_save";
+  } else if (sourceLinkFailed) {
+    action = "reconciliation_required";
   } else if (libraryOk && youtubeOk) {
     action = youtubeSkipped && libraryStep.action === "existing"
       ? "skipped_duplicate"
@@ -446,6 +474,8 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     syncState = "preview";
   } else if (!syncToYouTube) {
     syncState = "not_requested";
+  } else if (sourceLinkFailed) {
+    syncState = "partial";
   } else if (youtubeOk && libraryOk) {
     syncState = "synced";
   } else if (youtubeAmbiguous) {
@@ -465,6 +495,8 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     if (!libraryOk) {
       nextStep += " The local library write also failed; re-run after reconciling YouTube.";
     }
+  } else if (sourceLinkFailed) {
+    nextStep = "The playlist contains the matched video, but its source could not be linked to the local track. Inspect the exact video ID and track identity, then reconcile before pushing library changes to this playlist.";
   } else if (mode === "apply" && !libraryOk) {
     nextStep = "The local library write failed; re-run the same save_music call after fixing the library error — the YouTube side is deduplicated and the retry is idempotent.";
   } else if (mode === "apply" && syncToYouTube && !youtubeOk) {

@@ -347,12 +347,20 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
         // Read-back before writing: the video may have died since preview.
         try {
           await youtube.getVideo(item.videoId, { signal });
-        } catch {
-          item.status = "unavailable";
-          item.result = "unavailable";
-          results.push({ input: item.input, videoId: item.videoId, status: "unavailable" });
+        } catch (error) {
+          const missing = error?.code === "NOT_FOUND" || error?.status === 404 || error?.status === 410;
+          if (missing) {
+            item.status = "unavailable";
+            item.result = "unavailable";
+            results.push({ input: item.input, videoId: item.videoId, status: "unavailable" });
+          } else {
+            item.error = errorInfo(error);
+            results.push({ input: item.input, videoId: item.videoId, status: "retryable", error: item.error });
+            if (signal?.aborted) cancelled = true;
+          }
           continue;
         }
+        delete item.error;
         const saved = library.upsertTrack({
           title: item.title,
           artist: item.artist ?? undefined,
@@ -425,7 +433,9 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
   }
 
   const remaining = plan.items.filter((item) => item.result == null).length;
-  const failed = results.filter((entry) => entry.status === "failed" || entry.status === "sync_failed").length;
+  const syncFailed = syncResults.filter((entry) => entry.status === "failed").length;
+  const failed = results.filter((entry) => ["failed", "sync_failed", "retryable"].includes(entry.status)).length
+    + syncFailed;
   const action = cancelled
     ? "cancelled"
     : failed
@@ -439,11 +449,13 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     counts: countBy(plan.items),
     results,
     remaining,
-    ...(syncTarget ? { sync: { playlistId: syncTarget, results: syncResults } } : {}),
+    ...(syncTarget ? { sync: { playlistId: syncTarget, results: syncResults, failed: syncFailed } } : {}),
     ...(cancelled
       ? { nextStep: `Re-run import_music_batch with batchId "${plan.batchId}" and resume:true to continue from item ${plan.items.length - remaining + 1}.` }
       : failed
-        ? { nextStep: "Inspect each failed item in results; re-running the same batchId is idempotent." }
+        ? { nextStep: syncFailed || results.some((entry) => entry.status === "sync_failed")
+          ? "Inspect sync.results and verify playlist membership by exact video ID before retrying failed additions; local imports remain saved."
+          : `Inspect each failed or retryable item in results; re-run import_music_batch with batchId "${plan.batchId}" and resume:true after the provider recovers.` }
         : {}),
   };
 }

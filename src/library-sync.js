@@ -541,14 +541,21 @@ export async function reconcileTrack({ library, youtube }, args = {}, { signal }
     .listTrackSources(track.id)
     .filter((source) => source.provider === "youtube");
   const sourceReports = [];
+  let verificationUnknown = false;
   for (const source of sources) {
     try {
       await youtube.getVideo(source.sourceId, { signal });
       if (source.status !== "ok") library.setSourceStatus("youtube", source.sourceId, "ok");
       sourceReports.push({ sourceId: source.sourceId, status: "ok" });
     } catch (error) {
-      library.setSourceStatus("youtube", source.sourceId, "unavailable");
-      sourceReports.push({ sourceId: source.sourceId, status: "unavailable", error: errorInfo(error) });
+      const missing = error?.code === "NOT_FOUND" || error?.status === 404 || error?.status === 410;
+      if (missing) library.setSourceStatus("youtube", source.sourceId, "unavailable");
+      else verificationUnknown = true;
+      sourceReports.push({
+        sourceId: source.sourceId,
+        status: missing ? "unavailable" : "unknown",
+        error: errorInfo(error),
+      });
     }
   }
 
@@ -571,8 +578,24 @@ export async function reconcileTrack({ library, youtube }, args = {}, { signal }
         });
       }
     } catch (error) {
+      verificationUnknown = true;
       presence.push({ playlistId: link.playlistId, error: errorInfo(error) });
     }
+  }
+
+  if (verificationUnknown) {
+    return {
+      trackId: track.id,
+      track,
+      resolvedFrom: null,
+      sources: sourceReports,
+      presence,
+      sync: {
+        ...prior,
+        state: UNKNOWN_STATES.has(prior?.state) ? prior.state : "unknown",
+        updatedAt: new Date().toISOString(),
+      },
+    };
   }
 
   const anyPresent = presence.some((entry) => entry.present === true);

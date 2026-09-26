@@ -640,6 +640,63 @@ export class MusicLibrary {
     };
   }
 
+  attachCanonicalSource(trackId, input) {
+    this.assertOpen();
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A source object is required.");
+    }
+    assertNoSecretKeys(input);
+    const provider = optionalText(input.provider, "source.provider");
+    const sourceId = optionalText(input.sourceId, "source.sourceId");
+    const title = optionalText(input.title, "source.title");
+    if (!provider || !sourceId) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "provider and sourceId are required.");
+    }
+    const source = {
+      provider,
+      sourceId,
+      url: optionalText(input.url, "source.url"),
+      versionType: optionalText(input.versionType, "source.versionType"),
+      channelTitle: optionalText(input.channelTitle, "source.channelTitle"),
+    };
+    let action;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const track = this.requireTrack(trackId);
+      const existing = this.db
+        .prepare("SELECT track_id FROM track_sources WHERE provider = ? AND source_id = ?")
+        .get(provider, sourceId);
+      if (existing?.track_id === track.id) {
+        action = "existing";
+      } else if (existing) {
+        throw new LibraryError("LIBRARY_IDENTITY_CONFLICT", "The source belongs to another track.");
+      } else if (track.identityLocked) {
+        throw new LibraryError("LIBRARY_IDENTITY_LOCKED", "The track identity is locked.");
+      } else {
+        if (!title) {
+          throw new LibraryError("LIBRARY_INPUT_INVALID", "A title is required to link a new source.");
+        }
+        const canonical = canonicalizeSource({
+          title,
+          channelTitle: source.channelTitle,
+          versionType: source.versionType,
+        });
+        if (track.canonicalKey !== canonical.canonicalKey) {
+          throw new LibraryError("LIBRARY_IDENTITY_CONFLICT", "The source metadata does not match the track.");
+        }
+        this.insertSource(track.id, { source }, canonical, {
+          matchedBy: "playlist_metadata", confidence: 1,
+        }, new Date().toISOString());
+        action = "linked";
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return { action, source: this.source(provider, sourceId) };
+  }
+
   evaluateIdentity(canonical) {
     const exact = this.db
       .prepare(
@@ -1534,8 +1591,10 @@ export class MusicLibrary {
     const conditions = {
       identity_conflict: "t.needs_review = 1",
       not_synced: "NOT EXISTS (SELECT 1 FROM track_playlists tp WHERE tp.track_id = t.id)",
-      // Any per-track sync marker is a candidate; the parsed state decides.
-      provider_unavailable: "ss.value IS NOT NULL",
+      provider_unavailable: `CASE WHEN json_valid(ss.value) THEN
+        json_type(ss.value, '$.state') = 'text'
+          AND json_extract(ss.value, '$.state') NOT IN ('synced', 'ok')
+        ELSE 0 END`,
     };
     const where = reason
       ? conditions[reason]
@@ -1579,10 +1638,7 @@ export class MusicLibrary {
         return { track: trackRow(row), reasons, sync };
       });
 
-      // `provider_unavailable` is decided by the parsed marker, so the SQL
-      // candidate set can be wider than the final answer for that reason.
-      const filtered = reason ? items.filter((item) => item.reasons.includes(reason)) : items;
-      return { items: filtered, total, ...page };
+      return { items, total, ...page };
     } catch (error) {
       readFailed(error);
     }
@@ -1722,8 +1778,19 @@ export class MusicLibrary {
         skippedSecrets += 1;
         continue;
       }
+      let parsed = row.value;
       try {
-        const parsed = JSON.parse(row.value);
+        parsed = JSON.parse(row.value);
+      } catch {
+        // setSyncState also accepts plain strings such as youtube.lastPull.
+        // A malformed object/array could hide credential fields, so exclude it.
+        const first = typeof row.value === "string" ? row.value.trimStart()[0] : null;
+        if (first === "{" || first === "[" || (typeof row.value === "string" && SECRETISH_KEY.test(row.value))) {
+          skippedSecrets += 1;
+          continue;
+        }
+      }
+      try {
         assertNoSecretKeys(parsed);
         syncState.push(row);
       } catch {

@@ -126,6 +126,117 @@ test("preview_import reports total/new/duplicate/unresolved/unavailable without 
   assert.equal(youtube.addCalls.length, 0);
 });
 
+test("a confirmed private video is unavailable before any import write", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Private Song", status: "private" });
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  assert.equal(preview.items[0].status, "unavailable");
+  const applied = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(applied.results[0].status, "unavailable");
+  assert.equal(library.trackCount(), 0);
+});
+
+test("transient exact-ID preview remains pending until apply can verify it", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Recovered Preview" });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  youtube.getVideo = async () => {
+    throw Object.assign(new Error("preview timed out"), { code: "TIMEOUT" });
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  assert.equal(preview.items[0].status, "retryable");
+  assert.equal(preview.counts.retryable, 1);
+  assert.equal(importStatus(library, { batchId: preview.batchId }).pending, 1);
+  assert.equal(library.trackCount(), 0);
+
+  youtube.getVideo = originalGetVideo;
+  const applied = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(applied.results[0].status, "imported");
+  assert.equal(applied.remaining, 0);
+  assert.equal(library.getTrackBySource("youtube", VID_NEW1).canonicalTitle, "Recovered Preview");
+});
+
+test("duplicate IDs stay pending behind a transient primary and sync only after verified resume", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Recovered Duplicate" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  youtube.getVideo = async () => {
+    throw Object.assign(new Error("provider temporarily unavailable"), { status: 503 });
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, VID_NEW1] });
+  assert.deepEqual(preview.items.map((item) => item.status), ["retryable", "retryable"]);
+  assert.equal(preview.counts.retryable, 2);
+  const partial = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(partial.results.map((item) => item.status), ["retryable", "retryable"]);
+  assert.equal(partial.remaining, 2);
+  assert.equal(importStatus(library, { batchId: preview.batchId }).pending, 2);
+  assert.equal(library.trackCount(), 0);
+  assert.deepEqual(youtube.addCalls, []);
+
+  youtube.getVideo = originalGetVideo;
+  const resumed = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, resume: true, syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(resumed.results.map((item) => item.status), ["imported", "exact_duplicate"]);
+  assert.equal(resumed.remaining, 0);
+  assert.equal(library.trackCount(), 1);
+  assert.deepEqual(youtube.addCalls, [`${PL_SYNC}:${VID_NEW1}`]);
+});
+
+for (const [outcome, video] of [
+  ["missing", null],
+  ["private", { id: VID_NEW1, name: "Private", status: "private" }],
+]) {
+  test(`duplicate IDs become unavailable when a retryable primary is confirmed ${outcome}`, async (t) => {
+    const { library, youtube } = await fixture(t);
+    youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Initially Present" });
+    youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+    youtube.items.set(PL_SYNC, []);
+    const originalGetVideo = youtube.getVideo.bind(youtube);
+    youtube.getVideo = async () => {
+      throw Object.assign(new Error("preview temporarily unavailable"), { status: 503 });
+    };
+    const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, VID_NEW1] });
+    youtube.getVideo = originalGetVideo;
+    if (video) youtube.videos.set(VID_NEW1, video);
+    else youtube.videos.delete(VID_NEW1);
+
+    const applied = await importMusicBatch(
+      { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+    );
+    assert.deepEqual(applied.results.map((item) => item.status), ["unavailable", "unavailable"]);
+    assert.equal(applied.remaining, 0);
+    assert.equal(library.trackCount(), 0);
+    assert.deepEqual(youtube.addCalls, []);
+  });
+}
+
+test("an existing exact duplicate is rechecked before playlist sync", async (t) => {
+  const { library, youtube } = await fixture(t);
+  library.upsertTrack({
+    title: "Existing Song",
+    source: { provider: "youtube", sourceId: VID_NEW1 },
+  });
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Existing Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, VID_NEW1] });
+  assert.deepEqual(preview.items.map((item) => item.status), ["exact_duplicate", "exact_duplicate"]);
+
+  youtube.videos.get(VID_NEW1).status = "private";
+  const applied = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(applied.results.map((item) => item.status), ["unavailable", "unavailable"]);
+  assert.deepEqual(youtube.addCalls, []);
+});
+
 test("import apply imports only resolved items, reports per-item results, survives partial failure", async (t) => {
   const { library, youtube } = await fixture(t);
   seedRemote(youtube);
@@ -274,17 +385,53 @@ test("import_status summarizes a stored batch", async (t) => {
   assert.equal(after.done, 3);
 });
 
-test("transient apply verification remains pending and succeeds on resume", async (t) => {
+for (const [failureName, failure] of [
+  ["timeout", { code: "TIMEOUT" }],
+  ["rate limit", { code: "HTTP_429", status: 429 }],
+  ["server error", { code: "HTTP_5XX", status: 503 }],
+  ["network error", { code: "NETWORK_ERROR" }],
+]) {
+  test(`${failureName} during apply verification remains pending and succeeds on resume`, async (t) => {
+    const { library, youtube } = await fixture(t);
+    youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Recoverable Song" });
+    const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+    const originalGetVideo = youtube.getVideo.bind(youtube);
+    youtube.getVideo = async () => {
+      throw Object.assign(new Error("temporary provider failure"), failure);
+    };
+
+    const partial = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+    assert.equal(partial.action, "partial_failure");
+    assert.equal(partial.results[0].status, "retryable");
+    assert.equal(partial.remaining, 1);
+    assert.equal(importStatus(library, { batchId: preview.batchId }).pending, 1);
+    assert.equal(library.trackCount(), 0);
+
+    youtube.getVideo = originalGetVideo;
+    const resumed = await importMusicBatch(
+      { library, youtube }, { batchId: preview.batchId, resume: true },
+    );
+    assert.equal(resumed.action, "imported");
+    assert.equal(resumed.results[0].status, "imported");
+    assert.equal(library.trackCount(), 1);
+  });
+}
+
+test("caller cancellation during apply verification leaves the item retryable", async (t) => {
   const { library, youtube } = await fixture(t);
-  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Recoverable Song" });
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Cancelled Song" });
   const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const controller = new AbortController();
   const originalGetVideo = youtube.getVideo.bind(youtube);
   youtube.getVideo = async () => {
-    throw Object.assign(new Error("provider timed out"), { code: "TIMEOUT" });
+    controller.abort();
+    throw Object.assign(new Error("caller cancelled"), { code: "CALLER_CANCELLED" });
   };
 
-  const partial = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
-  assert.equal(partial.action, "partial_failure");
+  const partial = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId }, { signal: controller.signal },
+  );
+  assert.equal(partial.action, "cancelled");
   assert.equal(partial.results[0].status, "retryable");
   assert.equal(partial.remaining, 1);
   assert.equal(importStatus(library, { batchId: preview.batchId }).pending, 1);
@@ -294,7 +441,6 @@ test("transient apply verification remains pending and succeeds on resume", asyn
   const resumed = await importMusicBatch(
     { library, youtube }, { batchId: preview.batchId, resume: true },
   );
-  assert.equal(resumed.action, "imported");
   assert.equal(resumed.results[0].status, "imported");
   assert.equal(library.trackCount(), 1);
 });

@@ -40,6 +40,14 @@ function isUnavailableName(name) {
   return UNAVAILABLE_TITLES.has(String(name ?? "").trim().toLowerCase());
 }
 
+function isConfirmedUnavailableVideo(video) {
+  return video?.status === "private" || video?.status === "deleted";
+}
+
+function isConfirmedMissingError(error) {
+  return error?.code === "NOT_FOUND" || error?.status === 404 || error?.status === 410;
+}
+
 function loadPlan(library, batchId) {
   const raw = library.getSyncState(`${IMPORT_PREFIX}${batchId}`);
   if (typeof raw !== "string" || !raw) return null;
@@ -75,6 +83,7 @@ function countBy(items) {
     exactDuplicate: 0,
     canonicalDuplicate: 0,
     unresolved: 0,
+    retryable: 0,
     unavailable: 0,
   };
   for (const item of items) {
@@ -82,6 +91,7 @@ function countBy(items) {
     else if (item.status === "exact_duplicate") counts.exactDuplicate += 1;
     else if (item.status === "canonical_duplicate") counts.canonicalDuplicate += 1;
     else if (item.status === "unresolved") counts.unresolved += 1;
+    else if (item.status === "retryable") counts.retryable += 1;
     else if (item.status === "unavailable") counts.unavailable += 1;
   }
   return counts;
@@ -153,13 +163,16 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
   }
 
   const items = [];
-  const seen = new Set();
+  const firstById = new Map();
   const push = (item) => {
-    if (item.videoId && seen.has(item.videoId)) {
-      items.push({ ...item, status: "exact_duplicate", inBatchDuplicate: true });
+    const first = item.videoId ? firstById.get(item.videoId) : null;
+    if (first) {
+      const status = first.status === "unavailable" ? "unavailable"
+        : first.status === "retryable" ? "retryable" : "exact_duplicate";
+      items.push({ ...item, status, inBatchDuplicate: true });
       return;
     }
-    if (item.videoId) seen.add(item.videoId);
+    if (item.videoId) firstById.set(item.videoId, item);
     items.push(item);
   };
 
@@ -175,8 +188,16 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
       resolvedBy = "id";
     }
     if (videoId) {
+      if (firstById.has(videoId)) {
+        push({ input, videoId, resolvedBy });
+        continue;
+      }
       try {
         const video = await youtube.getVideo(videoId, { signal });
+        if (isConfirmedUnavailableVideo(video)) {
+          push({ input, videoId, resolvedBy, status: "unavailable" });
+          continue;
+        }
         push(dedupeItem(library, {
           input,
           videoId,
@@ -186,7 +207,7 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
           resolvedBy,
         }));
       } catch (error) {
-        push({ input, videoId, resolvedBy, status: "unavailable", error: errorInfo(error) });
+        push({ input, videoId, resolvedBy, status: isConfirmedMissingError(error) ? "unavailable" : "retryable" });
       }
       continue;
     }
@@ -215,7 +236,7 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
     const remote = await youtube.getPlaylistItems(playlistId, { signal });
     for (const entry of remote) {
       if (!entry.id) continue;
-      if (isUnavailableName(entry.name)) {
+      if (isUnavailableName(entry.name) || isConfirmedUnavailableVideo(entry)) {
         push({ input: `${playlistId}:${entry.id}`, videoId: entry.id, resolvedBy: "playlist", status: "unavailable" });
         continue;
       }
@@ -332,12 +353,15 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
   const results = [];
   let cancelled = false;
   let processed = 0;
+  const firstById = new Map();
 
   const flush = () => {
     storePlan(library, plan);
   };
 
   for (const item of plan.items) {
+    const first = item.videoId ? firstById.get(item.videoId) : null;
+    if (item.videoId && !first) firstById.set(item.videoId, item);
     if (item.result != null) continue; // already applied in a previous run
     if (signal?.aborted) {
       cancelled = true;
@@ -345,21 +369,48 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     }
     processed += 1;
     try {
-      if (item.status === "unresolved") {
+      if (item.inBatchDuplicate) {
+        if (first?.result === "unavailable") {
+          item.status = "unavailable";
+          item.result = "unavailable";
+        } else if (first?.trackId && ["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(first.result)) {
+          item.status = "exact_duplicate";
+          item.result = "exact_duplicate";
+          item.trackId = first.trackId;
+        } else if (first?.result === "failed") {
+          item.result = "failed";
+          item.error = first.error;
+        } else {
+          item.status = "retryable";
+          results.push({ input: item.input, videoId: item.videoId, status: "retryable" });
+          continue;
+        }
+      } else if (item.status === "unresolved") {
         item.result = "unresolved";
       } else if (item.status === "unavailable") {
         item.result = "unavailable";
-      } else if (item.status === "exact_duplicate") {
-        item.result = "exact_duplicate";
       } else {
         // Read-back before writing: the video may have died since preview.
         try {
-          await youtube.getVideo(item.videoId, { signal });
+          const video = await youtube.getVideo(item.videoId, { signal });
+          if (isConfirmedUnavailableVideo(video)) {
+            item.status = "unavailable";
+            item.result = "unavailable";
+            delete item.error;
+            results.push({ input: item.input, videoId: item.videoId, status: "unavailable" });
+            continue;
+          }
+          if (item.status === "retryable") {
+            item.title = video.name ?? item.videoId;
+            item.artist = video.channel ?? null;
+            item.status = "new";
+          }
         } catch (error) {
-          const missing = error?.code === "NOT_FOUND" || error?.status === 404 || error?.status === 410;
+          const missing = isConfirmedMissingError(error);
           if (missing) {
             item.status = "unavailable";
             item.result = "unavailable";
+            delete item.error;
             results.push({ input: item.input, videoId: item.videoId, status: "unavailable" });
           } else {
             item.error = errorInfo(error);
@@ -369,33 +420,37 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
           continue;
         }
         delete item.error;
-        const saved = library.upsertTrack({
-          title: item.title,
-          artist: item.artist ?? undefined,
-          source: {
-            provider: "youtube",
-            sourceId: item.videoId,
-            url: youtubeVideoUrl(item.videoId),
-          },
-          ...(item.sourcePlaylistId
-            ? { playlist: { provider: "youtube", playlistId: item.sourcePlaylistId, name: plan.playlistName } }
-            : {}),
-        });
-        const state = saved.identity?.state;
-        item.trackId = saved.track.id;
-        item.result = state === "existing"
-          ? "exact_duplicate"
-          : state === "same_canonical"
-            ? "canonical_duplicate"
-            : state === "possible_match"
-              ? "review"
-              : "imported";
-        library.setSyncState(`sync.${saved.track.id}`, {
-          state: item.sourcePlaylistId ? "synced" : "local_only",
-          playlistId: item.sourcePlaylistId ?? null,
-          videoId: item.videoId,
-          updatedAt: new Date().toISOString(),
-        });
+        if (item.status === "exact_duplicate") {
+          item.result = "exact_duplicate";
+        } else {
+          const saved = library.upsertTrack({
+            title: item.title,
+            artist: item.artist ?? undefined,
+            source: {
+              provider: "youtube",
+              sourceId: item.videoId,
+              url: youtubeVideoUrl(item.videoId),
+            },
+            ...(item.sourcePlaylistId
+              ? { playlist: { provider: "youtube", playlistId: item.sourcePlaylistId, name: plan.playlistName } }
+              : {}),
+          });
+          const state = saved.identity?.state;
+          item.trackId = saved.track.id;
+          item.result = state === "existing"
+            ? "exact_duplicate"
+            : state === "same_canonical"
+              ? "canonical_duplicate"
+              : state === "possible_match"
+                ? "review"
+                : "imported";
+          library.setSyncState(`sync.${saved.track.id}`, {
+            state: item.sourcePlaylistId ? "synced" : "local_only",
+            playlistId: item.sourcePlaylistId ?? null,
+            videoId: item.videoId,
+            updatedAt: new Date().toISOString(),
+          });
+        }
       }
     } catch (error) {
       item.result = "failed";
@@ -426,10 +481,17 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
       existing = null;
     }
     if (existing) {
+      const syncable = new Set(plan.items
+        .filter((item) => !item.inBatchDuplicate && item.trackId
+          && ["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(item.result))
+        .map((item) => item.videoId));
+      const attempted = new Set();
       for (const item of plan.items) {
         if (signal?.aborted) { cancelled = true; break; }
-        if (!item.videoId || existing.has(item.videoId)) continue;
+        if (!item.videoId || !syncable.has(item.videoId) || existing.has(item.videoId)
+          || attempted.has(item.videoId)) continue;
         if (!["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(item.result)) continue;
+        attempted.add(item.videoId);
         try {
           await youtube.addVideoToPlaylist(syncTarget, item.videoId, { signal });
           syncResults.push({ playlistId: syncTarget, videoId: item.videoId, trackId: item.trackId ?? null, status: "added" });

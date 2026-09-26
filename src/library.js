@@ -201,7 +201,7 @@ const SECRETISH_KEY = /token|secret|passphrase|password|credential|oauth|api[-_]
 const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\.[A-Za-z0-9._-]{8,}|\bAIza[0-9A-Za-z_-]{20,}|\b1\/\/[A-Za-z0-9._-]{8,}/i;
 
 function containsSecretishContent(value) {
-  if (typeof value === "string") return SECRETISH_KEY.test(value) || SECRETISH_VALUE.test(value);
+  if (typeof value === "string") return SECRETISH_VALUE.test(value);
   if (Array.isArray(value)) return value.some(containsSecretishContent);
   if (value && typeof value === "object") return Object.values(value).some(containsSecretishContent);
   return false;
@@ -1781,22 +1781,29 @@ export class MusicLibrary {
     const all = (sql) => this.db.prepare(sql).all();
     const syncState = [];
     let skippedSecrets = 0;
+    let skippedMalformed = 0;
     for (const row of all("SELECT key, value, updated_at FROM sync_state ORDER BY key")) {
       if (SECRETISH_KEY.test(row.key)) {
         skippedSecrets += 1;
         continue;
       }
       let parsed = row.value;
+      let malformedStructured = false;
       try {
         parsed = JSON.parse(row.value);
       } catch {
-        // setSyncState accepts plain strings, including values that happen to
-        // begin with "{" or "[". Parse failure alone is not a secret signal.
+        // Plain scalars are lossless. A value that looks like a broken JSON
+        // object/array cannot be inspected safely for hidden credential keys.
+        malformedStructured = typeof row.value === "string" && /^[\s]*[\[{]/.test(row.value);
       }
       // Inspect both representations: raw text catches credential-shaped
       // strings, while parsed JSON catches escaped text inside nested values.
       if (containsSecretishContent(row.value) || containsSecretishContent(parsed)) {
         skippedSecrets += 1;
+        continue;
+      }
+      if (malformedStructured) {
+        skippedMalformed += 1;
         continue;
       }
       try {
@@ -1821,6 +1828,7 @@ export class MusicLibrary {
       ),
       syncState,
       skippedSecrets,
+      skippedMalformed,
     };
   }
 

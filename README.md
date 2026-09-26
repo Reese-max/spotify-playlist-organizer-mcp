@@ -145,7 +145,7 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 `src/library-backup.js` 讓音樂庫可離線備份、搬移與還原，不綁死單一 SQLite 檔。
 
-- `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。匯出絕不含 OAuth token、refresh token、client secret、credential passphrase——`sync_state` 逐列過 secret-key 掃描，可疑列計入 `excluded.secrets` 而非輸出。
+- `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。`sync_state` 匯出會排除憑證形狀的 key／value，並將無法安全解析的結構化值另外列入 `excluded.malformedSyncState`；兩者分別計數。任意純文字仍可能包含無法辨識的秘密，因此憑證應只放在 credential store。
 - `restore_library`：預設 `preview` 回報 `insert`/`update`/`unchanged`/`conflict`/`unsupported` 計數，不寫任何東西；`apply` 在單一 transaction 內寫入（失敗整批 rollback，不會部分破壞）。同一 backup 重複 restore 冪等（`INSERT OR IGNORE`＋id/canonical_key 比對）；`schemaVersion` 不相容直接 fail safe。Restore **不觸發任何 provider 寫入**——還原後用 `sync_status`/`sync_youtube` 對帳。
 
 ## YouTube Playlist 管理

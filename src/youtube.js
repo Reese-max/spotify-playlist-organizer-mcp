@@ -49,6 +49,12 @@ function asQuery(params = {}) {
   return query.toString();
 }
 
+function hasProviderErrorReason(data, reason) {
+  const error = data && typeof data === "object" ? data.error : null;
+  return error?.reason === reason
+    || (Array.isArray(error?.errors) && error.errors.some((entry) => entry?.reason === reason));
+}
+
 function normalizeName(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
 }
@@ -322,6 +328,22 @@ export class YouTubeClient {
       }
 
       if (!response.ok) {
+        const quotaExceeded = response.status === 403
+          && hasProviderErrorReason(data, "quotaExceeded");
+        if (quotaExceeded) {
+          // Do not echo provider-supplied text or a URL containing the API key.
+          const error = new YouTubeApiError(
+            response.status,
+            "YouTube API quota exceeded for " + method + " " + path + ".",
+            data,
+            "YOUTUBE_QUOTA_EXCEEDED",
+          );
+          error.operation = method + " " + path;
+          error.nextStep = method === "GET" && path === "/search"
+            ? "Call youtube_identify_track with input set to an exact YouTube video URL or 11-character video ID; it uses video lookup without another search request, but that lookup may fail independently."
+            : "Retry this YouTube operation after its quota is available; no fallback is guaranteed.";
+          throw error;
+        }
         const detail = typeof data === "object"
           ? data?.error?.message ?? data?.error?.errors?.[0]?.reason
           : null;

@@ -15,6 +15,7 @@ import { loadEnvFile } from "./env.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "./spotify.js";
 import {
   parseYouTubePlaylistReference,
+  parseYouTubeVideoReference,
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
@@ -62,6 +63,8 @@ function errorResult(error) {
   if (typeof error?.code === "string") payload.code = error.code;
   if (Number.isInteger(error?.status)) payload.status = error.status;
   if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
+  if (typeof error?.operation === "string") payload.operation = error.operation;
+  if (typeof error?.nextStep === "string") payload.nextStep = error.nextStep;
   return {
     isError: true,
     content: [{ type: "text", text: JSON.stringify(payload) }],
@@ -144,7 +147,9 @@ async function resolveYouTubeMatch(youtubeClient, input, { limit = 5, regionCode
       match: await youtubeClient.getVideo(videoId, { signal }),
     };
   }
-  const source = parseLink(input);
+  const source = /^[A-Za-z0-9_-]{11}$/.test(input.trim())
+    ? parseYouTubeVideoReference(input)
+    : parseLink(input);
   if (source.kind === "youtube-video") {
     return { source, match: await youtubeClient.getVideo(source.id, { signal }) };
   }
@@ -449,6 +454,8 @@ export function createServer(library) {
             error: error instanceof Error ? error.message : String(error),
             ...(typeof error?.code === "string" ? { code: error.code } : {}),
             ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
+            ...(typeof error?.operation === "string" ? { operation: error.operation } : {}),
+            ...(typeof error?.nextStep === "string" ? { nextStep: error.nextStep } : {}),
           });
         }
       }

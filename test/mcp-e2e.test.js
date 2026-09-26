@@ -62,10 +62,12 @@ async function startYouTubeStub() {
     videos: new Map(),
     playlists: new Map(),
     items: new Map(),
-    counters: { createPlaylist: 0, addItem: 0, deleteItem: 0 },
+    counters: { createPlaylist: 0, addItem: 0, deleteItem: 0, search: 0, getVideo: 0 },
     nextPlaylistId: 1,
     nextItemId: 1,
     failNextAddItem: false,
+    failSearchQuota: false,
+    failSearchForbidden: false,
   };
   state.addVideo = (videoId, title) => state.videos.set(videoId, videoResource(videoId, title));
 
@@ -82,10 +84,25 @@ async function startYouTubeStub() {
         : null;
 
       if (req.method === "GET" && pathname === "/videos") {
+        state.counters.getVideo += 1;
         const ids = (url.searchParams.get("id") ?? "").split(",");
         return sendJson(200, { items: ids.map((id) => state.videos.get(id)).filter(Boolean) });
       }
       if (req.method === "GET" && pathname === "/search") {
+        state.counters.search += 1;
+        if (state.failSearchQuota) {
+          return sendJson(403, {
+            error: {
+              message: "quota response contains " + SECRET_ACCESS_TOKEN,
+              errors: [{ reason: "quotaExceeded" }],
+            },
+          });
+        }
+        if (state.failSearchForbidden) {
+          return sendJson(403, {
+            error: { message: "search forbidden", errors: [{ reason: "forbidden" }] },
+          });
+        }
         const items = [...state.videos.values()].slice(0, 2).map((video) => ({
           id: { kind: "youtube#video", videoId: video.id },
           snippet: video.snippet,
@@ -463,6 +480,54 @@ test("E2E: ambiguous provider write survives restart and resolves via read-back 
     assertNoSecrets(second.client.stdoutText, second.client.stderrText, status.text, reconciled.text);
   } finally {
     await stopServer(second.child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: search quota exhaustion is typed and exact video IDs remain usable", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo("vidQuota001", "E2E Quota Song");
+  stub.failSearchQuota = true;
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const search = await client.callTool("youtube_search_videos", { query: "E2E Quota Song" });
+    assert.equal(search.result.isError, true);
+    assert.equal(search.parsed.code, "YOUTUBE_QUOTA_EXCEEDED");
+    assert.equal(search.parsed.status, 403);
+    assert.equal(search.parsed.operation, "GET /search");
+    assert.match(search.parsed.nextStep, /youtube_identify_track.*input.*exact YouTube video URL or 11-character video ID/i);
+    assert.equal(stub.counters.search, 1, "quota failure must not be retried");
+    assertNoSecrets(search.text);
+
+    const identify = await client.callTool("youtube_identify_track", { input: "E2E Quota Song" });
+    assert.equal(identify.parsed.code, "YOUTUBE_QUOTA_EXCEEDED");
+    assert.equal(stub.counters.search, 2);
+
+    const exact = await client.callTool("youtube_identify_track", {
+      input: "https://www.youtube.com/watch?v=vidQuota001",
+    });
+    assert.equal(exact.parsed.match.id, "vidQuota001");
+    assert.equal(stub.counters.search, 2, "exact URL must bypass search.list");
+    assert.equal(stub.counters.getVideo, 1);
+
+    const exactId = await client.callTool("youtube_identify_track", { input: "vidQuota001" });
+    assert.equal(exactId.parsed.match.id, "vidQuota001");
+    assert.equal(stub.counters.search, 2, "bare video ID must bypass search.list");
+    assert.equal(stub.counters.getVideo, 2);
+
+    stub.failSearchQuota = false;
+    stub.failSearchForbidden = true;
+    const forbidden = await client.callTool("youtube_search_videos", { query: "E2E Quota Song" });
+    assert.equal(forbidden.parsed.status, 403);
+    assert.notEqual(forbidden.parsed.code, "YOUTUBE_QUOTA_EXCEEDED");
+    assert.equal(stub.counters.search, 3);
+    assert.equal(stub.counters.addItem, 0);
+    assertNoSecrets(client.stdoutText, client.stderrText, identify.text, exact.text, exactId.text, forbidden.text);
+  } finally {
+    await stopServer(child);
     await stub.close();
     await rm(directory, { recursive: true, force: true });
   }

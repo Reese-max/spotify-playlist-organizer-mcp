@@ -18,9 +18,10 @@ save_music({
 - `input` 接受歌曲名稱、YouTube／YouTube Music 影片連結或 11 字元 video ID；`videoId` 可指定候選影片。
 - `mode` 預設 `"preview"`（不寫入）；`"apply"` 才會實際寫入。
 - `syncToYouTube` 預設 `true`；preview 模式仍會預覽 YouTube 步驟，設 `false` 可只寫本機音樂庫。
+- `remoteDedupe` 預設 `"canonical"`：目標播放清單已有同一首歌時不再加入——判斷依據包含同一 canonical track 在 Library 裡的其他 YouTube 來源，以及 metadata canonicalize 出相同 key 的播放清單項目（例如 Official MV 與 Official Audio，即使 Library 沒見過該上傳）；命中時回報 `skipped_canonical_duplicate`。傳 `"source"` 則只擋相同 `videoId`，允許同一首歌的多個來源版本同列。live／cover／remix 等不同 version 的 canonical key 不同，不會被歌曲層級去重吞掉。receipt 以 `youtube.duplicateKind`（`exact_source`／`canonical_track`）與 `youtube.matchedVideoId` 明確指出遠端判斷依據。
 - `tags`／`category` 會成為使用者標籤（只增不覆寫既有使用者標籤）；`category` 同時決定目標播放清單名稱，`playlist` 可直接指定播放清單（名稱、URL 或 ID）。
 - 精確連結或 video ID 走 fast path；自由文字無法唯一綁定時回傳 `selection_required` 與 `candidates`，**不會**默默收藏搜尋第一名——請用回傳的 `videoId` 重新呼叫。
-- 本機音樂庫寫入與 YouTube 寫入是獨立步驟：一邊失敗時 receipt 會回報真實的 partial `writeState`（如 `UNKNOWN_AFTER_WRITE`、`PARTIAL_PLAYLIST_CREATED`）、`completedSteps` 與安全的 `nextStep`，不會把部分成功包成一般錯誤。重複收藏同一 `videoId` 是冪等的（`skipped_duplicate`）。
+- 本機音樂庫寫入與 YouTube 寫入是獨立步驟：一邊失敗時 receipt 會回報真實的 partial `writeState`（如 `UNKNOWN_AFTER_WRITE`、`PARTIAL_PLAYLIST_CREATED`）、`completedSteps` 與安全的 `nextStep`，不會把部分成功包成一般錯誤。重複收藏同一 `videoId` 是冪等的（`skipped_duplicate`）；同一首歌的不同來源在預設 `remoteDedupe: "canonical"` 下也冪等（`skipped_canonical_duplicate`）。
 
 若使用底層工具，對「歌曲名稱或搜尋文字」仍可採用兩階段流程：
 

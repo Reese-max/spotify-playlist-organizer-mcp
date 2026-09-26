@@ -640,6 +640,63 @@ export class MusicLibrary {
     };
   }
 
+  attachCanonicalSource(trackId, input) {
+    this.assertOpen();
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A source object is required.");
+    }
+    assertNoSecretKeys(input);
+    const provider = optionalText(input.provider, "source.provider");
+    const sourceId = optionalText(input.sourceId, "source.sourceId");
+    const title = optionalText(input.title, "source.title");
+    if (!provider || !sourceId) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "provider and sourceId are required.");
+    }
+    const source = {
+      provider,
+      sourceId,
+      url: optionalText(input.url, "source.url"),
+      versionType: optionalText(input.versionType, "source.versionType"),
+      channelTitle: optionalText(input.channelTitle, "source.channelTitle"),
+    };
+    let action;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const track = this.requireTrack(trackId);
+      const existing = this.db
+        .prepare("SELECT track_id FROM track_sources WHERE provider = ? AND source_id = ?")
+        .get(provider, sourceId);
+      if (existing?.track_id === track.id) {
+        action = "existing";
+      } else if (existing) {
+        throw new LibraryError("LIBRARY_IDENTITY_CONFLICT", "The source belongs to another track.");
+      } else if (track.identityLocked) {
+        throw new LibraryError("LIBRARY_IDENTITY_LOCKED", "The track identity is locked.");
+      } else {
+        if (!title) {
+          throw new LibraryError("LIBRARY_INPUT_INVALID", "A title is required to link a new source.");
+        }
+        const canonical = canonicalizeSource({
+          title,
+          channelTitle: source.channelTitle,
+          versionType: source.versionType,
+        });
+        if (track.canonicalKey !== canonical.canonicalKey) {
+          throw new LibraryError("LIBRARY_IDENTITY_CONFLICT", "The source metadata does not match the track.");
+        }
+        this.insertSource(track.id, { source }, canonical, {
+          matchedBy: "playlist_metadata", confidence: 1,
+        }, new Date().toISOString());
+        action = "linked";
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return { action, source: this.source(provider, sourceId) };
+  }
+
   evaluateIdentity(canonical) {
     const exact = this.db
       .prepare(

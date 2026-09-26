@@ -246,7 +246,7 @@ export function createHttpServer({
     ["POST", "/api/library/remove", { auth: true, write: true }, (_p, body, _q, signal) =>
       removeMusic(services, pick(body, ["trackId", "mode", "local", "youtubePlaylist", "videoId"]), { signal })],
     ["POST", "/api/save_music", { auth: true, write: true }, (_p, body, _q, signal) =>
-      saveMusic(services, pick(body, ["input", "videoId", "tags", "category", "playlist", "mode", "syncToYouTube"]), { signal })],
+      saveMusic(services, pick(body, ["input", "videoId", "tags", "category", "playlist", "mode", "syncToYouTube", "remoteDedupe"]), { signal })],
     ["GET", "/api/sync/status", { auth: true }, (_p, _b, q, signal) =>
       syncStatus(services, { playlist: q.get("playlist") ?? undefined }, { signal })],
     ["POST", "/api/sync", { auth: true, write: true }, (_p, body, _q, signal) =>

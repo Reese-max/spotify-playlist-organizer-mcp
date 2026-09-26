@@ -729,6 +729,7 @@ export function createServer(library) {
         playlist: z.string().min(1).optional(),
         mode: z.enum(["preview", "apply"]).default("preview"),
         syncToYouTube: z.boolean().default(true),
+        remoteDedupe: z.enum(["canonical", "source"]).default("canonical"),
       }),
     },
     safeTool((args, extra) => (

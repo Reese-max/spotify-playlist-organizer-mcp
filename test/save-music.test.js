@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { openLibrary } from "../src/library.js";
+import { syncYoutube } from "../src/library-sync.js";
 import { saveMusic } from "../src/save-music.js";
 
 const VIDEO_ID = "dQw4w9WgXcQ";
@@ -320,6 +321,340 @@ test("syncToYouTube=false writes only the local library", async () => {
     assert.equal(receipt.source.kind, "youtube-video");
     assert.equal(library.trackCount(), 1);
     assert.equal(youtube.calls.filter(([name]) => name !== "getVideo").length, 0);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// Two different YouTube uploads (video IDs) that canonicalize onto the same
+// track, plus a live version that must stay a distinct track.
+const SOURCE_A = "AAAAAAAAAAA";
+const SOURCE_B = "BBBBBBBBBBB";
+const LIVE_VERSION = "CCCCCCCCCCC";
+
+function multiSourceYouTube(overrides = {}) {
+  const names = {
+    [SOURCE_A]: "Daft Punk - One More Time (Official Video)",
+    [SOURCE_B]: "Daft Punk - One More Time (Official Audio)",
+    [LIVE_VERSION]: "Daft Punk - One More Time (Live)",
+  };
+  return stubYouTube({
+    async getVideo(id) {
+      return { ...videoFixture(id), name: names[id] ?? videoFixture(id).name };
+    },
+    ...overrides,
+  });
+}
+
+test("apply does not add a second source of the same canonical track to the playlist by default", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    assert.equal(first.action, "saved");
+    const playlistId = first.ids.playlistId;
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: playlistId, mode: "apply" },
+    );
+
+    // The local identity decision and the remote playlist decision are both
+    // explicit in the receipt.
+    assert.equal(receipt.duplicate.level, "SAME_CANONICAL_TRACK");
+    assert.equal(receipt.youtube.dedupePolicy, "canonical");
+    assert.equal(receipt.youtube.duplicateKind, "canonical_track");
+    assert.equal(receipt.youtube.matchedVideoId, SOURCE_A);
+    assert.equal(receipt.youtube.action, "skipped_canonical_duplicate");
+    assert.equal(receipt.library.action, "saved");
+    assert.equal(receipt.library.writeState, "SAVED");
+    assert.equal(receipt.action, "saved");
+    assert.equal(receipt.syncState, "synced");
+    assert.equal(receipt.ids.trackId, first.ids.trackId);
+    assert.equal(receipt.ids.playlistId, playlistId);
+    assert.match(receipt.nextStep, /remoteDedupe/);
+
+    // One canonical track, two attached sources, one playlist item.
+    assert.equal(library.trackCount(), 1);
+    assert.equal(library.getTrackBySource("youtube", SOURCE_B).id, first.ids.trackId);
+    assert.equal(youtube.items.get(playlistId).length, 1);
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 1);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("remoteDedupe \"source\" adds a second source of the same canonical track", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    const playlistId = first.ids.playlistId;
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      {
+        input: "https://www.youtube.com/watch?v=" + SOURCE_B,
+        playlist: playlistId,
+        mode: "apply",
+        remoteDedupe: "source",
+      },
+    );
+
+    assert.equal(receipt.duplicate.level, "SAME_CANONICAL_TRACK");
+    assert.equal(receipt.youtube.dedupePolicy, "source");
+    assert.equal(receipt.youtube.action, "added");
+    assert.equal(receipt.action, "saved");
+    assert.equal(receipt.ids.trackId, first.ids.trackId);
+    assert.equal(library.trackCount(), 1);
+    assert.equal(youtube.items.get(playlistId).length, 2);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("preview reports would_skip_canonical_duplicate and writes nothing", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    const playlistId = first.ids.playlistId;
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: playlistId },
+    );
+
+    assert.equal(receipt.mode, "preview");
+    assert.equal(receipt.action, "would_save");
+    assert.equal(receipt.youtube.action, "would_skip_canonical_duplicate");
+    assert.equal(receipt.youtube.duplicateKind, "canonical_track");
+    assert.equal(receipt.duplicate.youtubePlaylistItemKind, "canonical_track");
+    assert.equal(library.getTrackBySource("youtube", SOURCE_B), null);
+    assert.equal(youtube.items.get(playlistId).length, 1);
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 1);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a distinct version of the same song is not swallowed by canonical remote dedupe", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    const playlistId = first.ids.playlistId;
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + LIVE_VERSION, playlist: playlistId, mode: "apply" },
+    );
+
+    // A live version has a different canonical key; it is flagged for review
+    // locally but still added remotely instead of being silently skipped.
+    assert.equal(receipt.duplicate.level, "POSSIBLE_MATCH");
+    assert.equal(receipt.youtube.action, "added");
+    assert.equal(receipt.youtube.duplicateKind, null);
+    assert.equal(receipt.action, "saved");
+    assert.notEqual(receipt.ids.trackId, first.ids.trackId);
+    assert.equal(library.trackCount(), 2);
+    assert.equal(youtube.items.get(playlistId).length, 2);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("canonical remote dedupe still adds when no sibling source is in the playlist", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, mode: "apply", syncToYouTube: false },
+    );
+    assert.equal(first.action, "saved");
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: "Chill", mode: "apply" },
+    );
+
+    assert.equal(receipt.duplicate.level, "SAME_CANONICAL_TRACK");
+    assert.equal(receipt.youtube.action, "added");
+    assert.equal(receipt.youtube.duplicateKind, null);
+    assert.equal(receipt.ids.trackId, first.ids.trackId);
+    assert.equal(youtube.items.get(receipt.ids.playlistId).length, 1);
+    assert.equal(library.trackCount(), 1);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("canonical remote dedupe catches a same-song playlist item the library never saw", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    assert.equal(first.action, "saved");
+
+    // A second playlist already holds an upload of the same song that is not
+    // recorded in the local library at all.
+    youtube.playlists.push({ id: "PL_FOREIGN", name: "Chill 2" });
+    youtube.items.set("PL_FOREIGN", [{
+      id: "ZZZZZZZZZZZ",
+      name: "Daft Punk - One More Time (Official Audio)",
+      channel: "Daft Punk",
+      url: "https://www.youtube.com/watch?v=ZZZZZZZZZZZ",
+    }]);
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: "PL_FOREIGN", mode: "apply" },
+    );
+
+    assert.equal(receipt.duplicate.level, "SAME_CANONICAL_TRACK");
+    assert.equal(receipt.youtube.action, "skipped_canonical_duplicate");
+    assert.equal(receipt.youtube.duplicateKind, "canonical_track");
+    assert.equal(receipt.youtube.matchedVideoId, "ZZZZZZZZZZZ");
+    assert.equal(receipt.syncState, "synced");
+    assert.deepEqual(receipt.library.remoteSource, {
+      action: "linked", sourceId: "ZZZZZZZZZZZ",
+    });
+    assert.equal(youtube.items.get("PL_FOREIGN").length, 1);
+    assert.equal(library.getTrackBySource("youtube", SOURCE_B).id, first.ids.trackId);
+    assert.equal(library.getTrackBySource("youtube", "ZZZZZZZZZZZ")?.id, first.ids.trackId);
+    const push = await syncYoutube(
+      { library, youtube }, { mode: "preview", direction: "push", playlist: "PL_FOREIGN" },
+    );
+    assert.equal(push.plan.additions.length, 0);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed metadata-only source link never claims the collection is synced", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    youtube.playlists.push({ id: "PL_FOREIGN", name: "Chill 2" });
+    youtube.items.set("PL_FOREIGN", [{
+      id: "ZZZZZZZZZZZ",
+      name: "Daft Punk - One More Time (Official Audio)",
+      channel: "Daft Punk",
+    }]);
+    const attachCanonicalSource = library.attachCanonicalSource.bind(library);
+    library.attachCanonicalSource = () => {
+      throw new Error("library write failed");
+    };
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: "PL_FOREIGN", mode: "apply" },
+    );
+    assert.equal(receipt.action, "reconciliation_required");
+    assert.equal(receipt.syncState, "partial");
+    assert.equal(receipt.library.remoteSource.action, "failed");
+    assert.equal(receipt.youtube.action, "skipped_canonical_duplicate");
+    assert.equal(library.getTrackBySource("youtube", "ZZZZZZZZZZZ"), null);
+    library.attachCanonicalSource = attachCanonicalSource;
+    const retry = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: "PL_FOREIGN", mode: "apply" },
+    );
+    assert.equal(retry.syncState, "synced");
+    assert.equal(library.getTrackBySource("youtube", "ZZZZZZZZZZZ")?.id, retry.ids.trackId);
+    assert.equal(youtube.items.get("PL_FOREIGN").length, 1);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed sibling-source lookup reports dedupeError and remote evidence still dedupes", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = multiSourceYouTube();
+  try {
+    const first = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_A, playlist: "Chill", mode: "apply" },
+    );
+    const playlistId = first.ids.playlistId;
+
+    // The stub records bare item ids; give the entry the real metadata the
+    // YouTube API would return so remote canonical-key evidence can apply.
+    youtube.items.set(playlistId, [{
+      id: SOURCE_A,
+      name: "Daft Punk - One More Time (Official Video)",
+      channel: "Daft Punk",
+      url: "https://www.youtube.com/watch?v=" + SOURCE_A,
+    }]);
+
+    library.listTrackSources = () => {
+      throw new Error("sources read exploded");
+    };
+
+    const receipt = await saveMusic(
+      { youtube, library },
+      { input: "https://www.youtube.com/watch?v=" + SOURCE_B, playlist: playlistId, mode: "apply" },
+    );
+
+    // The degraded lookup is reported, and remote canonical-key evidence
+    // still catches the duplicate — the write is not silently attempted.
+    assert.equal(receipt.youtube.dedupeError.code, "DEDUPE_LOOKUP_FAILED");
+    assert.match(receipt.youtube.dedupeError.message, /sources read exploded/);
+    assert.equal(receipt.youtube.action, "skipped_canonical_duplicate");
+    assert.equal(receipt.youtube.matchedVideoId, SOURCE_A);
+    assert.equal(youtube.items.get(playlistId).length, 1);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an exact source duplicate reports duplicateKind exact_source", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube();
+  try {
+    const args = {
+      input: "https://www.youtube.com/watch?v=" + VIDEO_ID,
+      playlist: "Chill",
+      mode: "apply",
+    };
+    await saveMusic({ youtube, library }, args);
+    const receipt = await saveMusic({ youtube, library }, args);
+
+    assert.equal(receipt.action, "skipped_duplicate");
+    assert.equal(receipt.youtube.duplicateKind, "exact_source");
+    assert.equal(receipt.youtube.matchedVideoId, VIDEO_ID);
+    assert.equal(receipt.duplicate.youtubePlaylistItemKind, "exact_source");
+    assert.equal(library.trackCount(), 1);
+    assert.equal(youtube.items.get(receipt.ids.playlistId).length, 1);
   } finally {
     library.close();
     await rm(directory, { recursive: true, force: true });

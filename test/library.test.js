@@ -902,3 +902,45 @@ test("unsynced paging excludes healthy sync markers before counting and slicing"
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("playlist metadata can link a verified source without stealing or crossing identities", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const one = library.upsertTrack({
+      title: "First Song", artist: "Artist",
+      source: { provider: "youtube", sourceId: "V_FIRST0001" },
+    }).track;
+    const two = library.upsertTrack({
+      title: "Second Song", artist: "Artist",
+      source: { provider: "youtube", sourceId: "V_OTHER0001" },
+    }).track;
+    const matched = {
+      provider: "youtube", sourceId: "V_MATCH0001",
+      title: "Artist - First Song (Official Audio)", channelTitle: "Artist",
+    };
+    const linked = library.attachCanonicalSource(one.id, matched);
+    assert.equal(linked.action, "linked");
+    assert.equal(library.getTrackBySource("youtube", matched.sourceId)?.id, one.id);
+    assert.equal(library.attachCanonicalSource(one.id, matched).action, "existing");
+    assert.throws(
+      () => library.attachCanonicalSource(two.id, matched),
+      (error) => error instanceof LibraryError && error.code === "LIBRARY_IDENTITY_CONFLICT",
+    );
+    assert.throws(
+      () => library.attachCanonicalSource(one.id, { ...matched, sourceId: "V_WRONG0001", title: "Different Song" }),
+      (error) => error instanceof LibraryError && error.code === "LIBRARY_IDENTITY_CONFLICT",
+    );
+    library.setIdentityLocked(one.id, true);
+    assert.throws(
+      () => library.attachCanonicalSource(one.id, { ...matched, sourceId: "V_LOCKD0001" }),
+      (error) => error instanceof LibraryError && error.code === "LIBRARY_IDENTITY_LOCKED",
+    );
+    assert.equal(library.getTrackBySource("youtube", "V_WRONG0001"), null);
+    assert.equal(library.getTrackBySource("youtube", "V_LOCKD0001"), null);
+    assert.equal(library.getTrackBySource("youtube", "V_OTHER0001")?.id, two.id);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

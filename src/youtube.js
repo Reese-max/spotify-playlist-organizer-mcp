@@ -340,7 +340,7 @@ export class YouTubeClient {
           );
           error.operation = method + " " + path;
           error.nextStep = method === "GET" && path === "/search"
-            ? "Provide an exact YouTube video URL or 11-character video ID to use video lookup without another search request; that lookup may fail independently."
+            ? "Call youtube_identify_track with input set to an exact YouTube video URL or 11-character video ID; it uses video lookup without another search request, but that lookup may fail independently."
             : "Retry this YouTube operation after its quota is available; no fallback is guaranteed.";
           throw error;
         }

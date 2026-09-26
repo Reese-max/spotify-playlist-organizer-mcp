@@ -15,6 +15,7 @@ import { loadEnvFile } from "./env.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "./spotify.js";
 import {
   parseYouTubePlaylistReference,
+  parseYouTubeVideoReference,
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
@@ -146,7 +147,9 @@ async function resolveYouTubeMatch(youtubeClient, input, { limit = 5, regionCode
       match: await youtubeClient.getVideo(videoId, { signal }),
     };
   }
-  const source = parseLink(input);
+  const source = /^[A-Za-z0-9_-]{11}$/.test(input.trim())
+    ? parseYouTubeVideoReference(input)
+    : parseLink(input);
   if (source.kind === "youtube-video") {
     return { source, match: await youtubeClient.getVideo(source.id, { signal }) };
   }

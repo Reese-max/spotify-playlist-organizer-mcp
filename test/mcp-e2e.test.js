@@ -498,7 +498,7 @@ test("E2E: search quota exhaustion is typed and exact video IDs remain usable", 
     assert.equal(search.parsed.code, "YOUTUBE_QUOTA_EXCEEDED");
     assert.equal(search.parsed.status, 403);
     assert.equal(search.parsed.operation, "GET /search");
-    assert.match(search.parsed.nextStep, /exact YouTube video URL or 11-character video ID/i);
+    assert.match(search.parsed.nextStep, /youtube_identify_track.*input.*exact YouTube video URL or 11-character video ID/i);
     assert.equal(stub.counters.search, 1, "quota failure must not be retried");
     assertNoSecrets(search.text);
 
@@ -513,6 +513,11 @@ test("E2E: search quota exhaustion is typed and exact video IDs remain usable", 
     assert.equal(stub.counters.search, 2, "exact URL must bypass search.list");
     assert.equal(stub.counters.getVideo, 1);
 
+    const exactId = await client.callTool("youtube_identify_track", { input: "vidQuota001" });
+    assert.equal(exactId.parsed.match.id, "vidQuota001");
+    assert.equal(stub.counters.search, 2, "bare video ID must bypass search.list");
+    assert.equal(stub.counters.getVideo, 2);
+
     stub.failSearchQuota = false;
     stub.failSearchForbidden = true;
     const forbidden = await client.callTool("youtube_search_videos", { query: "E2E Quota Song" });
@@ -520,7 +525,7 @@ test("E2E: search quota exhaustion is typed and exact video IDs remain usable", 
     assert.notEqual(forbidden.parsed.code, "YOUTUBE_QUOTA_EXCEEDED");
     assert.equal(stub.counters.search, 3);
     assert.equal(stub.counters.addItem, 0);
-    assertNoSecrets(client.stdoutText, client.stderrText, identify.text, exact.text, forbidden.text);
+    assertNoSecrets(client.stdoutText, client.stderrText, identify.text, exact.text, exactId.text, forbidden.text);
   } finally {
     await stopServer(child);
     await stub.close();

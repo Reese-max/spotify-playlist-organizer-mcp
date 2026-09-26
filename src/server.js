@@ -983,7 +983,7 @@ export function createServer(library) {
   server.registerTool(
     "reconcile_track",
     {
-      description: "Exact-ID read-back for one library track (or youtube videoId): checks each source against the provider, marks deleted/private videos unavailable without deleting the canonical track, and resolves unknown_after_write markers to synced/local_only/unavailable.",
+      description: "Exact-ID read-back for one library track (or youtube videoId): marks only confirmed missing/private sources unavailable; transient read failures keep source availability and a retryable marker, with typed failures and safe next steps in the receipt.",
       inputSchema: z.object({
         trackId: z.number().int().min(1).optional(),
         videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),

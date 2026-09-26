@@ -68,7 +68,9 @@ test("initializes the database, schema version, and status on first open", async
   try {
     const store = new LibraryStore({}, dbPath);
     assert.equal(store.schemaVersion, null);
-    store.open();
+    assert.equal((await import("node:fs")).existsSync(dbPath), false);
+    const status = store.status();
+    assert.equal(status.status, "READY");
     assert.equal(store.schemaVersion, SCHEMA_VERSION);
 
     const tables = new Set(
@@ -89,8 +91,6 @@ test("initializes the database, schema version, and status on first open", async
       assert.ok(tables.has(table), "missing table " + table);
     }
 
-    const status = store.status();
-    assert.equal(status.status, "READY");
     assert.equal(status.dbPath, dbPath);
     assert.equal(status.schemaVersion, SCHEMA_VERSION);
     assert.deepEqual(status.counts, {
@@ -151,6 +151,69 @@ test("deduplicates by YouTube video ID even when the title differs", async () =>
     assert.equal(second.created, false);
     assert.equal(store.status().counts.tracks, 1);
     assert.equal(store.status().counts.sources, 1);
+    store.close();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("groups multiple YouTube versions under one canonical track", async () => {
+  const { dbPath, cleanup } = await tempLibrary();
+  try {
+    const store = new LibraryStore({}, dbPath);
+    const first = store.saveTrack(baseTrack);
+    const second = store.saveTrack({
+      title: baseTrack.title,
+      artist: baseTrack.artist,
+      sources: [{ provider: "youtube", videoId: "SecondVideo", versionType: "live" }],
+    });
+    assert.equal(second.trackId, first.trackId);
+    assert.equal(second.created, false);
+    assert.equal(store.status().counts.tracks, 1);
+    assert.equal(store.status().counts.sources, 2);
+    assert.equal(store.getTrack(first.trackId).sources.length, 2);
+    store.close();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("rejects sources owned by different tracks without changing either track", async () => {
+  const { dbPath, cleanup } = await tempLibrary();
+  try {
+    const store = new LibraryStore({}, dbPath);
+    const first = store.saveTrack(baseTrack);
+    const second = store.saveTrack({
+      title: "Harder Better Faster Stronger",
+      artist: "Daft Punk",
+      sources: [{ provider: "youtube", videoId: "SecondVideo" }],
+      tags: ["Workout"],
+    });
+    const beforeFirst = store.getTrack(first.trackId);
+    const beforeSecond = store.getTrack(second.trackId);
+
+    for (const sources of [
+      [baseTrack.sources[0], { provider: "youtube", videoId: "SecondVideo" }],
+      [{ provider: "youtube", videoId: "SecondVideo" }, baseTrack.sources[0]],
+    ]) {
+      assert.throws(
+        () => store.saveTrack({
+          title: "Conflicting Save",
+          artist: "Daft Punk",
+          sources,
+          tags: ["Unexpected"],
+          sync: { provider: "youtube", status: "synced" },
+        }),
+        (error) => error instanceof LibraryStoreError
+          && error.code === "LIBRARY_IDENTITY_CONFLICT",
+      );
+    }
+
+    assert.deepEqual(store.getTrack(first.trackId), beforeFirst);
+    assert.deepEqual(store.getTrack(second.trackId), beforeSecond);
+    assert.equal(store.status().counts.tracks, 2);
+    assert.equal(store.status().counts.sources, 2);
+    assert.equal(store.status().counts.tags, 2);
     store.close();
   } finally {
     await cleanup();
@@ -218,6 +281,7 @@ test("applies pending migrations in order without deleting the database", async 
     const store = new LibraryStore({}, dbPath);
     store.saveTrack(baseTrack);
     assert.equal(store.schemaVersion, SCHEMA_VERSION);
+    store.close();
 
     const future = new LibraryStore({}, dbPath, {
       migrations: [

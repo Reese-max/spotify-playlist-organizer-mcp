@@ -326,9 +326,6 @@ export class LibraryStore {
   }
 
   status() {
-    if (!fs.existsSync(this.dbPath)) {
-      return { status: "MISSING", dbPath: this.dbPath };
-    }
     try {
       const db = this.open();
       const count = (table) => db.prepare("SELECT COUNT(*) AS n FROM " + table).get().n;
@@ -364,15 +361,20 @@ export class LibraryStore {
         let trackId = null;
         let created = false;
 
+        const sourceOwners = new Set();
         for (const source of track.sources) {
           const existing = db.prepare(
             "SELECT track_id FROM track_sources WHERE provider = ? AND video_id = ?",
           ).get(source.provider, source.videoId);
-          if (existing) {
-            trackId = existing.track_id;
-            break;
-          }
+          if (existing) sourceOwners.add(existing.track_id);
         }
+        if (sourceOwners.size > 1) {
+          throw new LibraryStoreError(
+            "LIBRARY_IDENTITY_CONFLICT",
+            "The supplied sources already belong to different library tracks.",
+          );
+        }
+        trackId = sourceOwners.values().next().value ?? null;
 
         const refreshTrack = db.prepare(`
           UPDATE tracks SET

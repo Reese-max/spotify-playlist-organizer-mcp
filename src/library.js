@@ -198,6 +198,14 @@ function sourceRow(row) {
 }
 
 const SECRETISH_KEY = /token|secret|passphrase|password|credential|oauth|api[-_]?key|authorization/i;
+const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\.[A-Za-z0-9._-]{8,}|\bAIza[0-9A-Za-z_-]{20,}|\b1\/\/[A-Za-z0-9._-]{8,}/i;
+
+function containsSecretishContent(value) {
+  if (typeof value === "string") return SECRETISH_KEY.test(value) || SECRETISH_VALUE.test(value);
+  if (Array.isArray(value)) return value.some(containsSecretishContent);
+  if (value && typeof value === "object") return Object.values(value).some(containsSecretishContent);
+  return false;
+}
 
 function assertNoSecretKeys(value) {
   if (Array.isArray(value)) {
@@ -1782,13 +1790,14 @@ export class MusicLibrary {
       try {
         parsed = JSON.parse(row.value);
       } catch {
-        // setSyncState also accepts plain strings such as youtube.lastPull.
-        // A malformed object/array could hide credential fields, so exclude it.
-        const first = typeof row.value === "string" ? row.value.trimStart()[0] : null;
-        if (first === "{" || first === "[" || (typeof row.value === "string" && SECRETISH_KEY.test(row.value))) {
-          skippedSecrets += 1;
-          continue;
-        }
+        // setSyncState accepts plain strings, including values that happen to
+        // begin with "{" or "[". Parse failure alone is not a secret signal.
+      }
+      // Inspect both representations: raw text catches credential-shaped
+      // strings, while parsed JSON catches escaped text inside nested values.
+      if (containsSecretishContent(row.value) || containsSecretishContent(parsed)) {
+        skippedSecrets += 1;
+        continue;
       }
       try {
         assertNoSecretKeys(parsed);

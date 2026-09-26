@@ -254,3 +254,35 @@ test("backup and restore retain safe scalar sync-state values", async (t) => {
   restoreLibrary(target, backup, { mode: "apply" });
   assert.equal(target.getSyncState("youtube.lastPull"), lastPull);
 });
+
+test("backup keeps safe scalar and JSON markers while excluding secret-shaped content", async (t) => {
+  const { library: source } = await seededLibrary(t);
+  const timestamp = "2026-09-15T00:00:00.000Z";
+  const marker = { state: "synced", provider: "youtube" };
+  source.setSyncState("youtube.lastPull", timestamp);
+  source.setSyncState("youtube.cursor", "{unclosed-but-safe");
+  source.setSyncState("sync.marker", marker);
+  source.setSyncState("sync.opaque", '"Bearer sk-proj-AbC123456789"');
+  source.setSyncState("sync.evidence", { state: "unknown", evidence: "ya29.XyZ123456789" });
+
+  const backup = JSON.parse(exportLibrary(source, { format: "json" }));
+  assert.equal(backup.excluded.secrets, 2);
+  assert.equal(JSON.stringify(backup).includes("AbC123456789"), false);
+  assert.equal(JSON.stringify(backup).includes("XyZ123456789"), false);
+  assert.equal(backup.data.syncState.find((row) => row.key === "youtube.lastPull")?.value, timestamp);
+  assert.equal(backup.data.syncState.find((row) => row.key === "youtube.cursor")?.value, "{unclosed-but-safe");
+  assert.equal(backup.data.syncState.find((row) => row.key === "sync.marker")?.value, JSON.stringify(marker));
+
+  const { directory, filePath } = await tempLibrary();
+  const target = openLibrary(filePath);
+  t.after(async () => {
+    target.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  restoreLibrary(target, backup, { mode: "apply" });
+  assert.equal(target.getSyncState("youtube.lastPull"), timestamp);
+  assert.equal(target.getSyncState("youtube.cursor"), "{unclosed-but-safe");
+  assert.equal(target.getSyncState("sync.marker"), JSON.stringify(marker));
+  assert.equal(target.getSyncState("sync.opaque"), null);
+  assert.equal(target.getSyncState("sync.evidence"), null);
+});

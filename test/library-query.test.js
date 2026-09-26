@@ -451,6 +451,52 @@ test("list_unsynced_music reports not-synced, identity-conflict, and provider-un
   }
 });
 
+test("list_unsynced_music filters sync markers before counting and paginating", async () => {
+  const { directory, library } = await tempLibrary();
+  try {
+    const unavailableIds = [];
+    const syncedIds = [];
+    for (let index = 0; index < 30; index += 1) {
+      const track = await seedTrack(library, {
+        title: `Paging Track ${index}`,
+        videoId: String(index).padStart(11, "0"),
+        playlist: { provider: "youtube", playlistId: "PL_PAGING", name: "Paging" },
+      });
+      const state = index === 2 ? "provider_unavailable"
+        : index === 14 ? "unknown_after_write"
+          : index === 28 ? "failed"
+            : index % 2 === 0 ? "synced" : "ok";
+      library.setSyncState(`sync.${track.id}`, { state, provider: "youtube" });
+      (state === "synced" || state === "ok" ? syncedIds : unavailableIds).push(track.id);
+    }
+
+    const page1 = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1, offset: 0 });
+    const page2 = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1, offset: 1 });
+    const page3 = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1, offset: 2 });
+    const empty = listUnsyncedMusic(library, { reason: "provider_unavailable", limit: 1, offset: 3 });
+    const pages = [page1, page2, page3];
+    assert.deepEqual(pages.map((page) => page.items.length), [1, 1, 1]);
+    assert.deepEqual(pages.map((page) => page.total), [3, 3, 3]);
+    assert.deepEqual(pages.map((page) => page.hasMore), [true, true, false]);
+    assert.deepEqual(empty.items, []);
+    assert.equal(empty.total, 3);
+    assert.equal(empty.hasMore, false);
+    assert.deepEqual(
+      new Set(pages.flatMap((page) => page.items.map((item) => item.track.id))),
+      new Set(unavailableIds),
+    );
+    assert.ok(pages.every((page) => page.items[0].reasons.includes("provider_unavailable")));
+
+    const all = listUnsyncedMusic(library, { limit: 100 });
+    assert.equal(all.total, 3);
+    assert.equal(all.items.length, 3);
+    assert.ok(all.items.every((item) => !syncedIds.includes(item.track.id)));
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("update_music_classification preview shows before/after diff without writing", async () => {
   const { directory, library } = await tempLibrary();
   try {

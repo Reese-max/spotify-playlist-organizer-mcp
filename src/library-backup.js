@@ -7,10 +7,10 @@
 // sync_youtube explicitly.
 
 import { LibraryError } from "./library.js";
+import { APP_VERSION } from "./version.js";
 
 const BACKUP_FORMAT = "music-library-backup";
 const BACKUP_FORMAT_VERSION = 1;
-const APP_VERSION = "0.2.0";
 
 function parseBackup(input) {
   let backup = input;

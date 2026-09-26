@@ -35,6 +35,7 @@ import {
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
 import { exportLibrary, restoreLibrary } from "./library-backup.js";
+import { APP_VERSION } from "./version.js";
 import {
   listIdentityReviews,
   mergeMusicTracks,
@@ -175,7 +176,7 @@ export function createServer(library) {
   // configuration (credential file path, timeouts, retry bounds) sees it.
   const client = new SpotifyClient();
   const youtubeClient = new YouTubeClient();
-  const server = new McpServer({ name: "music-playlist-organizer", version: "0.2.0" });
+  const server = new McpServer({ name: "music-playlist-organizer", version: APP_VERSION });
 
   server.registerTool(
     "library_status",

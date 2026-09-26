@@ -6,7 +6,23 @@
 
 ## 收藏流程
 
-對「歌曲名稱或搜尋文字」建議採用兩階段流程，避免搜尋結果第一名不是你想收藏的影片：
+建議的統一入口是 `save_music`：一次呼叫完成「辨識 → 綁定影片 → canonical 去重 → 分類 → 寫入本機音樂庫 →（可選）同步 YouTube 播放清單」，並回傳完整 receipt。
+
+```text
+save_music({
+  "input": "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+  "mode": "apply"
+})
+```
+
+- `input` 接受歌曲名稱、YouTube／YouTube Music 影片連結或 11 字元 video ID；`videoId` 可指定候選影片。
+- `mode` 預設 `"preview"`（不寫入）；`"apply"` 才會實際寫入。
+- `syncToYouTube` 預設 `true`；preview 模式仍會預覽 YouTube 步驟，設 `false` 可只寫本機音樂庫。
+- `tags`／`category` 會成為使用者標籤（只增不覆寫既有使用者標籤）；`category` 同時決定目標播放清單名稱，`playlist` 可直接指定播放清單（名稱、URL 或 ID）。
+- 精確連結或 video ID 走 fast path；自由文字無法唯一綁定時回傳 `selection_required` 與 `candidates`，**不會**默默收藏搜尋第一名——請用回傳的 `videoId` 重新呼叫。
+- 本機音樂庫寫入與 YouTube 寫入是獨立步驟：一邊失敗時 receipt 會回報真實的 partial `writeState`（如 `UNKNOWN_AFTER_WRITE`、`PARTIAL_PLAYLIST_CREATED`）、`completedSteps` 與安全的 `nextStep`，不會把部分成功包成一般錯誤。重複收藏同一 `videoId` 是冪等的（`skipped_duplicate`）。
+
+若使用底層工具，對「歌曲名稱或搜尋文字」仍可採用兩階段流程：
 
 1. 呼叫 `youtube_identify_track`，取得候選影片與 `videoId`。
 2. 使用者確認候選後，把選定的 `videoId` 傳給 `youtube_save_track`，並設定 `mode: "apply"`。
@@ -15,6 +31,8 @@
 如果輸入本身是精確的 YouTube／YouTube Music 影片連結，可以直接套用；播放清單連結不能當成單一歌曲輸入。
 
 ## YouTube 工具
+
+- `save_music`：**建議的收藏入口**。辨識、綁定、canonical 去重、多維度分類、寫入本機音樂庫並可選同步 YouTube 播放清單，回傳含 exact IDs、duplicate level、syncState 與 nextStep 的完整 receipt。
 
 - `youtube_search_videos`：搜尋歌曲、藝人或影片。
 - `youtube_identify_track`：從 URL、YouTube Music URL、影片 ID 或文字搜尋辨識影片。
@@ -27,10 +45,157 @@
 - `youtube_save_track`：辨識、分類、去重，並加入指定或自動建立的分類播放清單。
 - `youtube_auth_status`：查看憑證狀態，不會顯示 token。
 - `youtube_auth_revoke`：撤銷 OAuth 憑證並刪除本機加密憑證檔。
+- `library_status`：查看本機音樂庫路徑、schema version 與曲目數，不會回傳任何列內容或 secret。
+- `classify_track`：用固定 taxonomy 預覽單曲的多維度分類（genre、mood、language、activity、energy、era、artist、custom_tags），每個值附來源（`user`／`rule`／`model`）與信心度；唯讀，不寫入音樂庫。
+
+## 多維度分類
+
+`src/classify.js` 的 `classifyMusic({ title, artist, channelTitle, description, userClassification })` 回傳 `{ taxonomyVersion, dimensions, provenance, needsReview }`：
+
+- 固定 taxonomy 定義在 `src/taxonomy.js`（`TAXONOMY_VERSION = 1`）；同義詞會正規化（`jpop`／`J-Pop`／`J-POP` → `j-pop`）。
+- 無法對應官方值的輸入會導向 `custom_tags` 並列入 `needsReview`，不會憑空擴充官方 taxonomy。
+- 預設走決定性規則（`source: "rule"`，沿用 `DEFAULT_RULES` 關鍵字加上 taxonomy 掃描）；可注入本地 `model` stub，失敗或缺模型時自動落回規則，不呼叫外部 LLM API。
+- `userClassification` 的欄位永遠優先（`source: "user"`）；自動分類只填空的維度，provider metadata 只算證據而非事實（信心度 < 1）。
+- 透過 MusicLibrary 公共 API 持久化：`persistClassification(library, trackInput, result)` 用 `upsertTrack` 寫維度欄位、`addTag` 寫 `custom_tags`、完整 provenance JSON 存進 `sync_state` 的 `classification.<trackId>`。重新分類時使用者設過的維度與標籤不會被覆寫，tags 只增不減。
+
+## 本機音樂庫
+
+Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作為 Personal Music Library 的持久層：YouTube 仍是播放器，本機 DB 負責保存曲目、來源對應、tags、播放清單 mapping、aliases 與 `sync_state`。`save_music` 會寫入此庫（tracks、sources、tags、播放清單 mapping 與分類 provenance）；底層的 `youtube_save_track` 仍只操作 YouTube。
+
+- 預設位置：使用者設定目錄下的 `music-playlist-organizer/library.sqlite`（Windows 為 `%APPDATA%\music-playlist-organizer\library.sqlite`；其他平台為 `~/.config/music-playlist-organizer/library.sqlite`）。
+- 覆寫路徑：設定環境變數 `MUSIC_LIBRARY_FILE`（相對路徑會解析為絕對路徑）。
+- 備份：先關閉 server（關閉時會做 WAL checkpoint），再複製 `library.sqlite`；若仍看到 `-wal`/`-shm` 檔，請一併複製。
+- 重置：關閉 server，刪除 `library.sqlite`，重新啟動即會重建空 schema。
+- OAuth token、refresh token、client secret 與 `YOUTUBE_CREDENTIAL_PASSPHRASE` 一律留在加密憑證檔，不會寫入音樂庫 DB、log 或 MCP 輸出；寫入端也會拒絕疑似 secret 的欄位名稱。
+
+## 音樂庫查詢與維護
+
+音樂庫內容透過以下工具查詢與整理（實作在 `src/library-query.js`，SQL 集中在 `MusicLibrary`）。所有查詢皆唯讀、分頁有界（`limit` ≤ 100），穩定識別一律用本機 `trackId` 與精確 YouTube ID，不用顯示名稱當唯一鍵：
+
+- `search_library`：依 `title`／`artist`（LIKE＋正規化，支援 CJK）、`tag`、`genre`、`mood`、`language`、`activity` 過濾，回傳 `items`＋`total`＋`hasMore`。
+- `list_music`：全庫分頁（`limit`／`offset`），最新收藏在前。
+- `recent_music`：最近收藏的曲目，有界。
+- `get_music`：單一 `trackId` 的完整檔案——canonical 欄位、sources、tags、playlists、分類記錄、`sync` 狀態與 identity review 項目。
+- `update_music_tags`：對單曲新增／移除自訂標籤，回傳 before/after；不碰其他維度或 user-set metadata。
+- `update_music_classification`：對單曲做持久化人工分類修正，`set` 寫入維度（genre/mood/language/activity/energy/era/artist，值過 taxonomy 驗證——未知值導向 custom tags＋review，不擴張官方維度），`clear` 明確移除使用者設過的維度；`mode` 預設 preview 顯示 before/after/provenance diff。人工值記為 `source: user`，`reclassify_music` 不會覆寫；空值不算清除（清除只能走 `clear`）。
+- `reclassify_music`：對單曲重跑自動分類，使用者設過的維度與標籤保留，回傳變更前後的 per-dimension diff。
+- `remove_music`：預設 `preview`。`apply` 只執行明確授權的 effect——`local: true` 刪本機曲目（連同 sources、tags、playlist mapping、aliases、identity candidates、sync_state）；`youtubePlaylist`（**精確 playlist ID 或 URL**，名稱會被拒絕）＋可選 `videoId` 刪 YouTube playlist item。兩個 effect 獨立執行、各自回報 `writeState`，一邊失敗不會回滾另一邊；未授權任何 effect 的 apply 是明確 no-op（`no_effect_authorized`）。
+- `list_unsynced_music`：列出需要注意的曲目——`not_synced`（不在任何 provider playlist）、`identity_conflict`（`needs_review`）、`provider_unavailable`（`sync.<trackId>` 標記為非 synced 狀態）；可用 `reason` 過濾。
+
+## YouTube ↔ 音樂庫同步
+
+同步工具在 `src/library-sync.js`，讓音樂庫與 YouTube playlist 不再無限漂移。設計原則：預設不做雙向破壞性同步；先產生 plan；`push`／`pull`／`reconcile` 語意分離；playlist 只用精確 ID 識別（名稱可改名，ID 不變）；provider read-back 是事實來源，但不會覆寫本機 tags 或 canonical 合併決策。
+
+- `sync_status`：唯讀掃描。回報每首歌的穩定狀態——`in_sync`、`local_only`（音樂庫有、playlist 沒有）、`conflict`（`needs_review`）、`unknown_after_write`（上次寫入結果不確定）、`unknown`（playlist 讀取失敗）；以及 remote 端的 `youtube_only`、`unlinked`（本機有該 source 但缺 playlist 關聯）、`unavailable`（deleted/private）。可用 `playlist`（精確 ID 或 URL）限定範圍。
+- `sync_youtube`：預設 `preview` 回傳明確 plan（`additions`／`imports`／`removals`／`renames`／`links`／`sourceMarks`／`markerResolutions`），不做任何 provider 寫入。`apply` 只執行預覽授權的 `direction` 與範圍：
+  - `push`：把 `local_only` 曲目補進 playlist；已在 playlist 內的不會重複加；`allowRemoval: true` 才會另外移除 `youtube_only` 項目（破壞性操作需額外授權）。
+  - `pull`：把 `youtube_only` 影片以 `upsertTrack` 匯入音樂庫，走原有 dedup 與 playlist 精確 ID 關聯。
+  - `reconcile`：只修本機狀態，不做 provider 寫入——同步 playlist 改名（不會新建重複 playlist）、標記 `unavailable` source、補 `unlinked` 關聯、用已讀回的項目解 `unknown_after_write` marker。
+  - 寫入遇到 timeout/5xx/429 不盲目 retry：該筆標記 `unknown_after_write`，整體回 `reconciliation_required`。
+- `reconcile_track`：對單曲做 exact-ID read-back——逐 source 呼叫 `getVideo` 判斷 deleted/private（標 `unavailable`，**不刪** canonical track）、對 linked playlist 讀回 membership、`unknown_after_write` 解為 `synced`／`local_only`／`unavailable`。
+
+同步狀態存在 `sync.<trackId>` marker（JSON，無 secrets），與 `list_unsynced_music` 的 `provider_unavailable` 過濾相容。schema v3 在 `track_sources` 增加 `status` 欄位（`ok`／`unavailable`），source 失效不等於歌曲消失。
+
+## HTTP 介面（本機限定）
+
+`src/http-server.js` 提供受保護的 REST facade，供手機／Web UI 操作**同一套** service layer——所有路由直接委派 `saveMusic`、`library-query`、`library-sync`，preview/apply、exact ID、reconciliation 語意與 stdio MCP 完全一致，不重複實作。
+
+啟動（只綁 localhost）：
+
+```bash
+node src/http-server.js                 # 127.0.0.1:8741
+MUSIC_HTTP_PORT=9000 node src/http-server.js
+```
+
+Session 流程：
+
+```bash
+curl -X POST http://127.0.0.1:8741/session \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<MUSIC_HTTP_BOOTSTRAP_TOKEN>"}'
+# → {"token":"<session>","expiresAt":"..."}
+curl http://127.0.0.1:8741/api/library/tracks -H "Authorization: Bearer <session>"
+curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>"   # revoke
+```
+
+環境變數：`MUSIC_HTTP_HOST`（預設 `127.0.0.1`，**不要**設 `0.0.0.0` 除非前面有 TLS + 反向代理＋自有認證層）、`MUSIC_HTTP_PORT`（預設 8741）、`MUSIC_HTTP_BOOTSTRAP_TOKEN`（未設時啟動產生隨機值印在 stderr）、`MUSIC_HTTP_ALLOWED_ORIGINS`（逗號分隔；預設只允許 `http://localhost`/`http://127.0.0.1`，攜帶其他 Origin 的瀏覽器請求一律 403）。
+
+安全界線：session token 與 YouTube OAuth 憑證完全分離，API 回應永不含 access/refresh token 或 credential passphrase；request body 上限 64 KB 且每個路由只收白名單欄位（client 無法注入 credential path）；effectful endpoint 併發上限 4，超出回 429；所有錯誤為 `{error:{code,message}}` 結構。
+
+路由：`GET /health`、`GET /version`（免認證）；`POST /session`、`DELETE /session`；`GET /api/library/{tracks,recent,search,unsynced,tracks/:id}`、`POST /api/library/tracks/:id/{tags,reclassify}`、`POST /api/library/remove`；`POST /api/save_music`；`GET /api/sync/status`、`POST /api/sync`、`POST /api/reconcile`。
+
+### 收藏 UI（`GET /`）
+
+`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
+
+## 批次匯入
+
+`src/batch-import.js` 把既有 YouTube / YouTube Music 收藏一次帶進音樂庫，不必逐首 `save_music`。管線：parse → resolve → canonicalize → dedupe → preview plan → apply → 可選 YouTube 同步。
+
+- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`）。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
+- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。
+- `import_status`：查已存批次的 `counts`＋`done`/`pending`。
+
+取消／逾時：apply 每 25 項 chunk flush 一次 plan；caller abort 後回 `action:"cancelled"` ＋ `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。
+
+## 備份與還原
+
+`src/library-backup.js` 讓音樂庫可離線備份、搬移與還原，不綁死單一 SQLite 檔。
+
+- `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。匯出絕不含 OAuth token、refresh token、client secret、credential passphrase——`sync_state` 逐列過 secret-key 掃描，可疑列計入 `excluded.secrets` 而非輸出。
+- `restore_library`：預設 `preview` 回報 `insert`/`update`/`unchanged`/`conflict`/`unsupported` 計數，不寫任何東西；`apply` 在單一 transaction 內寫入（失敗整批 rollback，不會部分破壞）。同一 backup 重複 restore 冪等（`INSERT OR IGNORE`＋id/canonical_key 比對）；`schemaVersion` 不相容直接 fail safe。Restore **不觸發任何 provider 寫入**——還原後用 `sync_status`/`sync_youtube` 對帳。
+
+## YouTube Playlist 管理
+
+`src/playlist-admin.js` 補齊日常 playlist 維護，provider mutation 與 Library CRUD 嚴格分離：
+
+- `youtube_get_playlist`／`youtube_list_playlist_items`：唯讀；items 有界分頁（`limit` ≤ 100）。
+- `youtube_rename_playlist`：preview 顯示 old/new name；apply 後 exact-ID read-back 驗證，回 `RENAMED` 或 `UNKNOWN_AFTER_WRITE`（lost response 但實際落地時，read-back 如實回報已改名）。
+- `youtube_remove_from_playlist`：依精確 playlist ID＋`videoId` 移除 playlist item；**只動 provider**，canonical track 不變（要刪本機曲目走 `remove_music` 的獨立授權）。重複 video item 以 playlistItemId 驗證，只移除一個實例。
+- `youtube_delete_playlist`：preview 回 exact ID／name／itemCount；apply 必須另傳 `confirmPlaylistId` 等於該精確 ID——獨立授權，sync/cleanup 絕不自動觸發。
+
+所有 mutation 遇 timeout/5xx/429 不盲目 retry：read-back 能確認就如實回報，無法確認回 `UNKNOWN_AFTER_WRITE`＋safe next step。
+
+## Canonical 曲目識別與去重
+
+音樂庫以「歌曲」為單位去重（schema v2）：一筆 `tracks` 是一個 canonical track，一個 canonical track 可掛多筆 `track_sources`（不同 `videoId` 的 MV、Official Audio、歌詞版等）。正規化邏輯集中在 `src/canonical.js`：
+
+- 標題／藝人先經 NFKC、大小寫、拉丁 diacritics、標點與全半形正規化（CJK 組合符如濁點保留），再剝除 `feat.`/`ft.`、`(Official Video)`、`[MV]`、`Official Audio`、`Lyrics`、`- Topic` 後綴、`Artist - Title` 前綴等包裝性詞彙。
+- `canonical_key = ct|<normalizedArtist>|<normalizedTitle>|<version>`：`version` 只在 live、cover、remix、remaster、acoustic 等「不同錄音版本」時才有值（如 `live:at wembley`）；Official MV 與 Official Audio 的 key 相同，因此會掛成同一首歌的兩個 source。
+- 每筆 source 記錄 `source_type`（`official_video | official_audio | live | lyrics | cover | remix | remaster | unknown`）、匹配置信度與 provenance（JSON）。
+
+`upsertTrack` 回傳 `identity` 欄位：`state` 為 `created | existing | same_canonical | possible_match`，`level` 為四級去重結果：
+
+| level | 意義 |
+|---|---|
+| `EXACT_SOURCE_DUPLICATE` | 同一 provider + sourceId，冪等更新 |
+| `SAME_CANONICAL_TRACK` | canonical key 相同（含 merge 記憶 alias），掛為新 source |
+| `POSSIBLE_MATCH` | 模糊命中（同名不同版本、同名不同藝人、近似標題）：**不**自動合併，另建曲目並標 `needs_review`，候選寫入 `identity_candidates` |
+| `DISTINCT_TRACK` | 無相近候選，建新曲目 |
+
+人工決策永遠優先於自動流程：
+
+- `mergeTracks(intoId, fromId)`：把 from 的 sources、tags、playlists、aliases 全部併入 into 並刪除 from；from 的 canonical key 會存成 into 的 `canonical_key` alias，之後同 key 的新來源仍自動掛進來。
+- `splitTrack(trackId, sourceIds, { title?, artist?, ... })`：把指定 sources 拆到一個新曲目（新曲目 `identity_locked = 1`），並撤銷原曲目上對應的 canonical_key alias。
+- `identity_locked` 的曲目不會成為自動掛載目標：同 key 新來源會落入 `possible_match`（reason `identity_locked`）。`setIdentityLocked(trackId, false)` 可解除。
+- `previewIdentity(input)` 為唯讀預覽：回傳正規化結果與將採用的去重決策，不寫入任何資料。
+- `identityReviewQueue()` 列出所有待審候選配對（含信心值與原因）；`setNeedsReview(trackId, false)` 可手動清除標記。
+
+## 識別審核 MCP 工具
+
+上述 domain 能力已透過 MCP 工具開放（`src/identity-admin.js`，全部 preview-first、只用穩定 ID，不碰 provider playlist）：
+
+| 工具 | 行為 |
+|---|---|
+| `list_identity_reviews` | 列出待審候選配對：confidence、reason、雙方 exact sources |
+| `merge_music_tracks` | preview 列出 sources/tags/playlists/aliases 變化與 `from` 刪除；apply 併入並記住 canonical key alias |
+| `split_music_track` | preview 驗證 `sourceIds`（track_sources row id）歸屬並列出移動項；apply 拆出 `identity_locked` 新曲目，保留 tags/playlists |
+| `resolve_identity_review` | preview/apply 將配對駁回為 distinct；`lock:true` 同時鎖定雙方避免再次被自動合併 |
+| `set_identity_lock` | 切換 `identity_locked`（回報 before/after）；鎖定後相同來源只進 review 不自動掛載 |
 
 ## 需求
 
-- Node.js 20 或更新版本。
+- Node.js 24 或更新版本（`node:sqlite`）。
 - YouTube Data API key：用於公開搜尋與影片資訊；若不設定，catalog read 會改用 YouTube OAuth。
 - Google OAuth 2.0 client：列出、建立與修改自己的播放清單時需要。
 - OAuth scope：`https://www.googleapis.com/auth/youtube`。
@@ -66,6 +231,8 @@ PROVIDER_MAX_READ_RETRIES=1
 ```powershell
 npm run youtube:auth
 ```
+
+`youtube:auth`、MCP stdio server 與 HTTP facade 啟動時都會自動載入專案根目錄的 `.env`（Node 原生 `process.loadEnvFile`）——已存在的環境變數優先，`.env` 只補缺少的 key；缺少 `.env` 不算錯誤。
 
 這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`；不要把 passphrase、`.env` 或憑證檔提交到 Git。
 
@@ -130,7 +297,7 @@ youtube_save_track({
 }
 ```
 
-目前 server 使用 stdio MCP。Figma 手機頁面原型已建立，但要讓手機頁面直接操作 MCP，下一階段還需要受保護的 HTTP API／session layer；MCP 核心收藏流程已先完成。
+stdio MCP 與 HTTP facade 共用同一套 service layer；手機／Web 收藏介面由 `GET /` 提供（見「收藏 UI」），經 bootstrap→session Bearer 流程呼叫 `/api/*`。
 
 ## Spotify legacy provider
 
@@ -139,11 +306,32 @@ youtube_save_track({
 ## 品質控制
 
 ```powershell
-npm test
-npm run smoke
+npm test                # 每個 commit 必跑（node:test）
+npm run smoke           # MCP stdio server 啟動煙霧測試
+npm run lint            # ESLint flat config（CI 也跑）
+npm run test:coverage   # 測試 + V8 coverage + 棘輪門檻（行≥80/分支≥75/函數≥88，校準於 CI Node 24）
+npm run crap            # CRAP 分數：cyclomatic complexity × coverage
+npm run crap -- --gate 30   # 有任何函數 CRAP > 30 就 exit 1（可做門檻）
+npm run mutate          # Stryker mutation testing（全檔很慢，見下）
+npx stryker run --mutate src/library.js   # 單檔 scope
 ```
 
-GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm test`，並對 job 設定時間上限與 read-only repository 權限。
+### 品質閘門定位
+
+| 工具 | 何時跑 | 量什麼 |
+|---|---|---|
+| `npm test` | 每個 commit（CI 也跑） | 行為正確性——spec 裡的每個驗收條件 |
+| `npm run lint` | CI 每個 push | 靜態錯誤（unused vars、無效 escape 等） |
+| `npm run test:coverage` | CI 每個 push | 覆蓋率報表 + 棘輪門檻，只准升不准降 |
+| `npm run crap` | PR 前／清理複雜度時 | CRAP = comp²×(1−cov)³+comp，找出「又複雜又沒測」的函數 |
+| `npm run mutate` | 定期深檢（約 7 分鐘/檔，不進 CI） | 變異測試分數——測試是否真的抓得到 bug |
+
+- **Mutation testing 刻意不進 CI**：`node --test` command runner 每個 mutant 跑整套測試，單檔約 7 分鐘、全 `src/` 估約 2 小時。用 `--mutate` scope 到正在改的檔案。
+- **`src/spotify.js` 不計入 coverage**：legacy provider，YouTube-first 路線下去留未定；`server.js` 註冊層 6% 覆蓋是可接受的薄 wiring（mcp-smoke 涵蓋啟動）。
+- **CRAP 目前只做報表不做閘**：`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看基線再定閘值。
+- Baseline（2026-09，spotify.js 不計）：行 ~85% / 分支 ~78% / 函數 ~93%；`src/core.js` mutation score 46.6%（268 mutants）。
+
+GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
 
 ## 官方文件
 

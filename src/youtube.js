@@ -80,6 +80,10 @@ export function youtubeVideoSummary(item, position = null) {
   return {
     position,
     id,
+    // playlistItems rows carry the row id in item.id — keep it so callers can
+    // verify the exact row deleted, not just "some row with this videoId".
+    playlistItemId: item?.playlistItemId
+      ?? (snippet.playlistId && typeof item?.id === "string" ? item.id : null),
     name: snippet.title ?? item?.name ?? item?.title ?? "Unknown video",
     artists: channel ? [channel] : [],
     album: null,
@@ -87,6 +91,7 @@ export function youtubeVideoSummary(item, position = null) {
     url: item?.url ?? (id ? youtubeVideoUrl(id) : null),
     platform: "youtube",
     channel,
+    status: item?.status?.privacyStatus ?? (typeof item?.status === "string" ? item.status : null),
     description: snippet.description ?? item?.description ?? null,
     publishedAt: snippet.publishedAt ?? item?.publishedAt ?? null,
     duration: contentDetails.duration ?? item?.duration ?? null,
@@ -276,7 +281,8 @@ export class YouTubeClient {
 
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const queryString = asQuery(queryParams);
-      const url = API_BASE + path + (queryString ? "?" + queryString : "");
+      const apiBase = this.env.YOUTUBE_API_BASE?.trim() || API_BASE;
+      const url = apiBase + path + (queryString ? "?" + queryString : "");
       const response = await fetchWithDeadline(this.fetch, url, {
         method,
         headers,
@@ -359,7 +365,13 @@ export class YouTubeClient {
       signal,
     });
     const item = data.items?.[0];
-    if (!item) throw new Error("YouTube video was not found: " + id);
+    if (!item) {
+      // The API answers deleted/unknown videos with 200 + empty items; tag
+      // it so read-backs can distinguish confirmed-absence from unreadable.
+      const error = new Error("YouTube video was not found: " + id);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
     return youtubeVideoSummary(item, 1);
   }
 
@@ -399,7 +411,11 @@ export class YouTubeClient {
       signal,
     });
     const item = data.items?.[0];
-    if (!item) throw new Error("YouTube playlist was not found: " + id);
+    if (!item) {
+      const error = new Error("YouTube playlist was not found: " + id);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
     return youtubePlaylistSummary(item);
   }
 
@@ -456,6 +472,89 @@ export class YouTubeClient {
       signal,
     });
     return youtubeVideoSummary(data);
+  }
+
+  async removeVideoFromPlaylist(playlistId, videoId, { signal } = {}) {
+    // playlistItems.delete needs the playlist-item ID, which differs from the
+    // video ID — page the playlist until the matching item is found.
+    let pageToken;
+    let itemId = null;
+    while (itemId === null) {
+      const page = await this.request("/playlistItems", {
+        auth: "user",
+        query: {
+          part: "snippet,contentDetails",
+          playlistId,
+          maxResults: MAX_PAGE_SIZE,
+          pageToken,
+        },
+        signal,
+      });
+      const pageItems = page.items ?? [];
+      const found = pageItems.find(
+        (item) => (item.contentDetails?.videoId ?? item.snippet?.resourceId?.videoId) === videoId,
+      );
+      if (found) {
+        itemId = found.id;
+      } else if (page.nextPageToken && pageItems.length) {
+        pageToken = page.nextPageToken;
+      } else {
+        break;
+      }
+    }
+    if (itemId === null) {
+      return { removed: false, playlistId, videoId, reason: "not_in_playlist" };
+    }
+    await this.request("/playlistItems", {
+      method: "DELETE",
+      auth: "user",
+      query: { id: itemId },
+      signal,
+    });
+    return { removed: true, playlistId, playlistItemId: itemId, videoId };
+  }
+
+  async renamePlaylist(playlistId, name, { signal } = {}) {
+    // playlists.update replaces the whole snippet part, so the writable
+    // fields we are not changing must be sent back or they are cleared.
+    const current = await this.request("/playlists", {
+      auth: "user",
+      query: { part: "snippet,status", id: playlistId, maxResults: 1 },
+      signal,
+    });
+    const item = current.items?.[0];
+    if (!item) {
+      const error = new Error("YouTube playlist was not found: " + playlistId);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
+    const prior = item.snippet ?? {};
+    const snippet = { title: name };
+    for (const field of ["description", "tags", "defaultLanguage"]) {
+      if (prior[field] !== undefined) snippet[field] = prior[field];
+    }
+    const data = await this.request("/playlists", {
+      method: "PUT",
+      auth: "user",
+      query: { part: "snippet,status" },
+      body: {
+        id: playlistId,
+        snippet,
+        ...(item.status ? { status: { privacyStatus: item.status.privacyStatus } } : {}),
+      },
+      signal,
+    });
+    return youtubePlaylistSummary(data);
+  }
+
+  async deletePlaylist(playlistId, { signal } = {}) {
+    await this.request("/playlists", {
+      method: "DELETE",
+      auth: "user",
+      query: { id: playlistId },
+      signal,
+    });
+    return { deleted: true, playlistId };
   }
 
   async credentialStatus() {

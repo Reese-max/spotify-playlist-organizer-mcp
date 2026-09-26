@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Music Library</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e8eaf0;
+    --muted: #9aa1b0; --accent: #4f8cff; --ok: #3fbf72; --warn: #e0a53c;
+    --bad: #e05c5c; --chip: #232838;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 480px; margin: 0 auto; padding: 16px 16px 64px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: 480px; margin: 0 auto; padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 24px 0 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 12px; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 14px; border-radius: 10px; border: 1px solid var(--line);
+    background: #10131a; color: var(--text); font-size: 16px; margin-top: 8px;
+  }
+  button {
+    width: 100%; padding: 14px; border: 0; border-radius: 10px; margin-top: 12px;
+    background: var(--accent); color: #fff; font-size: 16px; font-weight: 600;
+    min-height: 48px; cursor: pointer;
+  }
+  button.secondary { background: var(--chip); color: var(--text); }
+  button.link { background: none; color: var(--accent); width: auto; padding: 0; min-height: 0; font-weight: 500; }
+  button:disabled { opacity: .5; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+  .item { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .item:last-child { border-bottom: 0; }
+  .title { font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .chip {
+    display: inline-block; padding: 2px 10px; border-radius: 999px; margin: 4px 6px 0 0;
+    background: var(--chip); color: var(--muted); font-size: 12px;
+  }
+  .badge { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; display: inline-block; margin-top: 6px; }
+  .b-ok { background: rgba(63,191,114,.15); color: var(--ok); }
+  .b-warn { background: rgba(224,165,60,.15); color: var(--warn); }
+  .b-bad { background: rgba(224,92,92,.15); color: var(--bad); }
+  .b-info { background: rgba(79,140,255,.15); color: var(--accent); }
+  .candidate { display: block; width: 100%; text-align: left; background: var(--panel); border: 1px solid var(--line); margin-top: 10px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .mono { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+  .error { color: var(--bad); font-size: 14px; margin-top: 8px; }
+  .next { background: rgba(224,165,60,.12); border: 1px solid rgba(224,165,60,.4); border-radius: 10px; padding: 12px; margin-top: 12px; font-size: 14px; }
+  .empty { color: var(--muted); text-align: center; padding: 20px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Music Library</h1>
+  <button class="link" id="logout" hidden>Sign out</button>
+</header>
+<main id="app"></main>
+<script>
+"use strict";
+const app = document.getElementById("app");
+const logoutBtn = document.getElementById("logout");
+const state = { token: localStorage.getItem("ml_session") || null, view: "home", ctx: {} };
+
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+async function api(method, route, body) {
+  const response = await fetch(route, {
+    method,
+    headers: {
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(state.token ? { Authorization: "Bearer " + state.token } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (response.status === 401) {
+    setToken(null);
+    state.view = "boot";
+    render();
+    throw new Error("Session expired — sign in again.");
+  }
+  const data = response.status === 204 ? null : await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(data?.error?.message || ("Request failed: " + response.status));
+  }
+  return data;
+}
+
+function setToken(token) {
+  state.token = token;
+  if (token) localStorage.setItem("ml_session", token);
+  else localStorage.removeItem("ml_session");
+  logoutBtn.hidden = !token;
+}
+
+function chips(values) {
+  return (values ?? []).map((entry) => `<span class="chip">${esc(typeof entry === "string" ? entry : entry.value)}</span>`).join("");
+}
+
+function classificationChips(classification) {
+  const dims = classification?.dimensions ?? {};
+  const entries = [];
+  for (const [name, list] of Object.entries(dims)) {
+    for (const entry of list ?? []) {
+      const label = typeof entry === "string" ? entry : entry.value;
+      const src = entry?.source === "user" ? " (you)" : "";
+      entries.push(`<span class="chip" title="${esc(name)}">${esc(label)}${src}</span>`);
+    }
+  }
+  return entries.join("");
+}
+
+function duplicateBadge(duplicate) {
+  const level = duplicate?.level;
+  if (level === "EXACT_SOURCE_DUPLICATE") return `<span class="badge b-warn">exact duplicate</span>`;
+  if (level === "SAME_CANONICAL_TRACK") return `<span class="badge b-info">same song — adds as another source</span>`;
+  if (level === "POSSIBLE_MATCH") return `<span class="badge b-warn">possible duplicate — needs review</span>`;
+  if (level === "DISTINCT_TRACK") return `<span class="badge b-ok">new track</span>`;
+  return "";
+}
+
+// ---------- views ----------
+
+function viewBoot() {
+  app.innerHTML = `
+    <div class="card">
+      <div class="title">Connect to your library</div>
+      <p class="muted">Paste the bootstrap token printed when the server started
+      (<span class="mono">MUSIC_HTTP_BOOTSTRAP_TOKEN=…</span>).</p>
+      <input type="password" id="boot" placeholder="bootstrap token" autocomplete="off">
+      <button id="connect">Connect</button>
+      <div class="error" id="bootError"></div>
+    </div>`;
+  document.getElementById("connect").onclick = async () => {
+    const error = document.getElementById("bootError");
+    error.textContent = "";
+    try {
+      const session = await api("POST", "/session", { token: document.getElementById("boot").value.trim() });
+      setToken(session.token);
+      state.view = "home";
+      render();
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  };
+}
+
+async function viewHome() {
+  app.innerHTML = `
+    <div class="card">
+      <div class="title">Collect a song</div>
+      <input type="text" id="input" placeholder="Song title or YouTube / YouTube Music link" value="${esc(state.ctx.input ?? "")}">
+      <input type="text" id="playlist" placeholder="Target playlist (optional)" value="${esc(state.ctx.playlist ?? "")}">
+      <button id="go">Preview</button>
+      <div class="error" id="goError"></div>
+    </div>
+    <h2>Needs attention</h2>
+    <div class="card" id="unsynced"><div class="empty">Loading…</div></div>
+    <h2>Recent</h2>
+    <div class="card" id="recent"><div class="empty">Loading…</div></div>`;
+
+  document.getElementById("go").onclick = async () => {
+    const input = document.getElementById("input").value.trim();
+    const playlist = document.getElementById("playlist").value.trim();
+    state.ctx = { input, playlist };
+    const error = document.getElementById("goError");
+    if (!input) { error.textContent = "Enter a song title or link."; return; }
+    error.textContent = "";
+    try {
+      const receipt = await api("POST", "/api/save_music", {
+        input, mode: "preview", ...(playlist ? { playlist } : {}),
+      });
+      state.ctx.receipt = receipt;
+      state.view = receipt.action === "selection_required" ? "candidates" : "confirm";
+      render();
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  };
+
+  try {
+    const [recent, unsynced] = await Promise.all([
+      api("GET", "/api/library/recent?limit=15"),
+      api("GET", "/api/library/unsynced"),
+    ]);
+    const recentBox = document.getElementById("recent");
+    recentBox.innerHTML = recent.items.length
+      ? recent.items.map((t) => `
+        <div class="item">
+          <button class="link title" data-track="${t.id}">${esc(t.canonicalTitle)}</button>
+          <div class="sub">${esc(t.artist ?? "")}</div>
+        </div>`).join("")
+      : `<div class="empty">Nothing saved yet.</div>`;
+
+    const unsyncedBox = document.getElementById("unsynced");
+    unsyncedBox.innerHTML = unsynced.items.length
+      ? unsynced.items.map((entry) => `
+        <div class="item">
+          <button class="link title" data-track="${entry.track.id}">${esc(entry.track.canonicalTitle)}</button>
+          <div>${entry.reasons.map((r) => `<span class="badge ${r === "not_synced" ? "b-info" : "b-warn"}">${esc(r.replaceAll("_", " "))}</span>`).join("")}</div>
+          ${entry.reasons.includes("provider_unavailable")
+            ? `<button class="secondary" data-reconcile="${entry.track.id}">Run reconcile</button>` : ""}
+        </div>`).join("")
+      : `<div class="empty">All synced.</div>`;
+  } catch (err) {
+    document.getElementById("recent").innerHTML = `<div class="error">${esc(err.message)}</div>`;
+  }
+}
+
+function viewCandidates() {
+  const { receipt, input, playlist } = state.ctx;
+  app.innerHTML = `
+    <div class="card">
+      <div class="title">Which video is “${esc(input)}”?</div>
+      <p class="muted">Nothing was saved — pick the exact video first.</p>
+      ${(receipt.candidates ?? []).map((c) => `
+        <button class="candidate" data-vid="${esc(c.id)}">
+          <div class="title">${esc(c.name)}</div>
+          <div class="sub">${esc(c.channel ?? "")} · <span class="mono">${esc(c.id)}</span></div>
+        </button>`).join("")}
+      <button class="secondary" id="back">Back</button>
+    </div>`;
+  document.getElementById("back").onclick = () => { state.view = "home"; render(); };
+  for (const btn of app.querySelectorAll("[data-vid]")) {
+    btn.onclick = async () => {
+      const videoId = btn.dataset.vid;
+      btn.disabled = true;
+      try {
+        const receipt2 = await api("POST", "/api/save_music", {
+          input, videoId, mode: "preview", ...(playlist ? { playlist } : {}),
+        });
+        state.ctx.receipt = receipt2;
+        state.ctx.videoId = videoId;
+        state.view = "confirm";
+        render();
+      } catch (err) {
+        btn.disabled = false;
+        btn.insertAdjacentHTML("afterend", `<div class="error">${esc(err.message)}</div>`);
+      }
+    };
+  }
+}
+
+function viewConfirm() {
+  const { receipt, input, playlist } = state.ctx;
+  const video = receipt.video ?? {};
+  const dup = receipt.duplicate ?? {};
+  const yt = receipt.youtube ?? {};
+  app.innerHTML = `
+    <div class="card">
+      <div class="title">${esc(video.name ?? input)}</div>
+      <div class="sub">${esc(video.channel ?? "")}</div>
+      ${duplicateBadge(dup)}
+      <div style="margin-top:10px">${classificationChips(receipt.classification)}</div>
+      <div class="sub" style="margin-top:12px">
+        Playlist: ${esc(yt.playlist?.name ?? "—")}
+        ${yt.playlistAction ? `<span class="badge b-info">${esc(yt.playlistAction.replaceAll("_", " "))}</span>` : ""}
+        ${dup.youtubePlaylistItem ? `<span class="badge b-warn">already in playlist</span>` : ""}
+      </div>
+      ${receipt.nextStep ? `<div class="next">${esc(receipt.nextStep)}</div>` : ""}
+      <div class="row">
+        <button id="save">${dup.level === "EXACT_SOURCE_DUPLICATE" ? "Save anyway" : "Confirm & save"}</button>
+        <button class="secondary" id="back">Back</button>
+      </div>
+      <div class="error" id="saveError"></div>
+    </div>`;
+  document.getElementById("back").onclick = () => { state.view = "home"; render(); };
+  document.getElementById("save").onclick = async () => {
+    const btn = document.getElementById("save");
+    btn.disabled = true;
+    try {
+      const applied = await api("POST", "/api/save_music", {
+        input,
+        ...(state.ctx.videoId ? { videoId: state.ctx.videoId } : {}),
+        ...(playlist ? { playlist } : {}),
+        mode: "apply",
+      });
+      state.ctx.result = applied;
+      state.view = "result";
+      render();
+    } catch (err) {
+      btn.disabled = false;
+      document.getElementById("saveError").textContent = err.message;
+    }
+  };
+}
+
+function viewResult() {
+  const r = state.ctx.result;
+  const action = r.action;
+  const trackId = r.ids?.trackId;
+  const variants = {
+    saved: { cls: "b-ok", label: "Saved", body: "Added to your library." },
+    skipped_duplicate: { cls: "b-info", label: "Already in library", body: "This exact source was already saved — nothing was duplicated." },
+    partial_failure: { cls: "b-warn", label: "Partially saved", body: "Some steps completed; check what failed below." },
+    reconciliation_required: { cls: "b-bad", label: "Write outcome unknown", body: "The provider may or may not have applied the write. Do not retry blindly." },
+    failed: { cls: "b-bad", label: "Failed", body: "Nothing was saved." },
+  };
+  const v = variants[action] ?? { cls: "b-warn", label: esc(action), body: "" };
+  const steps = [
+    ["Library", r.library?.writeState],
+    ["YouTube", r.youtube?.writeState],
+  ].map(([name, s]) => s ? `<div class="sub">${name}: <span class="mono">${esc(s)}</span></div>` : "").join("");
+
+  app.innerHTML = `
+    <div class="card">
+      <span class="badge ${v.cls}">${v.label}</span>
+      <div class="title" style="margin-top:8px">${esc(r.video?.name ?? r.input ?? "")}</div>
+      <p class="muted">${v.body}</p>
+      ${steps}
+      ${r.nextStep ? `<div class="next">${esc(r.nextStep)}</div>` : ""}
+      ${action === "reconciliation_required" && trackId
+        ? `<button id="reconcile">Run read-back reconcile</button>` : ""}
+      ${trackId ? `<button class="secondary" data-track="${trackId}">View track</button>` : ""}
+      <button class="secondary" id="done">Done</button>
+      <div class="error" id="resultError"></div>
+    </div>`;
+  document.getElementById("done").onclick = () => { state.ctx = {}; state.view = "home"; render(); };
+  const reconcile = document.getElementById("reconcile");
+  if (reconcile) {
+    reconcile.onclick = async () => {
+      reconcile.disabled = true;
+      try {
+        const resolved = await api("POST", "/api/reconcile", { trackId });
+        app.querySelector(".card").insertAdjacentHTML(
+          "beforeend",
+          `<div class="next">Reconciled: <span class="mono">${esc(resolved.sync?.state ?? "?")}</span></div>`,
+        );
+        reconcile.remove();
+      } catch (err) {
+        reconcile.disabled = false;
+        document.getElementById("resultError").textContent = err.message;
+      }
+    };
+  }
+}
+
+async function viewTrack() {
+  app.innerHTML = `<div class="card"><div class="empty">Loading…</div></div>`;
+  try {
+    const detail = await api("GET", "/api/library/tracks/" + state.ctx.trackId);
+    const t = detail.track;
+    app.innerHTML = `
+      <div class="card">
+        <div class="title">${esc(t.canonicalTitle)}</div>
+        <div class="sub">${esc(t.artist ?? "")}</div>
+        ${t.needsReview ? `<span class="badge b-warn">needs review</span>` : ""}
+        <div style="margin-top:10px">${chips(detail.tags)}</div>
+        <div style="margin-top:6px">${classificationChips(detail.classification)}</div>
+        <h2>Sources</h2>
+        ${(detail.sources ?? []).map((s) => `
+          <div class="item"><span class="mono">${esc(s.provider)}:${esc(s.sourceId)}</span>
+          ${s.status && s.status !== "ok" ? `<span class="badge b-bad">${esc(s.status)}</span>` : ""}</div>`).join("")}
+        <h2>Playlists</h2>
+        ${(detail.playlists ?? []).map((p) => `
+          <div class="item">${esc(p.name ?? p.playlistId ?? "")} <span class="sub">${esc(p.provider)}</span></div>`).join("")
+          || `<div class="empty">No playlists.</div>`}
+        <h2>Sync</h2>
+        <div class="sub mono">${esc(detail.sync?.state ?? "local only")}</div>
+        ${detail.identityReview?.length ? `<div class="next">This track has open identity review candidates.</div>` : ""}
+        <button class="secondary" id="back">Back</button>
+      </div>`;
+    document.getElementById("back").onclick = () => { state.view = "home"; render(); };
+  } catch (err) {
+    app.innerHTML = `<div class="card"><div class="error">${esc(err.message)}</div>
+      <button class="secondary" id="back">Back</button></div>`;
+    document.getElementById("back").onclick = () => { state.view = "home"; render(); };
+  }
+}
+
+async function render() {
+  logoutBtn.hidden = !state.token;
+  if (!state.token) return viewBoot();
+  if (state.view === "home") return viewHome();
+  if (state.view === "candidates") return viewCandidates();
+  if (state.view === "confirm") return viewConfirm();
+  if (state.view === "result") return viewResult();
+  if (state.view === "track") return viewTrack();
+  return viewHome();
+}
+
+app.addEventListener("click", (event) => {
+  const track = event.target.closest("[data-track]");
+  if (track) {
+    state.ctx = { trackId: Number(track.dataset.track) };
+    state.view = "track";
+    render();
+    return;
+  }
+  const reconcile = event.target.closest("[data-reconcile]");
+  if (reconcile) {
+    reconcile.disabled = true;
+    api("POST", "/api/reconcile", { trackId: Number(reconcile.dataset.reconcile) })
+      .then(() => render())
+      .catch((err) => {
+        reconcile.disabled = false;
+        reconcile.insertAdjacentHTML("afterend", `<div class="error">${esc(err.message)}</div>`);
+      });
+  }
+});
+
+logoutBtn.onclick = async () => {
+  try { await api("DELETE", "/session"); } catch { /* session may already be gone */ }
+  setToken(null);
+  state.ctx = {};
+  state.view = "home";
+  render();
+};
+
+render();
+</script>
+</body>
+</html>

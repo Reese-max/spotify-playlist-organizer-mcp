@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fetchWithDeadline, ProviderRequestError } from "../src/http.js";
+import { fetchWithDeadline, ProviderRequestError, waitForRetry } from "../src/http.js";
 import { YouTubeClient } from "../src/youtube.js";
 
 function response(data, status = 200) {
@@ -87,4 +87,27 @@ test("bounds a hanging provider response body", async () => {
     client.searchVideos("focus"),
     (error) => error instanceof ProviderRequestError && error.code === "TIMEOUT",
   );
+});
+
+test("waitForRetry resolves immediately without a delay", async () => {
+  await waitForRetry(0);
+});
+
+test("waitForRetry waits out the delay then resolves", async () => {
+  const started = Date.now();
+  await waitForRetry(15);
+  assert.ok(Date.now() - started >= 10);
+});
+
+test("waitForRetry rejects when the signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(waitForRetry(50, controller.signal, "retry op"));
+});
+
+test("waitForRetry rejects when aborted mid-wait", async () => {
+  const controller = new AbortController();
+  const pending = waitForRetry(5_000, controller.signal, "retry op");
+  controller.abort();
+  await assert.rejects(pending);
 });

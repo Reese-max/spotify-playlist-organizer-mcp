@@ -68,6 +68,7 @@ async function startYouTubeStub() {
     failNextAddItem: false,
     failSearchQuota: false,
     failSearchForbidden: false,
+    delayAddMs: 0,
   };
   state.addVideo = (videoId, title) => state.videos.set(videoId, videoResource(videoId, title));
 
@@ -140,6 +141,9 @@ async function startYouTubeStub() {
       }
       if (req.method === "POST" && pathname === "/playlistItems") {
         state.counters.addItem += 1;
+        if (state.delayAddMs) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, state.delayAddMs));
+        }
         const playlistId = body?.snippet?.playlistId;
         const videoId = body?.snippet?.resourceId?.videoId;
         const itemId = "PLIstub" + String(state.nextItemId++).padStart(4, "0");
@@ -306,6 +310,44 @@ function assertNoSecrets(...texts) {
     }
   }
 }
+
+test("E2E: overlapping stdio save calls add one playlist row", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo("vidConcur01", "E2E Concurrent Song");
+  stub.playlists.set("PL_CONCURRENT001", {
+    id: "PL_CONCURRENT001",
+    snippet: { title: "E2E Concurrent" },
+    status: { privacyStatus: "private" },
+    contentDetails: { itemCount: 0 },
+  });
+  stub.delayAddMs = 200;
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const args = {
+      input: "https://www.youtube.com/watch?v=vidConcur01",
+      playlist: "PL_CONCURRENT001",
+      mode: "apply",
+    };
+    const [first, second] = await Promise.all([
+      client.callTool("save_music", args),
+      client.callTool("save_music", args),
+    ]);
+    assert.deepEqual([first.parsed.youtube.action, second.parsed.youtube.action].sort(), [
+      "added", "skipped_duplicate",
+    ]);
+    assert.equal(stub.counters.addItem, 1);
+    assert.equal([...stub.items.values()].filter((row) => (
+      row.playlistId === "PL_CONCURRENT001" && row.videoId === "vidConcur01"
+    )).length, 1);
+    assertNoSecrets(client.stdoutText, client.stderrText, first.text, second.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("E2E: tools/list exposes the tool surface and exact-URL save persists through stdio", { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));

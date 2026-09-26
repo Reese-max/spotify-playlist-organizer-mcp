@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { openLibrary } from "../src/library.js";
 import { syncYoutube } from "../src/library-sync.js";
 import { saveMusic } from "../src/save-music.js";
@@ -204,6 +205,186 @@ test("a second apply of the same videoId is idempotent on both sides", async () 
     assert.equal(library.trackCount(), 1);
     assert.equal(youtube.items.get("PL_CREATED_1").length, 1);
   } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("two concurrent applies for one video and playlist add only one provider row", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube();
+  const playlistId = "PL_CONCURRENT001";
+  youtube.playlists.push({ id: playlistId, name: "Concurrent" });
+  youtube.items.set(playlistId, []);
+
+  let readCount = 0;
+  let releaseFirstRead;
+  let signalFirstRead;
+  let signalSecondVideo;
+  const firstRead = new Promise((resolve) => { signalFirstRead = resolve; });
+  const secondVideo = new Promise((resolve) => { signalSecondVideo = resolve; });
+  const firstReadGate = new Promise((resolve) => { releaseFirstRead = resolve; });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  let videoCount = 0;
+  youtube.getVideo = async (id) => {
+    const video = await originalGetVideo(id);
+    videoCount += 1;
+    if (videoCount === 2) signalSecondVideo();
+    return video;
+  };
+  youtube.getPlaylistItems = async (id) => {
+    readCount += 1;
+    const snapshot = [...(youtube.items.get(id) ?? [])];
+    if (readCount === 1) {
+      signalFirstRead();
+      await firstReadGate;
+    }
+    return snapshot;
+  };
+
+  try {
+    const args = { input: "https://www.youtube.com/watch?v=" + VIDEO_ID, playlist: playlistId, mode: "apply" };
+    const first = saveMusic({ youtube, library }, args);
+    await firstRead;
+    const second = saveMusic({ youtube, library }, args);
+    await secondVideo;
+    await setImmediate();
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 0);
+    releaseFirstRead();
+
+    const receipts = await Promise.all([first, second]);
+    assert.deepEqual(receipts.map((receipt) => receipt.youtube.action).sort(), ["added", "skipped_duplicate"]);
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 1);
+    assert.equal(youtube.items.get(playlistId).length, 1);
+    assert.equal(library.trackCount(), 1);
+    assert.equal(readCount, 2);
+  } finally {
+    releaseFirstRead();
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent canonical sources add only one playlist row", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube();
+  const playlistId = "PL_CANONICAL001";
+  youtube.playlists.push({ id: playlistId, name: "Canonical" });
+  youtube.items.set(playlistId, []);
+
+  let releaseFirstRead;
+  let signalFirstRead;
+  let signalSecondVideo;
+  const firstRead = new Promise((resolve) => { signalFirstRead = resolve; });
+  const secondVideo = new Promise((resolve) => { signalSecondVideo = resolve; });
+  const firstReadGate = new Promise((resolve) => { releaseFirstRead = resolve; });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  let videoCount = 0;
+  youtube.getVideo = async (id) => {
+    const video = await originalGetVideo(id);
+    videoCount += 1;
+    if (videoCount === 2) signalSecondVideo();
+    return video;
+  };
+  let readCount = 0;
+  youtube.getPlaylistItems = async (id) => {
+    readCount += 1;
+    const snapshot = [...(youtube.items.get(id) ?? [])];
+    if (readCount === 1) {
+      signalFirstRead();
+      await firstReadGate;
+    }
+    return snapshot;
+  };
+  youtube.addVideoToPlaylist = async (id, videoId) => {
+    youtube.calls.push(["addVideoToPlaylist", id, videoId]);
+    const entry = {
+      id: videoId,
+      name: videoFixture(videoId).name,
+      channel: "Daft Punk",
+    };
+    youtube.items.set(id, [...(youtube.items.get(id) ?? []), entry]);
+    return entry;
+  };
+
+  try {
+    const first = saveMusic({ youtube, library }, {
+      input: "https://www.youtube.com/watch?v=AAAAAAAAAAA", playlist: playlistId, mode: "apply",
+    });
+    await firstRead;
+    const second = saveMusic({ youtube, library }, {
+      input: "https://www.youtube.com/watch?v=BBBBBBBBBBB", playlist: playlistId, mode: "apply",
+    });
+    await secondVideo;
+    await setImmediate();
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 0);
+    releaseFirstRead();
+
+    const receipts = await Promise.all([first, second]);
+    assert.deepEqual(receipts.map((receipt) => receipt.youtube.action).sort(), [
+      "added", "skipped_canonical_duplicate",
+    ]);
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 1);
+    assert.equal(youtube.items.get(playlistId).length, 1);
+    assert.equal(readCount, 2);
+  } finally {
+    releaseFirstRead();
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent saves create one normalized playlist name", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube();
+  let releaseFirstList;
+  let signalFirstList;
+  let signalSecondVideo;
+  const firstList = new Promise((resolve) => { signalFirstList = resolve; });
+  const secondVideo = new Promise((resolve) => { signalSecondVideo = resolve; });
+  const firstListGate = new Promise((resolve) => { releaseFirstList = resolve; });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  let videoCount = 0;
+  youtube.getVideo = async (id) => {
+    const video = await originalGetVideo(id);
+    videoCount += 1;
+    if (videoCount === 2) signalSecondVideo();
+    return video;
+  };
+  let listCount = 0;
+  youtube.listPlaylists = async () => {
+    listCount += 1;
+    const snapshot = { total: youtube.playlists.length, playlists: [...youtube.playlists] };
+    if (listCount === 1) {
+      signalFirstList();
+      await firstListGate;
+    }
+    return snapshot;
+  };
+
+  try {
+    const first = saveMusic({ youtube, library }, {
+      input: "https://www.youtube.com/watch?v=AAAAAAAAAAA",
+      playlist: "New Playlist", remoteDedupe: "source", mode: "apply",
+    });
+    await firstList;
+    const second = saveMusic({ youtube, library }, {
+      input: "https://www.youtube.com/watch?v=BBBBBBBBBBB",
+      playlist: " new playlist ", remoteDedupe: "source", mode: "apply",
+    });
+    await secondVideo;
+    await setImmediate();
+    assert.equal(youtube.calls.filter(([name]) => name === "createPlaylist").length, 0);
+    releaseFirstList();
+
+    const receipts = await Promise.all([first, second]);
+    assert.deepEqual(receipts.map((receipt) => receipt.youtube.action), ["added", "added"]);
+    assert.equal(youtube.calls.filter(([name]) => name === "createPlaylist").length, 1);
+    assert.equal(youtube.playlists.length, 1);
+    assert.equal(youtube.items.get(youtube.playlists[0].id).length, 2);
+    assert.equal(listCount, 2);
+  } finally {
+    releaseFirstList();
     library.close();
     await rm(directory, { recursive: true, force: true });
   }

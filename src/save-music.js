@@ -255,6 +255,56 @@ function normalizeTags(tags) {
   )];
 }
 
+// One client can receive overlapping stdio or HTTP saves. Hold each provider
+// read-before-write sequence by its overlapping identities: exact video,
+// canonical song, and playlist name when creation may be needed. Acquiring
+// keys in sorted order prevents cycles between different combinations.
+const youtubeWriteLocks = new WeakMap();
+
+function writeLockKeys({ videoId, canonicalKey, remoteDedupe, targetReference }) {
+  const keys = [`video:${videoId}`];
+  if (remoteDedupe === "canonical" && canonicalKey) {
+    keys.push(`canonical:${canonicalKey}`);
+  }
+  try {
+    const parsed = parseYouTubePlaylistReference(targetReference);
+    if (!parsed.id && parsed.name) {
+      keys.push(`playlist-name:${parsed.name.trim().toLocaleLowerCase()}`);
+    }
+  } catch {
+    // runYouTubeStep reports invalid playlist references in its normal receipt.
+  }
+  return keys.sort();
+}
+
+async function withYouTubeWriteLocks(youtube, keys, signal, operation) {
+  let byKey = youtubeWriteLocks.get(youtube);
+  if (!byKey) {
+    byKey = new Map();
+    youtubeWriteLocks.set(youtube, byKey);
+  }
+
+  async function run(index) {
+    if (index === keys.length) return operation();
+    const key = keys[index];
+    const previous = byKey.get(key);
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    byKey.set(key, current);
+
+    try {
+      if (previous) await previous;
+      signal?.throwIfAborted?.();
+      return await run(index + 1);
+    } finally {
+      release();
+      if (byKey.get(key) === current) byKey.delete(key);
+    }
+  }
+
+  return run(0);
+}
+
 export async function saveMusic({ youtube, library }, args = {}, { signal } = {}) {
   const input = args.input;
   const mode = args.mode === "apply" ? "apply" : "preview";
@@ -350,20 +400,28 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
       };
     }
   }
-  const youtubeStep = syncToYouTube
-    ? await runYouTubeStep(youtube, {
-      video,
-      targetReference,
-      selectedCategory,
-      mode,
-      signal,
-      completedSteps,
-      remoteDedupe,
-      siblingVideoIds,
-      canonicalKey: canonicalData.canonicalKey,
-      siblingSourcesError,
-    })
-    : { enabled: false, action: "disabled", writeState: "NOT_REQUESTED" };
+  const runProviderStep = () => runYouTubeStep(youtube, {
+    video,
+    targetReference,
+    selectedCategory,
+    mode,
+    signal,
+    completedSteps,
+    remoteDedupe,
+    siblingVideoIds,
+    canonicalKey: canonicalData.canonicalKey,
+    siblingSourcesError,
+  });
+  const youtubeStep = !syncToYouTube
+    ? { enabled: false, action: "disabled", writeState: "NOT_REQUESTED" }
+    : mode === "apply"
+      ? await withYouTubeWriteLocks(youtube, writeLockKeys({
+        videoId: video.id,
+        canonicalKey: canonicalData.canonicalKey,
+        remoteDedupe,
+        targetReference,
+      }), signal, runProviderStep)
+      : await runProviderStep();
 
   let libraryStep;
   let identity = identityDecision;

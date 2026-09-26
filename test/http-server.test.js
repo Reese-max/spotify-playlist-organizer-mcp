@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
 
 import { createHttpServer, createSessionStore } from "../src/http-server.js";
 import { openLibrary } from "../src/library.js";
@@ -275,6 +276,63 @@ test("concurrent effectful requests are bounded with 429", async (t) => {
   ]);
   const statuses = [first.status, second.status].sort();
   assert.deepEqual(statuses, [200, 429]);
+});
+
+test("overlapping authenticated HTTP saves add one provider playlist row", async (t) => {
+  const youtube = new StubYouTube();
+  const { base, library } = await startServer(t, { youtube, maxConcurrentWrites: 2 });
+  youtube.playlists.set(PL_A, { id: PL_A, name: "HTTP PL" });
+  youtube.items.set(PL_A, []);
+  youtube.videos.set(VID_A, { id: VID_A, name: "Saved Song" });
+  const token = await session(base);
+
+  let releaseFirstRead;
+  let signalFirstRead;
+  let signalSecondVideo;
+  const firstRead = new Promise((resolve) => { signalFirstRead = resolve; });
+  const secondVideo = new Promise((resolve) => { signalSecondVideo = resolve; });
+  const firstReadGate = new Promise((resolve) => { releaseFirstRead = resolve; });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  let reads = 0;
+  let videos = 0;
+  youtube.getVideo = async (id) => {
+    const video = await originalGetVideo(id);
+    videos += 1;
+    if (videos === 2) signalSecondVideo();
+    return video;
+  };
+  youtube.getPlaylistItems = async (id) => {
+    reads += 1;
+    const snapshot = await originalGetItems(id);
+    if (reads === 1) {
+      signalFirstRead();
+      await firstReadGate;
+    }
+    return snapshot;
+  };
+
+  const payload = { input: "Saved Song", videoId: VID_A, mode: "apply", playlist: PL_A };
+  try {
+    const first = api(base, "POST", "/api/save_music", { token, body: payload });
+    await firstRead;
+    const second = api(base, "POST", "/api/save_music", { token, body: payload });
+    await secondVideo;
+    await setImmediate();
+    assert.equal(youtube.addCalls, 0);
+    releaseFirstRead();
+
+    const responses = await Promise.all([first, second]);
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    const receipts = await Promise.all(responses.map((response) => response.json()));
+    assert.deepEqual(receipts.map((receipt) => receipt.youtube.action).sort(), ["added", "skipped_duplicate"]);
+    assert.equal(youtube.addCalls, 1);
+    assert.equal(youtube.items.get(PL_A).length, 1);
+    assert.equal(library.trackCount(), 1);
+    assert.equal(reads, 2);
+  } finally {
+    releaseFirstRead();
+  }
 });
 
 test("responses never leak credential material and ignore client-supplied paths", async (t) => {

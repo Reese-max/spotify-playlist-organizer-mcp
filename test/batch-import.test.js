@@ -308,7 +308,7 @@ test("a failed requested playlist add makes the batch partial and names reconcil
     { library, youtube }, { items: [VID_NEW1], syncPlaylist: PL_SYNC },
   );
   youtube.addVideoToPlaylist = async () => {
-    throw Object.assign(new Error("write timed out"), { code: "TIMEOUT" });
+    throw Object.assign(new Error("playlist write rejected"), { status: 403 });
   };
 
   const result = await importMusicBatch(
@@ -318,4 +318,85 @@ test("a failed requested playlist add makes the batch partial and names reconcil
   assert.equal(result.results[0].status, "imported");
   assert.equal(result.sync.results[0].status, "failed");
   assert.match(result.nextStep, /playlist.*membership|membership.*playlist/i);
+});
+
+test("an ambiguous playlist add reports UNKNOWN_AFTER_WRITE with exact IDs and reconciles safely", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Uncertain Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const originalAdd = youtube.addVideoToPlaylist.bind(youtube);
+  youtube.addVideoToPlaylist = async (playlistId, videoId) => {
+    await originalAdd(playlistId, videoId); // write landed; response was lost
+    throw Object.assign(new Error("connection dropped after write"), { code: "TIMEOUT" });
+  };
+
+  const unknown = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(unknown.action, "UNKNOWN_AFTER_WRITE");
+  assert.equal(unknown.results[0].status, "imported");
+  assert.equal(unknown.sync.failed, 0);
+  assert.equal(unknown.sync.unknown, 1);
+  assert.deepEqual(
+    [unknown.sync.results[0].playlistId, unknown.sync.results[0].videoId,
+      unknown.sync.results[0].status, unknown.sync.results[0].writeState],
+    [PL_SYNC, VID_NEW1, "unknown_after_write", "UNKNOWN_AFTER_WRITE"],
+  );
+  assert.match(unknown.nextStep, new RegExp(PL_SYNC));
+  assert.match(unknown.nextStep, new RegExp(VID_NEW1));
+
+  const retried = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC, resume: true },
+  );
+  assert.equal(retried.action, "imported");
+  assert.equal(youtube.addCalls.length, 1);
+  assert.equal(youtube.items.get(PL_SYNC).length, 1);
+});
+
+test("mixed requested sync successes and explicit failures stay partial", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Added Song" });
+  youtube.videos.set(VID_NEW2, { id: VID_NEW2, name: "Rejected Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, VID_NEW2] });
+  const originalAdd = youtube.addVideoToPlaylist.bind(youtube);
+  youtube.addVideoToPlaylist = async (playlistId, videoId) => {
+    if (videoId === VID_NEW2) throw Object.assign(new Error("forbidden"), { status: 403 });
+    return originalAdd(playlistId, videoId);
+  };
+
+  const partial = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(partial.action, "partial_failure");
+  assert.equal(partial.results.filter((entry) => entry.status === "imported").length, 2);
+  assert.equal(partial.sync.failed, 1);
+  assert.equal(partial.sync.unknown, 0);
+  assert.deepEqual(partial.sync.results.map((entry) => [entry.videoId, entry.status]), [
+    [VID_NEW1, "added"], [VID_NEW2, "failed"],
+  ]);
+  assert.equal(library.trackCount(), 2);
+  assert.match(partial.nextStep, /verify playlist membership/i);
+});
+
+test("a status-less preflight rejection is a definite sync failure", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Local Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("client credentials unavailable"), { code: "AUTH_REQUIRED" });
+  };
+
+  const result = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(result.action, "partial_failure");
+  assert.equal(result.sync.failed, 1);
+  assert.equal(result.sync.unknown, 0);
+  assert.equal(result.sync.results[0].status, "failed");
 });

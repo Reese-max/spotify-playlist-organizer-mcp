@@ -28,6 +28,14 @@ function errorInfo(error) {
   };
 }
 
+function addOutcomeUnknown(error) {
+  // A client rejection is a definite failed add. A lost response, timeout,
+  // throttling, or server error cannot prove whether the write landed.
+  return ["TIMEOUT", "CALLER_CANCELLED", "NETWORK_ERROR", "UNKNOWN_AFTER_WRITE"].includes(error?.code)
+    || [408, 429].includes(error?.status)
+    || error?.status >= 500;
+}
+
 function isUnavailableName(name) {
   return UNAVAILABLE_TITLES.has(String(name ?? "").trim().toLowerCase());
 }
@@ -424,9 +432,16 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
         if (!["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(item.result)) continue;
         try {
           await youtube.addVideoToPlaylist(syncTarget, item.videoId, { signal });
-          syncResults.push({ videoId: item.videoId, trackId: item.trackId ?? null, status: "added" });
+          syncResults.push({ playlistId: syncTarget, videoId: item.videoId, trackId: item.trackId ?? null, status: "added" });
         } catch (error) {
-          syncResults.push({ videoId: item.videoId, status: "failed", error: errorInfo(error) });
+          const unknown = addOutcomeUnknown(error);
+          syncResults.push({
+            playlistId: syncTarget,
+            videoId: item.videoId,
+            status: unknown ? "unknown_after_write" : "failed",
+            ...(unknown ? { writeState: "UNKNOWN_AFTER_WRITE" } : {}),
+            error: errorInfo(error),
+          });
         }
       }
     }
@@ -434,13 +449,24 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
 
   const remaining = plan.items.filter((item) => item.result == null).length;
   const syncFailed = syncResults.filter((entry) => entry.status === "failed").length;
+  const syncUnknown = syncResults.filter((entry) => entry.status === "unknown_after_write");
   const failed = results.filter((entry) => ["failed", "sync_failed", "retryable"].includes(entry.status)).length
     + syncFailed;
-  const action = cancelled
-    ? "cancelled"
-    : failed
-      ? "partial_failure"
-      : "imported";
+  let action = "imported";
+  if (failed) action = "partial_failure";
+  if (cancelled) action = "cancelled";
+  if (syncUnknown.length) action = "UNKNOWN_AFTER_WRITE";
+
+  let nextStep;
+  if (syncUnknown.length) {
+    nextStep = `Verify exact video IDs ${syncUnknown.map((entry) => entry.videoId).join(", ")} in playlist ${syncTarget} before retrying any additions; the provider write may have succeeded. Local imports remain saved.`;
+  } else if (cancelled) {
+    nextStep = `Re-run import_music_batch with batchId "${plan.batchId}" and resume:true to continue from item ${plan.items.length - remaining + 1}.`;
+  } else if (failed) {
+    nextStep = syncFailed || results.some((entry) => entry.status === "sync_failed")
+      ? "Inspect sync.results and verify playlist membership by exact video ID before retrying failed additions; local imports remain saved."
+      : `Inspect each failed or retryable item in results; re-run import_music_batch with batchId "${plan.batchId}" and resume:true after the provider recovers.`;
+  }
 
   return {
     mode: "apply",
@@ -449,13 +475,7 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     counts: countBy(plan.items),
     results,
     remaining,
-    ...(syncTarget ? { sync: { playlistId: syncTarget, results: syncResults, failed: syncFailed } } : {}),
-    ...(cancelled
-      ? { nextStep: `Re-run import_music_batch with batchId "${plan.batchId}" and resume:true to continue from item ${plan.items.length - remaining + 1}.` }
-      : failed
-        ? { nextStep: syncFailed || results.some((entry) => entry.status === "sync_failed")
-          ? "Inspect sync.results and verify playlist membership by exact video ID before retrying failed additions; local imports remain saved."
-          : `Inspect each failed or retryable item in results; re-run import_music_batch with batchId "${plan.batchId}" and resume:true after the provider recovers.` }
-        : {}),
+    ...(syncTarget ? { sync: { playlistId: syncTarget, results: syncResults, failed: syncFailed, unknown: syncUnknown.length } } : {}),
+    ...(nextStep ? { nextStep } : {}),
   };
 }

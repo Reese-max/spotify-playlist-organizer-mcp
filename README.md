@@ -1,5 +1,7 @@
 # Music Playlist Organizer MCP
 
+目前產品版本：**v0.3.0**。MCP server、HTTP `/version` 與音樂庫備份的版本資訊都從 `package.json` 讀取。
+
 這是一個以 Node.js 撰寫的 MCP Server，讓你把找到的歌曲名稱或 YouTube／YouTube Music 連結，辨識後分類、去重，並加入自己的 YouTube 播放清單，之後可以直接回到 YouTube 觀看。
 
 目前以 YouTube 為主要 provider；Spotify 工具仍保留，但屬於選配的 legacy provider。

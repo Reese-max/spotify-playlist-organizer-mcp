@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createHttpServer, createSessionStore } from "../src/http-server.js";
 import { openLibrary } from "../src/library.js";
+import packageJson from "../package.json" with { type: "json" };
 
 const PL_A = "PL_HTTP_TEST_AAAA";
 const VID_A = "V_HTTP00001";
@@ -119,7 +120,7 @@ test("health and version are reachable without a session", async (t) => {
   assert.equal(version.status, 200);
   const body = await version.json();
   assert.equal(body.name, "music-playlist-organizer");
-  assert.ok(body.version);
+  assert.equal(body.version, packageJson.version);
 });
 
 test("unauthorized requests cannot read the library or write", async (t) => {

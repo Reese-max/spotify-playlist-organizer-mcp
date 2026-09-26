@@ -6,6 +6,7 @@ import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import packageJson from "../package.json" with { type: "json" };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -46,7 +47,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
     params: {
       protocolVersion: "2026-07-28",
       capabilities: {},
-      clientInfo: { name: "smoke-test", version: "0.2.0" },
+      clientInfo: { name: "smoke-test", version: "1.0.0" },
     },
   }) + "\n");
 
@@ -55,6 +56,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
     assert.equal(response.jsonrpc, "2.0");
     assert.equal(response.id, 1);
     assert.equal(response.result.serverInfo.name, "music-playlist-organizer");
+    assert.equal(response.result.serverInfo.version, packageJson.version);
   } finally {
     child.kill();
     let timer;

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { exportLibrary, restoreLibrary } from "../src/library-backup.js";
 import { LibraryError, openLibrary } from "../src/library.js";
+import packageJson from "../package.json" with { type: "json" };
 
 const PL_B = "PL_BACKUP000001";
 const VID_1 = "V_BKUP00001";
@@ -60,7 +61,7 @@ test("export produces deterministic versioned JSON with metadata and zero secret
   assert.equal(backup.format, "music-library-backup");
   assert.equal(backup.formatVersion, 1);
   assert.equal(backup.schemaVersion, 3);
-  assert.equal(backup.appVersion, "0.2.0");
+  assert.equal(backup.appVersion, packageJson.version);
   assert.ok(backup.exportedAt);
   assert.equal(backup.counts.tracks, 2);
   assert.equal(backup.counts.sources, 2);

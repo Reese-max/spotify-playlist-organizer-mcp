@@ -35,9 +35,9 @@ import {
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { saveMusic } from "./save-music.js";
 import { YouTubeClient } from "./youtube.js";
+import { APP_VERSION } from "./version.js";
 
 const SERVER_NAME = "music-playlist-organizer";
-const SERVER_VERSION = "0.2.0";
 const DEFAULT_BODY_LIMIT = 64 * 1024;
 const INDEX_HTML_PATH = new URL("../public/index.html", import.meta.url);
 const UI_HEADERS = {
@@ -215,7 +215,7 @@ export function createHttpServer({
   // [method, pattern, {auth, write}, handler(params, body, query, signal)]
   const routes = [
     ["GET", "/health", { auth: false }, () => ({ status: "ok" })],
-    ["GET", "/version", { auth: false }, () => ({ name: SERVER_NAME, version: SERVER_VERSION })],
+    ["GET", "/version", { auth: false }, () => ({ name: SERVER_NAME, version: APP_VERSION })],
     ["GET", "/api/library/tracks", { auth: true }, (_p, _b, q) =>
       listMusic(library, numericParams(q))],
     ["GET", "/api/library/recent", { auth: true }, (_p, _b, q) =>

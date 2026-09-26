@@ -95,7 +95,7 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
   - `pull`：把 `youtube_only` 影片以 `upsertTrack` 匯入音樂庫，走原有 dedup 與 playlist 精確 ID 關聯。
   - `reconcile`：只修本機狀態，不做 provider 寫入——同步 playlist 改名（不會新建重複 playlist）、標記 `unavailable` source、補 `unlinked` 關聯、用已讀回的項目解 `unknown_after_write` marker。
   - 寫入遇到 timeout/5xx/429 不盲目 retry：該筆標記 `unknown_after_write`，整體回 `reconciliation_required`。
-- `reconcile_track`：對單曲做 exact-ID read-back——逐 source 呼叫 `getVideo` 判斷 deleted/private（標 `unavailable`，**不刪** canonical track）、對 linked playlist 讀回 membership、`unknown_after_write` 解為 `synced`／`local_only`／`unavailable`。
+- `reconcile_track`：對單曲做 exact-ID read-back——只有明確 missing/deleted/private 才把 source 標 `unavailable`（**不刪** canonical track）；timeout、取消、429、5xx、網路或認證失敗會保留 source availability，將待重試的 `unknown` 狀態存入 Library（原有 `unknown_after_write` 也保留），重啟後仍可再次 reconcile。receipt 對每個失敗 lookup 回傳不含 provider 原始訊息的錯誤類型與安全下一步；確認成功後才解為 `synced`／`local_only`／`unavailable`。
 
 同步狀態存在 `sync.<trackId>` marker（JSON，無 secrets），與 `list_unsynced_music` 的 `provider_unavailable` 過濾相容。schema v3 在 `track_sources` 增加 `status` 欄位（`ok`／`unavailable`），source 失效不等於歌曲消失。
 

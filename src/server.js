@@ -1005,7 +1005,7 @@ export function createServer(library) {
   server.registerTool(
     "preview_import",
     {
-      description: "Resolve a mixed batch of YouTube/YouTube Music video URLs, video IDs, free-text lines, and/or one playlist URL/ID into an import plan (new/exact_duplicate/canonical_duplicate/unresolved/unavailable). Writes nothing; stores the plan under a batchId for import_music_batch.",
+      description: "Resolve a mixed batch of YouTube/YouTube Music video URLs, video IDs, free-text lines, and/or one playlist URL/ID into an import plan (new/exact_duplicate/canonical_duplicate/unresolved/retryable/unavailable). Transient provider failures are retryable; only confirmed missing, private, or deleted videos are unavailable. Writes nothing; stores the plan under a batchId for import_music_batch.",
       inputSchema: z.object({
         items: z.array(z.string().min(1)).max(2000).optional(),
         playlist: z.string().min(1).optional(),
@@ -1020,7 +1020,7 @@ export function createServer(library) {
   server.registerTool(
     "import_music_batch",
     {
-      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch). Only resolved items are written; per-item results are returned and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly.",
+      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch or retry transient provider failures). Only resolved items are written; per-item results distinguish retryable from unavailable, and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly.",
       inputSchema: z.object({
         items: z.array(z.string().min(1)).max(2000).optional(),
         playlist: z.string().min(1).optional(),

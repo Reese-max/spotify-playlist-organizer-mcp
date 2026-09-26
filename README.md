@@ -135,11 +135,11 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 `src/batch-import.js` 把既有 YouTube / YouTube Music 收藏一次帶進音樂庫，不必逐首 `save_music`。管線：parse → resolve → canonicalize → dedupe → preview plan → apply → 可選 YouTube 同步。
 
-- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`）。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
-- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。
+- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`retryable`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`）。精確 ID 的 provider 暫時錯誤標為 `retryable`；僅確認不存在、私人或刪除的影片標為 `unavailable`。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
+- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷或暫時失敗的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`retryable`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。
 - `import_status`：查已存批次的 `counts`＋`done`/`pending`。
 
-取消／逾時：apply 每 25 項 chunk flush 一次 plan；caller abort 後回 `action:"cancelled"` ＋ `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。
+取消／逾時／暫時 provider 錯誤：apply 每 25 項 chunk flush 一次 plan；未完成項目保持 pending，回 `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。caller abort 另回 `action:"cancelled"`。
 
 ## 備份與還原
 

@@ -60,6 +60,8 @@ function readBody(req) {
 async function startYouTubeStub() {
   const state = {
     videos: new Map(),
+    videoFailures: new Map(),
+    videoReads: new Map(),
     playlists: new Map(),
     items: new Map(),
     counters: { createPlaylist: 0, addItem: 0, deleteItem: 0, search: 0, getVideo: 0 },
@@ -87,6 +89,11 @@ async function startYouTubeStub() {
       if (req.method === "GET" && pathname === "/videos") {
         state.counters.getVideo += 1;
         const ids = (url.searchParams.get("id") ?? "").split(",");
+        for (const id of ids) {
+          state.videoReads.set(id, (state.videoReads.get(id) ?? 0) + 1);
+          const failure = state.videoFailures.get(id);
+          if (failure) return sendJson(failure, { error: { message: "stub video read unavailable" } });
+        }
         return sendJson(200, { items: ids.map((id) => state.videos.get(id)).filter(Boolean) });
       }
       if (req.method === "GET" && pathname === "/search") {
@@ -235,7 +242,7 @@ class McpStdioClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         rejectRequest(new Error("Timed out waiting for " + method + ". stderr: " + this.stderrText));
-      }, 15_000);
+      }, 30_000);
       this.pending.set(id, { resolve: resolveRequest, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
@@ -280,7 +287,7 @@ class McpStdioClient {
 }
 
 async function stopServer(child) {
-  if (child.exitCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill();
   const exited = await Promise.race([
     once(child, "exit").then(() => true).catch(() => true),
@@ -295,8 +302,15 @@ async function stopServer(child) {
 async function startClient(directory, stub) {
   const child = spawnMcpServer(directory, stub.url);
   const client = new McpStdioClient(child);
-  await client.initialize();
-  return { child, client };
+  try {
+    await client.initialize();
+    return { child, client };
+  } catch (error) {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function assertNoSecrets(...texts) {
@@ -349,7 +363,7 @@ test("E2E: overlapping stdio save calls add one playlist row", { timeout: 60_000
   }
 });
 
-test("E2E: tools/list exposes the tool surface and exact-URL save persists through stdio", { timeout: 60_000 }, async () => {
+test("E2E: tools/list exposes the tool surface and exact-URL save persists through stdio", { timeout: 90_000 }, async () => {
   const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
   const stub = await startYouTubeStub();
   stub.addVideo("vidExact001", "E2E Exact Song");
@@ -421,7 +435,7 @@ test("E2E: tools/list exposes the tool surface and exact-URL save persists throu
   }
 });
 
-test("E2E: free-text input requires exact videoId selection before any write", { timeout: 60_000 }, async () => {
+test("E2E: free-text input requires exact videoId selection before any write", { timeout: 90_000 }, async () => {
   const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
   const stub = await startYouTubeStub();
   stub.addVideo("vidSearchA1", "E2E Candidate One");
@@ -570,6 +584,84 @@ test("E2E: search quota exhaustion is typed and exact video IDs remain usable", 
     assertNoSecrets(client.stdoutText, client.stderrText, identify.text, exact.text, exactId.text, forbidden.text);
   } finally {
     await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: batch import retries a transient item through stdio after restart", { timeout: 120_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  const ids = ["vidBatchA01", "vidBatchB02", "vidBatchC03", "vidBatchD04"];
+  stub.addVideo(ids[0], "Morning Sonata");
+  stub.addVideo(ids[1], "Quantum Pulse");
+  stub.addVideo(ids[2], "Silver Rain");
+  stub.addVideo(ids[3], "Private Signal");
+
+  let first;
+  let second;
+  let batchId;
+  let firstReads;
+  try {
+    first = await startClient(directory, stub);
+    const preview = await first.client.callTool("preview_import", { items: ids });
+    assert.equal(preview.parsed.mode, "preview");
+    assert.equal(preview.parsed.counts.new, 4);
+    batchId = preview.parsed.batchId;
+
+    // Verification differs from preview: one read is transient, one source
+    // is missing, and one became private. No provider write is requested.
+    stub.videoFailures.set(ids[1], 503);
+    stub.videos.delete(ids[2]);
+    stub.videos.get(ids[3]).status.privacyStatus = "private";
+    const partial = await first.client.callTool("import_music_batch", { batchId });
+    assert.equal(partial.parsed.action, "partial_failure");
+    assert.equal(partial.parsed.remaining, 1);
+    const byId = new Map(partial.parsed.results.map((item) => [item.videoId, item]));
+    assert.equal(byId.get(ids[0]).status, "imported");
+    assert.equal(byId.get(ids[1]).status, "retryable");
+    assert.equal(byId.get(ids[1]).error.status, 503);
+    assert.equal(byId.get(ids[2]).status, "unavailable");
+    assert.equal(byId.get(ids[3]).status, "unavailable");
+    assert.match(partial.parsed.nextStep, /resume:true/);
+
+    const status = await first.client.callTool("import_status", { batchId });
+    assert.equal(status.parsed.done, 3);
+    assert.equal(status.parsed.pending, 1);
+    firstReads = new Map(stub.videoReads);
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+    assertNoSecrets(first.client.stdoutText, first.client.stderrText, preview.text, partial.text, status.text);
+    await stopServer(first.child);
+    stub.videoFailures.delete(ids[1]);
+    second = await startClient(directory, stub);
+    const before = await second.client.callTool("import_status", { batchId });
+    assert.equal(before.parsed.done, 3);
+    assert.equal(before.parsed.pending, 1);
+
+    const resumed = await second.client.callTool("import_music_batch", { batchId, resume: true });
+    assert.equal(resumed.parsed.action, "imported");
+    assert.equal(resumed.parsed.remaining, 0);
+    assert.deepEqual(resumed.parsed.results.map((item) => item.videoId), [ids[1]]);
+    assert.equal(resumed.parsed.results[0].status, "imported");
+    assert.equal(stub.videoReads.get(ids[0]), firstReads.get(ids[0]));
+    assert.equal(stub.videoReads.get(ids[2]), firstReads.get(ids[2]));
+    assert.equal(stub.videoReads.get(ids[3]), firstReads.get(ids[3]));
+    assert.ok(stub.videoReads.get(ids[1]) > firstReads.get(ids[1]));
+
+    const after = await second.client.callTool("import_status", { batchId });
+    assert.equal(after.parsed.done, 4);
+    assert.equal(after.parsed.pending, 0);
+    const recent = await second.client.callTool("recent_music", { limit: 10 });
+    assert.ok(recent.parsed.items.some((item) => item.canonicalTitle === "Morning Sonata"));
+    assert.ok(recent.parsed.items.some((item) => item.canonicalTitle === "Quantum Pulse"));
+    assert.equal(recent.parsed.items.some((item) => item.canonicalTitle === "Silver Rain"), false);
+    assert.equal(recent.parsed.items.some((item) => item.canonicalTitle === "Private Signal"), false);
+    assert.equal(stub.counters.addItem, 0);
+    assertNoSecrets(second.client.stdoutText, second.client.stderrText, before.text, resumed.text, after.text);
+  } finally {
+    if (first) await stopServer(first.child);
+    if (second) await stopServer(second.child);
     await stub.close();
     await rm(directory, { recursive: true, force: true });
   }

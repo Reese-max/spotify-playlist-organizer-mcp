@@ -29,11 +29,11 @@ function errorInfo(error) {
 }
 
 function addOutcomeUnknown(error) {
-  if (error?.code === "UNKNOWN_AFTER_WRITE") return true;
-  const status = error?.status;
   // A client rejection is a definite failed add. A lost response, timeout,
   // throttling, or server error cannot prove whether the write landed.
-  return !Number.isInteger(status) || status >= 500 || [408, 409, 429].includes(status);
+  return ["TIMEOUT", "CALLER_CANCELLED", "NETWORK_ERROR", "UNKNOWN_AFTER_WRITE"].includes(error?.code)
+    || [408, 429].includes(error?.status)
+    || error?.status >= 500;
 }
 
 function isUnavailableName(name) {

@@ -381,3 +381,22 @@ test("mixed requested sync successes and explicit failures stay partial", async 
   assert.equal(library.trackCount(), 2);
   assert.match(partial.nextStep, /verify playlist membership/i);
 });
+
+test("a status-less preflight rejection is a definite sync failure", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Local Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("client credentials unavailable"), { code: "AUTH_REQUIRED" });
+  };
+
+  const result = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(result.action, "partial_failure");
+  assert.equal(result.sync.failed, 1);
+  assert.equal(result.sync.unknown, 0);
+  assert.equal(result.sync.results[0].status, "failed");
+});

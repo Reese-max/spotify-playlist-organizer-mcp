@@ -867,3 +867,38 @@ test("split without title override uses moved source_type and keeps playlist lin
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("unsynced paging excludes healthy sync markers before counting and slicing", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const playlist = { provider: "youtube", playlistId: "PL_HEALTH", name: "Saved" };
+    const warning = library.upsertTrack({
+      title: "Needs Reconciliation",
+      source: { provider: "youtube", sourceId: "V_WARN00001" }, playlist,
+    }).track;
+    library.setSyncState(`sync.${warning.id}`, { state: "unknown_after_write" });
+    for (const [title, sourceId, state] of [
+      ["Healthy One", "V_GOOD00001", "synced"],
+      ["Healthy Two", "V_GOOD00002", "ok"],
+    ]) {
+      const track = library.upsertTrack({
+        title, source: { provider: "youtube", sourceId }, playlist,
+      }).track;
+      library.setSyncState(`sync.${track.id}`, { state });
+    }
+
+    const all = library.listUnsynced();
+    assert.equal(all.total, 1);
+    assert.deepEqual(all.items.map((item) => item.track.id), [warning.id]);
+    const first = library.listUnsynced({ reason: "provider_unavailable", limit: 1 });
+    assert.equal(first.total, 1);
+    assert.deepEqual(first.items.map((item) => item.track.id), [warning.id]);
+    const pastEnd = library.listUnsynced({ reason: "provider_unavailable", limit: 1, offset: 1 });
+    assert.equal(pastEnd.total, 1);
+    assert.equal(pastEnd.items.length, 0);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

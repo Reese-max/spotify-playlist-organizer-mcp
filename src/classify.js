@@ -502,9 +502,8 @@ export function persistClassification(library, trackInput, classification) {
   }
   const priorTrack = library.getTrackBySource(source.provider, source.sourceId);
   const prior = priorTrack ? readStoredClassification(library, priorTrack.id) : null;
-  const merged = mergeClassification(prior, classification);
-
-  const fields = classificationToTrackFields(merged);
+  const initial = mergeClassification(prior, classification);
+  const fields = classificationToTrackFields(initial);
   const saved = library.upsertTrack({
     title,
     artist: fields.artist ?? artist,
@@ -513,6 +512,17 @@ export function persistClassification(library, trackInput, classification) {
     ...(playlist ? { playlist } : {}),
   });
   const trackId = saved.track.id;
+  // A new source may attach to an existing canonical track even though the
+  // source lookup above found nothing. Merge that track's user edits now that
+  // upsertTrack has resolved its final identity.
+  const actualPrior = priorTrack?.id === trackId
+    ? prior
+    : readStoredClassification(library, trackId);
+  const merged = mergeClassification(actualPrior, classification);
+  const mergedFields = classificationToTrackFields(merged);
+  const track = Object.keys(mergedFields).length
+    ? library.updateTrackFields(trackId, mergedFields)
+    : saved.track;
 
   for (const tag of merged.dimensions.custom_tags) {
     library.addTag(trackId, tag.value);
@@ -526,11 +536,11 @@ export function persistClassification(library, trackInput, classification) {
   });
 
   const preserved = DIMENSIONS.filter(
-    (dimension) => prior?.provenance?.[dimension] === "user"
+    (dimension) => actualPrior?.provenance?.[dimension] === "user"
       && merged.provenance[dimension] === "user",
   );
   return {
-    track: saved.track,
+    track,
     trackId,
     classification: merged,
     preserved,

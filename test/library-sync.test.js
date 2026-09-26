@@ -338,3 +338,32 @@ test("reconcile_track marks a deleted video source unavailable without deleting 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("reconcile_track keeps availability and the unknown marker after a transient lookup failure", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube({
+    async getVideo() {
+      throw Object.assign(new Error("request timed out"), { code: "TIMEOUT" });
+    },
+    async getPlaylistItems() {
+      throw Object.assign(new Error("rate limited"), { status: 429 });
+    },
+  });
+  try {
+    const track = await seedTrack(library, {
+      title: "Still Available", videoId: "V_STILL0001", playlistId: "PL_RETRY",
+    });
+    const marker = { state: "unknown_after_write", playlistId: "PL_RETRY", videoId: "V_STILL0001" };
+    library.setSyncState(`sync.${track.id}`, marker);
+
+    const result = await reconcileTrack({ library, youtube }, { trackId: track.id });
+    assert.equal(result.sources[0].status, "unknown");
+    assert.equal(result.sync.state, "unknown_after_write");
+    assert.equal(result.resolvedFrom, null);
+    assert.equal(library.source("youtube", "V_STILL0001").status, "ok");
+    assert.deepEqual(JSON.parse(library.getSyncState(`sync.${track.id}`)), marker);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

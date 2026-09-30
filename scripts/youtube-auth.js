@@ -1,9 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
-import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { CredentialStore, credentialsFromTokenResponse } from "../src/credentials.js";
 import { loadEnvFile } from "../src/env.js";
+import { canDisableEcho, readHiddenLine } from "../src/hidden-input.js";
 import { awaitWithDeadline, fetchWithDeadline, timeoutFromEnv } from "../src/http.js";
 
 loadEnvFile();
@@ -26,19 +26,29 @@ function finish(server, message, exitCode) {
 
 async function ensurePassphrase() {
   if (process.env.YOUTUBE_CREDENTIAL_PASSPHRASE) return;
-  if (!input.isTTY || !output.isTTY) {
+  if (!canDisableEcho(input, output)) {
     throw new Error(
       "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the local shell before running npm run youtube:auth.",
     );
   }
-  const readline = createInterface({ input, output });
+  let passphrase;
   try {
-    const passphrase = await readline.question("Credential passphrase (stored locally, never printed): ");
-    if (!passphrase) throw new Error("A non-empty credential passphrase is required.");
-    process.env.YOUTUBE_CREDENTIAL_PASSPHRASE = passphrase;
-  } finally {
-    readline.close();
+    passphrase = await readHiddenLine({
+      input,
+      output,
+      prompt: "Credential passphrase (stored locally, never printed): ",
+    });
+  } catch (error) {
+    if (error?.code === "HIDDEN_INPUT_UNAVAILABLE") {
+      throw new Error(
+        "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the local shell before running npm run youtube:auth.",
+        { cause: error },
+      );
+    }
+    throw error;
   }
+  if (!passphrase?.trim()) throw new Error("A non-empty credential passphrase is required.");
+  process.env.YOUTUBE_CREDENTIAL_PASSPHRASE = passphrase;
 }
 
 function parseTokenResponse(text) {

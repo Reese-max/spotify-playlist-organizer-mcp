@@ -1,8 +1,14 @@
 import { parseLink } from "./core.js";
-import { CredentialStore, credentialsFromTokenResponse } from "./credentials.js";
+import {
+  CredentialStore,
+  credentialsFromTokenResponse,
+  REQUIRED_YOUTUBE_SCOPE,
+  scopeCovers,
+} from "./credentials.js";
 import {
   awaitWithDeadline,
   fetchWithDeadline,
+  ProviderRequestError,
   retryDelayMs,
   timeoutFromEnv,
   waitForRetry,
@@ -163,6 +169,7 @@ export class YouTubeClient {
     this.env = env;
     this.fetch = fetchImpl;
     this.refreshingUserToken = null;
+    this.mintedAccessToken = null;
     this.timeoutMs = timeoutFromEnv(this.env);
     this.maxReadRetries = Math.min(Math.max(Number(this.env.PROVIDER_MAX_READ_RETRIES) || 1, 0), 2);
     this.credentials = new CredentialStore(this.env);
@@ -185,12 +192,30 @@ export class YouTubeClient {
     return stored?.refreshToken ?? null;
   }
 
+  assertStoredScopeSufficient(stored) {
+    if (stored && !scopeCovers(stored.scope)) {
+      throw new ProviderRequestError(
+        "AUTH_SCOPE_INSUFFICIENT",
+        "Stored YouTube credentials do not grant the required scope ("
+          + REQUIRED_YOUTUBE_SCOPE
+          + "). Re-run npm run youtube:auth and approve YouTube access.",
+        { retryable: false },
+      );
+    }
+  }
+
   async refreshUserToken({ signal } = {}) {
-    const refreshToken = await this.getRefreshToken();
-    if (!refreshToken) return null;
     if (this.refreshingUserToken) return this.refreshingUserToken;
 
+    // Assigned synchronously so a concurrent call observes the in-flight
+    // exchange before either side reaches an await boundary.
     this.refreshingUserToken = (async () => {
+      const refreshToken = await this.getRefreshToken();
+      if (!refreshToken) return null;
+      const refreshFromStore = !this.env.YOUTUBE_REFRESH_TOKEN?.trim();
+      if (refreshFromStore) {
+        this.assertStoredScopeSufficient(await this.loadStoredCredentials());
+      }
       const clientId = requiredAny(
         this.env,
         ["GOOGLE_CLIENT_ID", "YOUTUBE_CLIENT_ID"],
@@ -230,11 +255,18 @@ export class YouTubeClient {
       }
       const previous = await this.loadStoredCredentials();
       const credentials = credentialsFromTokenResponse(data, previous ?? { refreshToken });
-      if (this.credentials.passphraseConfigured && credentials.refreshToken) {
+      // Persist only when the token we used came from this store record —
+      // an env-supplied refresh token must never overwrite a different
+      // account's stored credential or seed a store that does not exist.
+      if (
+        this.credentials.passphraseConfigured
+        && credentials.refreshToken
+        && previous?.refreshToken === refreshToken
+      ) {
         await this.credentials.save(credentials);
         this.storedCredentials = credentials;
       }
-      this.env.YOUTUBE_ACCESS_TOKEN = credentials.accessToken;
+      this.mintedAccessToken = { token: credentials.accessToken, expiresAt: credentials.expiresAt };
       return credentials.accessToken;
     })();
 
@@ -246,9 +278,16 @@ export class YouTubeClient {
   }
 
   async getUserToken({ signal } = {}) {
+    // A token minted by a refresh supersedes a stale env access token; the
+    // operator-provided env value itself is never overwritten, so
+    // credentialStatus keeps reporting the true credential source.
+    const minted = this.mintedAccessToken;
+    if (minted && (!minted.expiresAt || minted.expiresAt > Date.now())) {
+      return minted.token;
+    }
     if (this.env.YOUTUBE_ACCESS_TOKEN?.trim()) return this.env.YOUTUBE_ACCESS_TOKEN.trim();
     const stored = await this.loadStoredCredentials();
-    if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now())) {
+    if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now()) && scopeCovers(stored.scope)) {
       return stored.accessToken;
     }
     const refreshed = await this.refreshUserToken({ signal });
@@ -589,6 +628,8 @@ export class YouTubeClient {
         source: "environment",
         filePath: this.credentials.filePath,
         refreshable: Boolean(this.env.YOUTUBE_REFRESH_TOKEN?.trim()),
+        scopeSufficient: null,
+        warning: "INSECURE_ENVIRONMENT_FALLBACK",
       };
     }
     return this.credentials.status();
@@ -600,18 +641,38 @@ export class YouTubeClient {
     );
     const hasFileCredential = await this.credentials.exists();
     let stored = null;
+    let storeUnreadable = false;
     if (this.credentials.passphraseConfigured) {
-      stored = await this.loadStoredCredentials();
+      this.storedCredentials = undefined;
+      try {
+        stored = await this.loadStoredCredentials();
+      } catch {
+        // An undecryptable record (wrong/missing passphrase) is still deleted
+        // below — revoke means the local credential goes away either way.
+        storeUnreadable = true;
+      }
     }
     const refreshToken = this.env.YOUTUBE_REFRESH_TOKEN?.trim() || stored?.refreshToken || null;
-    const accessToken = this.env.YOUTUBE_ACCESS_TOKEN?.trim() || stored?.accessToken || null;
+    const accessToken = this.env.YOUTUBE_ACCESS_TOKEN?.trim()
+      || stored?.accessToken
+      || this.mintedAccessToken?.token
+      || null;
     const token = refreshToken || accessToken;
     if (!token) {
+      // Without a readable token we cannot prove a remote revoke — but the
+      // local record can still be deleted. Report the remote state honestly
+      // rather than claiming a revoke that never happened.
+      const deleted = hasFileCredential ? await this.credentials.remove() : false;
+      this.storedCredentials = null;
+      this.mintedAccessToken = null;
       return {
         status: hasFileCredential ? "UNKNOWN" : "MISSING",
         source: hasFileCredential ? "encrypted_file" : "none",
-        localCredentialsDeleted: false,
-        ...(hasFileCredential ? { reason: "CREDENTIAL_PASSPHRASE_REQUIRED" } : {}),
+        localCredentialsDeleted: deleted,
+        ...(hasFileCredential ? {
+          reason: storeUnreadable ? "CREDENTIAL_DECRYPT_FAILED" : "CREDENTIAL_PASSPHRASE_REQUIRED",
+          nextStep: "The local credential record was deleted, but the remote grant could not be revoked without a readable token; revoke it from the Google account permissions page if needed.",
+        } : {}),
       };
     }
 
@@ -635,6 +696,7 @@ export class YouTubeClient {
 
     const deleted = await this.credentials.remove();
     this.storedCredentials = null;
+    this.mintedAccessToken = null;
     delete this.env.YOUTUBE_ACCESS_TOKEN;
     delete this.env.YOUTUBE_REFRESH_TOKEN;
     return {

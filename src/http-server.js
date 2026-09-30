@@ -33,6 +33,7 @@ import {
   updateMusicTags,
 } from "./library-query.js";
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
+import { redactSecrets } from "./redact.js";
 import { saveMusic } from "./save-music.js";
 import { YouTubeClient } from "./youtube.js";
 import { APP_VERSION } from "./version.js";
@@ -344,7 +345,7 @@ export function createHttpServer({
         : error instanceof LibraryError
           ? error.code
           : "INTERNAL_ERROR";
-      sendError(response, status, code, status === 500 ? "Internal server error." : error.message, headers);
+      sendError(response, status, code, status === 500 ? "Internal server error." : redactSecrets(error.message), headers);
     }
   });
   return server;

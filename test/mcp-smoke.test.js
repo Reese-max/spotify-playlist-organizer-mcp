@@ -17,6 +17,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
     env: { ...process.env, MUSIC_LIBRARY_FILE: join(directory, "library.sqlite") },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const exitPromise = once(child, "exit").catch(() => {});
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
@@ -61,7 +62,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
     child.kill();
     let timer;
     const exited = await Promise.race([
-      once(child, "exit").then(() => true).catch(() => true),
+      exitPromise.then(() => true),
       new Promise((resolveWait) => { timer = setTimeout(() => resolveWait(false), 5_000); }),
     ]);
     clearTimeout(timer);

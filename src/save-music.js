@@ -7,6 +7,7 @@
 // whole call into a generic error.
 
 import { classifyTrack, DEFAULT_RULES, parseLink } from "./core.js";
+import { ProviderRequestError, REQUEST_CODES } from "./http.js";
 import {
   classificationToTrackFields,
   classifyMusic,
@@ -277,6 +278,32 @@ function writeLockKeys({ videoId, canonicalKey, remoteDedupe, targetReference })
   return keys.sort();
 }
 
+function callerCancelled(operation) {
+  return new ProviderRequestError(
+    REQUEST_CODES.CALLER_CANCELLED,
+    operation + " was cancelled by the caller.",
+    { retryable: true },
+  );
+}
+
+// Waits on the previous write holding a key, but wakes promptly on caller
+// cancellation with the typed CALLER_CANCELLED outcome instead of a bare
+// AbortError once the lock finally frees.
+function waitForWriteLock(previous, signal) {
+  if (signal?.aborted) return Promise.reject(callerCancelled("YouTube write"));
+  if (!signal) return previous;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(callerCancelled("YouTube write"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const settle = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    // The lock promise is resolved unconditionally by release().
+    previous.then(settle, settle);
+  });
+}
+
 async function withYouTubeWriteLocks(youtube, keys, signal, operation) {
   let byKey = youtubeWriteLocks.get(youtube);
   if (!byKey) {
@@ -293,8 +320,8 @@ async function withYouTubeWriteLocks(youtube, keys, signal, operation) {
     byKey.set(key, current);
 
     try {
-      if (previous) await previous;
-      signal?.throwIfAborted?.();
+      if (previous) await waitForWriteLock(previous, signal);
+      if (signal?.aborted) throw callerCancelled("YouTube write");
       return await run(index + 1);
     } finally {
       release();

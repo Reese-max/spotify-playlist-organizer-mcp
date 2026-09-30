@@ -841,3 +841,57 @@ test("an exact source duplicate reports duplicateKind exact_source", async () =>
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("caller cancellation while queued on the YouTube write lock rejects promptly", async () => {
+  const { directory, library } = await tempLibrary();
+  let releaseFirstWrite;
+  let firstWriteStarted;
+  const firstWriteGate = new Promise((resolve) => { releaseFirstWrite = resolve; });
+  const firstWriteArrived = new Promise((resolve) => { firstWriteStarted = resolve; });
+  const youtube = stubYouTube({
+    async addVideoToPlaylist(playlistId, videoId) {
+      youtube.calls.push(["addVideoToPlaylist", playlistId, videoId]);
+      firstWriteStarted();
+      // The first write stays in flight briefly — long enough for the second
+      // save to be sitting on the write lock when it is cancelled.
+      await firstWriteGate;
+      const entry = { id: videoId, name: "video", url: "https://www.youtube.com/watch?v=" + videoId };
+      youtube.items.set(playlistId, [...(youtube.items.get(playlistId) ?? []), entry]);
+      return entry;
+    },
+  });
+  const controller = new AbortController();
+  const args = {
+    input: "https://www.youtube.com/watch?v=" + VIDEO_ID,
+    playlist: "Chill",
+    mode: "apply",
+  };
+  try {
+    const first = saveMusic({ youtube, library }, args);
+    // Wait until the first save holds the write lock, then queue the second.
+    const queued = saveMusic({ youtube, library }, args, { signal: controller.signal });
+    await Promise.race([firstWriteArrived, first]);
+    assert.ok(
+      youtube.calls.some(([name]) => name === "addVideoToPlaylist"),
+      "first save never reached the provider write",
+    );
+    const cancelSentAt = Date.now();
+    controller.abort();
+    setTimeout(releaseFirstWrite, 800);
+    await assert.rejects(
+      queued,
+      (error) => error?.code === "CALLER_CANCELLED",
+    );
+    assert.ok(
+      Date.now() - cancelSentAt < 500,
+      "queued cancellation waited for the lock holder instead of aborting promptly",
+    );
+    const receipt = await first;
+    assert.equal(receipt.action, "saved");
+    assert.equal(youtube.calls.filter(([name]) => name === "addVideoToPlaylist").length, 1);
+  } finally {
+    releaseFirstWrite?.();
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

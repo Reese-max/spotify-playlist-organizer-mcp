@@ -73,8 +73,14 @@ function errorResult(error) {
 
 function safeTool(handler) {
   return async (args, extra) => {
+    // The SDK exposes per-request cancellation at ctx.mcpReq.signal (aborted
+    // by notifications/cancelled); handlers read the conventional
+    // extra.signal, so forward it when the transport doesn't flatten it.
+    const forwarded = extra?.signal || !extra?.mcpReq?.signal
+      ? extra
+      : { ...extra, signal: extra.mcpReq.signal };
     try {
-      return jsonResult(await handler(args, extra));
+      return jsonResult(await handler(args, forwarded));
     } catch (error) {
       return errorResult(error);
     }
@@ -281,6 +287,7 @@ export function createServer(library) {
             ...(await client.searchTracks(query, { limit: 5, market, signal: extra?.signal })),
           });
         } catch (error) {
+          if (error?.code === "CALLER_CANCELLED") throw error;
           results.push({ input, error: error instanceof Error ? error.message : String(error) });
         }
       }

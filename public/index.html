@@ -305,6 +305,7 @@ function viewResult() {
   const variants = {
     saved: { cls: "b-ok", label: "Saved", body: "Added to your library." },
     skipped_duplicate: { cls: "b-info", label: "Already in library", body: "This exact source was already saved — nothing was duplicated." },
+    skipped_canonical_duplicate: { cls: "b-info", label: "Same song already in playlist", body: "Another source of this song is already in the target playlist — nothing was duplicated." },
     partial_failure: { cls: "b-warn", label: "Partially saved", body: "Some steps completed; check what failed below." },
     reconciliation_required: { cls: "b-bad", label: "Write outcome unknown", body: "The provider may or may not have applied the write. Do not retry blindly." },
     failed: { cls: "b-bad", label: "Failed", body: "Nothing was saved." },

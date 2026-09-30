@@ -1,0 +1,238 @@
+{
+  "schema_version": 1,
+  "manifest_version": "1.0.0",
+  "reviewed_on": "2026-09-30",
+  "provider": "Spotify",
+  "model_visibility": "UNKNOWN",
+  "default_action": "BLOCK",
+  "policy_interpretation": "Spotify policy text is recorded below. Whether a particular MCP client sends returned fields into an AI model is unresolved and is not represented as approved.",
+  "sources": {
+    "spotify_policy": {
+      "url": "https://developer.spotify.com/policy",
+      "effective_date": "2025-05-15",
+      "sections": ["III.13", "III.14"]
+    },
+    "spotify_developer_terms": {
+      "url": "https://developer.spotify.com/terms",
+      "version": 10,
+      "effective_date": "2025-05-15",
+      "sections": ["II.8", "IV.2.1", "IV.3.1", "IV.3.2"]
+    },
+    "spotify_search_api": {
+      "url": "https://developer.spotify.com/documentation/web-api/reference/search",
+      "purpose": "Spotify API response field reference"
+    },
+    "spotify_get_track_api": {
+      "url": "https://developer.spotify.com/documentation/web-api/reference/get-track",
+      "purpose": "Spotify API response field reference"
+    },
+    "spotify_get_playlist_api": {
+      "url": "https://developer.spotify.com/documentation/web-api/reference/get-playlist",
+      "purpose": "Spotify API response field reference"
+    },
+    "mcp_tools_spec": {
+      "url": "https://modelcontextprotocol.io/specification/2026-07-28/server/tools",
+      "purpose": "Protocol context only; it does not resolve client-specific model visibility"
+    }
+  },
+  "fields": {
+    "request.query": {
+      "classification": "USER_SUPPLIED",
+      "source": "MCP caller input",
+      "output_paths": ["spotify_search_tracks.query"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED"
+    },
+    "request.source": {
+      "classification": "USER_SUPPLIED",
+      "source": "MCP caller input",
+      "output_paths": ["spotify_identify_track.source", "spotify_resolve_links.results[].input", "spotify_resolve_links.results[].source"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED"
+    },
+    "spotify.search.total": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Search API response total",
+      "output_paths": ["spotify_search_tracks.total", "spotify_identify_track.total", "spotify_resolve_links.results[].total"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.search.query": {
+      "classification": "DERIVED_FROM_CALLER_INPUT_OR_LINK_METADATA",
+      "source": "Query echoed by Spotify search helper; may be caller text or YouTube oEmbed title and author",
+      "output_paths": ["spotify_identify_track.query", "spotify_resolve_links.results[].query"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED"
+    },
+    "spotify.track.id": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response id",
+      "output_paths": ["*.tracks[].id", "*.match.id", "spotify_classify_playlist.categories.*[].id"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.name": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response name",
+      "output_paths": ["*.tracks[].name", "*.match.name", "spotify_classify_playlist.categories.*[].name"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.artists": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response artists[].name",
+      "output_paths": ["*.tracks[].artists", "*.match.artists", "spotify_classify_playlist.categories.*[].artists"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.album": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response album.name",
+      "output_paths": ["*.tracks[].album", "*.match.album", "spotify_classify_playlist.categories.*[].album"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.uri": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response uri",
+      "output_paths": ["*.tracks[].uri", "*.match.uri", "spotify_classify_playlist.categories.*[].uri"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.url": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response external_urls.spotify",
+      "output_paths": ["*.tracks[].url", "*.match.url", "spotify_classify_playlist.categories.*[].url"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.is_local": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response is_local",
+      "output_paths": ["*.tracks[].isLocal", "*.match.isLocal"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.platform": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local track summary constant for Spotify results",
+      "output_paths": ["*.tracks[].platform", "*.match.platform"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.channel": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Optional channel property emitted by the shared track summary; not part of the documented Spotify Track response",
+      "output_paths": ["*.tracks[].channel", "*.match.channel", "spotify_check_playlist_duplicates.duplicates[][].channel", "spotify_classify_playlist.categories.*[].channel"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.track.position": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Playlist item order from Spotify response",
+      "output_paths": ["*.tracks[].position", "*.match.position", "spotify_check_playlist_duplicates.duplicates[][].position", "spotify_classify_playlist.categories.*[].position", "spotify_classify_playlist.assignments[].position"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.playlist.id": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Playlist API response id or Spotify caller-provided playlist reference",
+      "output_paths": ["spotify_check_playlist_duplicates.playlist.id", "spotify_classify_playlist.playlist.id", "spotify_organize_playlist.playlist.id", "spotify_organize_playlist.sourcePlaylist.id"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.playlist.name": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Playlist API response name",
+      "output_paths": ["spotify_check_playlist_duplicates.playlist.name", "spotify_classify_playlist.playlist.name", "spotify_organize_playlist.playlist.name", "spotify_organize_playlist.sourcePlaylist.name"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.playlist.url": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Playlist API response external_urls.spotify or locally constructed Spotify URL",
+      "output_paths": ["spotify_check_playlist_duplicates.playlist.url", "spotify_classify_playlist.playlist.url", "spotify_organize_playlist.playlist.url", "spotify_organize_playlist.sourcePlaylist.url"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.duplicates": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local duplicate grouping from Spotify playlist items",
+      "output_paths": ["spotify_check_playlist_duplicates.totalItems", "spotify_check_playlist_duplicates.duplicateGroups", "spotify_check_playlist_duplicates.duplicateItemCount", "spotify_check_playlist_duplicates.hasDuplicates", "spotify_check_playlist_duplicates.duplicates"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.classification": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local category assignment from Spotify track title, artist, and album fields",
+      "output_paths": ["spotify_classify_playlist.totalItems", "spotify_classify_playlist.counts", "spotify_classify_playlist.categories", "spotify_classify_playlist.assignments", "spotify_organize_playlist.plan"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "youtube.link_metadata": {
+      "classification": "YOUTUBE_PUBLIC_METADATA",
+      "source": "YouTube oEmbed metadata for a caller-provided YouTube URL",
+      "output_paths": ["spotify_identify_track.youtube", "spotify_resolve_links.results[].youtube"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "OUT_OF_SCOPE_FOR_SPOTIFY_POLICY"
+    },
+    "spotify.organization_receipt": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local plan plus Spotify playlist identities returned after explicit apply",
+      "output_paths": ["spotify_organize_playlist.mode", "spotify_organize_playlist.plan[].category", "spotify_organize_playlist.plan[].count", "spotify_organize_playlist.plan[].name", "spotify_organize_playlist.plan[].trackCount", "spotify_organize_playlist.sourcePlaylist", "spotify_organize_playlist.results[].category", "spotify_organize_playlist.results[].trackCount", "spotify_organize_playlist.results[].playlist", "spotify_organize_playlist.note"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    },
+    "spotify.provider_error": {
+      "classification": "SPOTIFY_API_ERROR_DETAIL",
+      "source": "Spotify API error response; may include provider-supplied text",
+      "output_paths": ["Spotify tool error payloads"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"]
+    }
+  },
+  "tools": {
+    "spotify_search_tracks": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["request.query", "spotify.search.total", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.is_local", "spotify.track.platform", "spotify.track.position", "spotify.track.channel", "spotify.provider_error"]
+    },
+    "spotify_identify_track": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["request.source", "youtube.link_metadata", "spotify.search.query", "spotify.search.total", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.is_local", "spotify.track.platform", "spotify.track.position", "spotify.track.channel", "spotify.provider_error"]
+    },
+    "spotify_resolve_links": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["request.source", "youtube.link_metadata", "spotify.search.query", "spotify.search.total", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.is_local", "spotify.track.platform", "spotify.track.position", "spotify.track.channel", "spotify.provider_error"]
+    },
+    "spotify_check_playlist_duplicates": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["spotify.playlist.id", "spotify.playlist.name", "spotify.playlist.url", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.position", "spotify.track.channel", "spotify.duplicates", "spotify.provider_error"]
+    },
+    "spotify_classify_playlist": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["spotify.playlist.id", "spotify.playlist.name", "spotify.playlist.url", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.position", "spotify.track.channel", "spotify.classification", "spotify.provider_error"]
+    },
+    "spotify_organize_playlist": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["spotify.playlist.id", "spotify.playlist.name", "spotify.playlist.url", "spotify.classification", "spotify.organization_receipt", "spotify.provider_error"]
+    }
+  }
+}

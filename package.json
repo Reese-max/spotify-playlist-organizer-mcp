@@ -11,6 +11,7 @@
     "youtube:auth": "node scripts/youtube-auth.js",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=**/spotify.js --test-coverage-lines=80 --test-coverage-branches=75 --test-coverage-functions=88",
     "crap": "node scripts/crap.mjs",
+    "persona-gate": "node scripts/persona-gate.mjs",
     "mutate": "stryker run",
     "lint": "eslint src test scripts"
   },

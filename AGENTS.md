@@ -34,6 +34,7 @@ Local-first Personal Music Library：canonical track 存 SQLite，多個 YouTube
 npm test                # 每個 commit 必跑
 npm run test:coverage   # CI 的 test step（V8 coverage 報表）
 npm run lint            # ESLint flat config
+npm run persona-gate    # 固定 A01–J05 50-persona 閘門（issue #7）；PASS/NEEDS_RUNTIME/TRACKED/FAIL
 npm run crap            # CRAP 報表（complexity × coverage），--gate N 可設閘
 npm run mutate          # Stryker（慢，~7min/檔）；npx stryker run --mutate src/X.js
 ```

@@ -129,7 +129,7 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 ### 收藏 UI（`GET /`）
 
-`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
+`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`skipped_canonical_duplicate`（同一首歌的其他 source 已在 playlist）/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
 
 ## 批次匯入
 

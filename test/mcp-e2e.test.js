@@ -64,13 +64,15 @@ async function startYouTubeStub() {
     videoReads: new Map(),
     playlists: new Map(),
     items: new Map(),
-    counters: { createPlaylist: 0, addItem: 0, deleteItem: 0, search: 0, getVideo: 0 },
+    counters: { createPlaylist: 0, addItem: 0, deleteItem: 0, search: 0, getVideo: 0, getItems: 0 },
     nextPlaylistId: 1,
     nextItemId: 1,
     failNextAddItem: false,
     failSearchQuota: false,
     failSearchForbidden: false,
     delayAddMs: 0,
+    rejectAddItem: null,
+    hangNext: new Set(),
   };
   state.addVideo = (videoId, title) => state.videos.set(videoId, videoResource(videoId, title));
 
@@ -136,10 +138,16 @@ async function startYouTubeStub() {
           status: { privacyStatus: body?.status?.privacyStatus ?? "private" },
           contentDetails: { itemCount: 0 },
         };
+        // The create lands before the response is (possibly) dropped — a
+        // client that lost the response must treat the playlist as unknown,
+        // and a later name lookup still finds it.
         state.playlists.set(id, resource);
+        if (state.hangNext.delete("POST /playlists")) return undefined;
         return sendJson(200, resource);
       }
       if (req.method === "GET" && pathname === "/playlistItems") {
+        state.counters.getItems += 1;
+        if (state.hangNext.delete("GET /playlistItems")) return undefined;
         const playlistId = url.searchParams.get("playlistId");
         const items = [...state.items.values()]
           .filter((item) => item.playlistId === playlistId)
@@ -148,6 +156,14 @@ async function startYouTubeStub() {
       }
       if (req.method === "POST" && pathname === "/playlistItems") {
         state.counters.addItem += 1;
+        if (state.rejectAddItem) {
+          return sendJson(state.rejectAddItem.status, {
+            error: {
+              message: state.rejectAddItem.message ?? "stub rejected the add",
+              errors: [{ reason: state.rejectAddItem.reason ?? "forbidden" }],
+            },
+          });
+        }
         if (state.delayAddMs) {
           await new Promise((resolveDelay) => setTimeout(resolveDelay, state.delayAddMs));
         }
@@ -158,6 +174,7 @@ async function startYouTubeStub() {
         // read-back sees the true provider state — the ambiguity the product
         // contract is built around.
         state.items.set(itemId, { id: itemId, playlistId, videoId });
+        if (state.hangNext.delete("POST /playlistItems")) return undefined;
         if (state.failNextAddItem) {
           state.failNextAddItem = false;
           return sendJson(500, { error: { message: "backend exploded after applying the write" } });
@@ -179,11 +196,14 @@ async function startYouTubeStub() {
 
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   state.url = "http://127.0.0.1:" + server.address().port;
-  state.close = () => new Promise((resolveClose) => server.close(resolveClose));
+  state.close = () => new Promise((resolveClose) => {
+    server.closeAllConnections();
+    server.close(resolveClose);
+  });
   return state;
 }
 
-function spawnMcpServer(directory, apiBase) {
+function spawnMcpServer(directory, apiBase, extraEnv = {}) {
   const child = spawn(process.execPath, [join("src", "server.js")], {
     cwd: root,
     env: {
@@ -201,6 +221,7 @@ function spawnMcpServer(directory, apiBase) {
       GOOGLE_CLIENT_SECRET: SECRET_CLIENT_SECRET,
       YOUTUBE_CREDENTIAL_FILE: join(directory, "no-credentials.json"),
       YOUTUBE_CREDENTIAL_PASSPHRASE: SECRET_PASSPHRASE,
+      ...extraEnv,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -299,8 +320,8 @@ async function stopServer(child) {
   }
 }
 
-async function startClient(directory, stub) {
-  const child = spawnMcpServer(directory, stub.url);
+async function startClient(directory, stub, extraEnv = {}) {
+  const child = spawnMcpServer(directory, stub.url, extraEnv);
   const client = new McpStdioClient(child);
   try {
     await client.initialize();
@@ -662,6 +683,338 @@ test("E2E: batch import retries a transient item through stdio after restart", {
   } finally {
     if (first) await stopServer(first.child);
     if (second) await stopServer(second.child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+const SAVE_TRACK_VIDEO = "vidSaveTk01";
+const SAVE_TRACK_URL = "https://www.youtube.com/watch?v=" + SAVE_TRACK_VIDEO;
+const SAVE_TRACK_ENV = { PROVIDER_TIMEOUT_MS: "800", PROVIDER_MAX_READ_RETRIES: "0" };
+
+function stubConfirmedPlaylist(stub, playlistId, name) {
+  stub.playlists.set(playlistId, {
+    id: playlistId,
+    snippet: { title: name },
+    status: { privacyStatus: "private" },
+    contentDetails: { itemCount: 0 },
+  });
+}
+
+test("E2E: youtube_save_track adds a video to a confirmed playlist by exact ID", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  stubConfirmedPlaylist(stub, "PL_CONFIRMED_01", "E2E Confirmed");
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const apply = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      playlist: "PL_CONFIRMED_01",
+      mode: "apply",
+    });
+    assert.equal(apply.parsed.action, "added");
+    assert.equal(apply.parsed.playlistAction, "use_existing");
+    assert.equal(apply.parsed.playlist.id, "PL_CONFIRMED_01");
+    assert.equal(apply.parsed.video.id, SAVE_TRACK_VIDEO);
+    assert.ok(stub.counters.getItems >= 1, "target playlist items were read before the write");
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 1);
+    assertNoSecrets(client.stdoutText, client.stderrText, apply.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track returns PARTIAL_PLAYLIST_CREATED when add fails after a confirmed create", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  stub.rejectAddItem = { status: 403, reason: "forbidden", message: "The request cannot be completed." };
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const apply = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      category: "E2E Partial",
+      mode: "apply",
+    });
+    assert.equal(apply.parsed.action, "reconciliation_required");
+    assert.equal(apply.parsed.writeState, "PARTIAL_PLAYLIST_CREATED");
+    assert.equal(apply.parsed.playlistAction, "created");
+    assert.equal(apply.parsed.playlist.id, "PLstub0001");
+    assert.equal(apply.parsed.playlist.url, "https://www.youtube.com/playlist?list=PLstub0001");
+    assert.equal(apply.parsed.videoId, SAVE_TRACK_VIDEO);
+    assert.deepEqual(apply.parsed.completedSteps, ["playlist_created"]);
+    assert.match(apply.parsed.nextStep, /playlist ID/);
+    assert.match(apply.parsed.nextStep, /exact video ID/);
+    assert.equal(apply.parsed.error.status, 403);
+    assert.equal(stub.counters.createPlaylist, 1);
+    assert.equal(stub.counters.addItem, 1);
+    assert.equal(stub.playlists.has("PLstub0001"), true, "the confirmed playlist must not be deleted");
+    assertNoSecrets(client.stdoutText, client.stderrText, apply.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track returns UNKNOWN_AFTER_WRITE on a lost add response and exact-ID retry dedupes", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  const { child, client } = await startClient(directory, stub, SAVE_TRACK_ENV);
+
+  try {
+    // The provider applies the insert but the response never arrives.
+    stub.hangNext.add("POST /playlistItems");
+    const apply = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      category: "E2E Unknown",
+      mode: "apply",
+    });
+    assert.equal(apply.parsed.action, "reconciliation_required");
+    assert.equal(apply.parsed.writeState, "UNKNOWN_AFTER_WRITE");
+    assert.equal(apply.parsed.playlistAction, "created");
+    assert.equal(apply.parsed.playlist.id, "PLstub0001");
+    assert.equal(apply.parsed.videoId, SAVE_TRACK_VIDEO);
+    assert.deepEqual(apply.parsed.completedSteps, ["playlist_created"]);
+    assert.equal(apply.parsed.error.code, "TIMEOUT");
+    assertNoSecrets(apply.text);
+
+    // Retrying with the returned exact IDs sees the landed write and
+    // re-adds nothing.
+    const retry = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      videoId: SAVE_TRACK_VIDEO,
+      playlist: "PLstub0001",
+      mode: "apply",
+    });
+    assert.equal(retry.parsed.action, "skipped_duplicate");
+    assert.equal(retry.parsed.playlist.id, "PLstub0001");
+    assert.equal(retry.parsed.duplicate, true);
+    assert.equal(stub.counters.createPlaylist, 1);
+    assert.equal(stub.counters.addItem, 1);
+    assertNoSecrets(client.stdoutText, client.stderrText, apply.text, retry.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track keeps an unknown playlist on a lost create response and name retry recovers without recreating", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  const { child, client } = await startClient(directory, stub, SAVE_TRACK_ENV);
+
+  try {
+    // The provider creates the playlist but the response is lost: the client
+    // cannot know the ID, so the playlist state must stay unknown.
+    stub.hangNext.add("POST /playlists");
+    const apply = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      category: "E2E Lost Create",
+      mode: "apply",
+    });
+    assert.equal(apply.parsed.action, "reconciliation_required");
+    assert.equal(apply.parsed.writeState, "UNKNOWN_AFTER_WRITE");
+    assert.equal(apply.parsed.playlistAction, "unknown");
+    assert.equal(apply.parsed.playlist.id, null);
+    assert.deepEqual(apply.parsed.completedSteps, []);
+    assert.equal(apply.parsed.error.code, "TIMEOUT");
+    assertNoSecrets(apply.text);
+
+    // Retrying by the same name finds the playlist the provider actually
+    // created — it is reused, never silently recreated.
+    const retry = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      category: "E2E Lost Create",
+      mode: "apply",
+    });
+    assert.equal(retry.parsed.action, "added");
+    assert.equal(retry.parsed.playlistAction, "use_existing");
+    assert.equal(retry.parsed.playlist.id, "PLstub0001");
+    assert.equal(stub.counters.createPlaylist, 1);
+    assert.equal(stub.counters.addItem, 1);
+    assertNoSecrets(client.stdoutText, client.stderrText, apply.text, retry.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track retry by exact IDs adds without recreating the confirmed playlist", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  stubConfirmedPlaylist(stub, "PL_CONFIRMED_02", "E2E Confirmed");
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const retry = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      videoId: SAVE_TRACK_VIDEO,
+      playlist: "PL_CONFIRMED_02",
+      mode: "apply",
+    });
+    assert.equal(retry.parsed.action, "added");
+    assert.equal(retry.parsed.playlistAction, "use_existing");
+    assert.equal(retry.parsed.playlist.id, "PL_CONFIRMED_02");
+    assert.ok(stub.counters.getItems >= 1, "target playlist items were read before the write");
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 1);
+    assertNoSecrets(client.stdoutText, client.stderrText, retry.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track retry by exact IDs does not write blindly when read-back fails", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  stubConfirmedPlaylist(stub, "PL_CONFIRMED_03", "E2E Confirmed");
+  const { child, client } = await startClient(directory, stub, SAVE_TRACK_ENV);
+
+  try {
+    stub.hangNext.add("GET /playlistItems");
+    const retry = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      videoId: SAVE_TRACK_VIDEO,
+      playlist: "PL_CONFIRMED_03",
+      mode: "apply",
+    });
+    assert.equal(retry.result.isError, true);
+    assert.equal(retry.parsed.code, "TIMEOUT");
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+    assertNoSecrets(client.stdoutText, client.stderrText, retry.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track fails without renaming or recreating when the exact playlist ID is gone", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const retry = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      videoId: SAVE_TRACK_VIDEO,
+      playlist: "PL_GONE_00000001",
+      mode: "apply",
+    });
+    assert.equal(retry.result.isError, true);
+    assert.equal(retry.parsed.code, "NOT_FOUND");
+    assert.match(retry.parsed.error, /PL_GONE_00000001/);
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+    assertNoSecrets(client.stdoutText, client.stderrText, retry.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track preview performs no writes", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const preview = await client.callTool("youtube_save_track", {
+      input: SAVE_TRACK_URL,
+      category: "E2E Preview Only",
+      mode: "preview",
+    });
+    assert.equal(preview.parsed.action, "would_add");
+    assert.equal(preview.parsed.playlistAction, "create_if_missing");
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+    assertNoSecrets(client.stdoutText, client.stderrText, preview.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_add_to_playlist returns UNKNOWN_AFTER_WRITE on a lost add response", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  stubConfirmedPlaylist(stub, "PL_EXISTING_02", "E2E Existing");
+  const { child, client } = await startClient(directory, stub, SAVE_TRACK_ENV);
+
+  try {
+    stub.hangNext.add("POST /playlistItems");
+    const apply = await client.callTool("youtube_add_to_playlist", {
+      input: SAVE_TRACK_URL,
+      playlist: "PL_EXISTING_02",
+      mode: "apply",
+    });
+    assert.equal(apply.parsed.action, "reconciliation_required");
+    assert.equal(apply.parsed.writeState, "UNKNOWN_AFTER_WRITE");
+    assert.equal(apply.parsed.playlist.id, "PL_EXISTING_02");
+    assert.equal(apply.parsed.video.id, SAVE_TRACK_VIDEO);
+    assert.deepEqual(apply.parsed.completedSteps, []);
+    assert.equal(apply.parsed.error.code, "TIMEOUT");
+    // The insert landed provider-side even though the response was lost.
+    assert.equal(
+      [...stub.items.values()].some(
+        (item) => item.playlistId === "PL_EXISTING_02" && item.videoId === SAVE_TRACK_VIDEO,
+      ),
+      true,
+    );
+    assertNoSecrets(client.stdoutText, client.stderrText, apply.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_add_to_playlist returns FAILED_NO_CONFIRMED_EFFECT on a deterministic add rejection", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo(SAVE_TRACK_VIDEO, "E2E Save Track Song");
+  stubConfirmedPlaylist(stub, "PL_EXISTING_01", "E2E Existing");
+  stub.rejectAddItem = { status: 400, reason: "videoNotFound", message: "The video is unavailable." };
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    const apply = await client.callTool("youtube_add_to_playlist", {
+      input: SAVE_TRACK_URL,
+      playlist: "PL_EXISTING_01",
+      mode: "apply",
+    });
+    assert.equal(apply.parsed.action, "reconciliation_required");
+    assert.equal(apply.parsed.writeState, "FAILED_NO_CONFIRMED_EFFECT");
+    assert.equal(apply.parsed.playlist.id, "PL_EXISTING_01");
+    assert.equal(apply.parsed.video.id, SAVE_TRACK_VIDEO);
+    assert.deepEqual(apply.parsed.completedSteps, []);
+    assert.equal(apply.parsed.error.status, 400);
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 1);
+    assertNoSecrets(client.stdoutText, client.stderrText, apply.text);
+  } finally {
+    await stopServer(child);
     await stub.close();
     await rm(directory, { recursive: true, force: true });
   }

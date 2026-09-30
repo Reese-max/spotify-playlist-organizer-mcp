@@ -546,3 +546,190 @@ test("a status-less preflight rejection is a definite sync failure", async (t) =
   assert.equal(result.sync.unknown, 0);
   assert.equal(result.sync.results[0].status, "failed");
 });
+
+test("import_status pages stored item detail in bounded windows", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_BIG = "PL_IMPORT_BIG001";
+  const entries = [];
+  for (let i = 0; i < 60; i += 1) {
+    entries.push({ id: `BIGITEM${String(i).padStart(4, "0")}`, name: `Big Song ${i}` });
+  }
+  youtube.playlists.set(PL_BIG, { id: PL_BIG, name: "Big Source" });
+  youtube.items.set(PL_BIG, entries);
+
+  const preview = await previewImport({ library, youtube }, { playlist: PL_BIG });
+  assert.equal(preview.counts.total, 60);
+  assert.equal(preview.truncated, false); // under the per-call detail cap
+
+  const first = importStatus(library, { batchId: preview.batchId, limit: 25 });
+  assert.equal(first.itemsTotal, 60);
+  assert.equal(first.items.length, 25);
+  assert.equal(first.itemsTruncated, true);
+  assert.equal(first.nextOffset, 25);
+  assert.equal(first.items[0].input, `${PL_BIG}:${entries[0].id}`);
+
+  const last = importStatus(library, { batchId: preview.batchId, offset: 50, limit: 25 });
+  assert.equal(last.items.length, 10);
+  assert.equal(last.itemsTruncated, false);
+  assert.equal(last.nextOffset, null);
+  assert.equal(last.items[0].input, `${PL_BIG}:${entries[50].id}`);
+
+  // An offset past the end is an empty final page, not an error.
+  const pastEnd = importStatus(library, { batchId: preview.batchId, offset: 500 });
+  assert.equal(pastEnd.items.length, 0);
+  assert.equal(pastEnd.itemsTruncated, false);
+  assert.equal(pastEnd.nextOffset, null);
+
+  // The default call returns the first bounded page, preserving plan order.
+  const head = importStatus(library, { batchId: preview.batchId });
+  assert.equal(head.items.length, 60);
+  assert.equal(head.itemsTruncated, false);
+});
+
+test("unresolved and retryable items carry their provider error into the stored receipt", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Flaky Song" });
+  youtube.searchVideos = async () => {
+    throw Object.assign(new Error("quota exhausted"), { code: "HTTP_429", status: 429 });
+  };
+  youtube.getVideo = async () => {
+    throw Object.assign(new Error("provider timed out"), { code: "TIMEOUT" });
+  };
+
+  const preview = await previewImport(
+    { library, youtube },
+    { items: [VID_NEW1, "unresolvable song title"] },
+  );
+  const byInput = new Map(preview.items.map((item) => [item.input, item]));
+  assert.equal(byInput.get(VID_NEW1).status, "retryable");
+  assert.equal(byInput.get(VID_NEW1).error.code, "TIMEOUT");
+  assert.equal(byInput.get("unresolvable song title").status, "unresolved");
+  assert.equal(byInput.get("unresolvable song title").error.status, 429);
+
+  // The same detail is readable after the call ends — a timed-out apply
+  // leaves the caller with nothing but the stored plan to reconcile from.
+  const status = importStatus(library, { batchId: preview.batchId });
+  const stored = new Map(status.items.map((item) => [item.input, item]));
+  assert.equal(stored.get(VID_NEW1).error.code, "TIMEOUT");
+  assert.equal(stored.get("unresolvable song title").error.status, 429);
+});
+
+test("an oversized apply receipt is bounded; import_status pages the full record", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_HUGE = "PL_IMPORT_HUGE01";
+  const entries = [];
+  for (let i = 0; i < 510; i += 1) {
+    entries.push({ id: `HUGE_${String(i).padStart(5, "0")}`, name: "Deleted video" });
+  }
+  youtube.playlists.set(PL_HUGE, { id: PL_HUGE, name: "Huge Source" });
+  youtube.items.set(PL_HUGE, entries);
+
+  const applied = await importMusicBatch({ library, youtube }, { playlist: PL_HUGE });
+  assert.equal(applied.counts.total, 510);
+  assert.equal(applied.results.length, 500);
+  assert.equal(applied.resultsTruncated, true);
+  assert.equal(applied.resultsTotal, 510);
+  assert.match(applied.nextStep, /import_status/);
+
+  const tail = importStatus(library, { batchId: applied.batchId, offset: 500, limit: 25 });
+  assert.equal(tail.items.length, 10);
+  assert.equal(tail.items[0].result, "unavailable");
+});
+
+test("per-item sync outcomes persist on the plan and page through import_status", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Synced Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const applied = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.results[0].status, "added");
+
+  // A later caller reconciling a lost response sees the per-item outcome.
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.equal(status.items[0].result, "imported");
+  assert.equal(status.items[0].syncResult, "added");
+  assert.equal(status.items[0].syncPlaylistId, PL_SYNC);
+});
+
+test("a truncated receipt still surfaces a sync preflight failure via sync.error and import_status", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_HUGE = "PL_IMPORT_HUGE01";
+  const entries = [];
+  for (let i = 0; i < 510; i += 1) {
+    entries.push({ id: `HUGE_${String(i).padStart(5, "0")}`, name: "Deleted video" });
+  }
+  youtube.playlists.set(PL_HUGE, { id: PL_HUGE, name: "Huge Source" });
+  youtube.items.set(PL_HUGE, entries);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  youtube.getPlaylistItems = async (id) => {
+    if (id === PL_SYNC) {
+      throw Object.assign(new Error("sync target listing timed out"), { code: "TIMEOUT", status: 503 });
+    }
+    return originalGetItems(id);
+  };
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { playlist: PL_HUGE, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.action, "partial_failure");
+  assert.equal(applied.resultsTruncated, true);
+  assert.equal(applied.results.length, 500);
+  // The preflight failure detail survives receipt truncation.
+  assert.equal(applied.sync.error.status, 503);
+  assert.match(applied.nextStep, /could not be listed|no additions were attempted/i);
+
+  const status = importStatus(library, { batchId: applied.batchId });
+  assert.equal(status.syncError.status, 503);
+});
+
+test("sync receipts are bounded; per-item outcomes and duplicate mirrors page through import_status", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_BIGSYNC = "PL_BIG_SYNC_0001";
+  const entries = [];
+  for (let i = 0; i < 501; i += 1) {
+    const id = `SYNCME_${String(i).padStart(4, "0")}`;
+    entries.push({ id, name: `Sync Song ${i}` });
+    youtube.videos.set(id, { id, name: `Sync Song ${i}`, channel: "Chan" });
+  }
+  youtube.playlists.set(PL_BIGSYNC, { id: PL_BIGSYNC, name: "Big Sync Source" });
+  youtube.items.set(PL_BIGSYNC, entries);
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { playlist: PL_BIGSYNC, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.results.length, 500);
+  assert.equal(applied.sync.resultsTruncated, true);
+  assert.equal(applied.sync.resultsTotal, 501);
+  assert.equal(applied.sync.failed, 0);
+
+  const tail = importStatus(library, { batchId: applied.batchId, offset: 500, limit: 25 });
+  assert.equal(tail.items.length, 1);
+  assert.equal(tail.items[0].result, "imported");
+  assert.equal(tail.items[0].syncResult, "added");
+  assert.equal(tail.items[0].syncPlaylistId, PL_SYNC);
+});
+
+test("in-batch duplicate rows mirror the primary item's sync outcome", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Dup Sync Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { items: [VID_NEW1, VID_NEW1], syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(applied.results.map((entry) => entry.status), ["imported", "exact_duplicate"]);
+  assert.equal(youtube.addCalls.length, 1); // one playlist add per videoId
+
+  const status = importStatus(library, { batchId: applied.batchId });
+  assert.deepEqual(
+    status.items.map((item) => item.syncResult),
+    ["added", "added"],
+  );
+});

@@ -46,8 +46,10 @@ function incompleteTailStart(bytes) {
 
 // Reads one line with terminal echo fully disabled: raw mode stops the kernel
 // from echoing keystrokes and this function never writes input bytes back to
-// the output, so a typed secret leaves no trace in scrollback, recordings, or
-// PTY captures. Escape sequences (arrow keys etc.) are swallowed, backspace
+// the output, so ordinary terminal-output captures (scrollback and PTY
+// output) do not contain the secret. Recorders/hosts that capture stdin or
+// keystrokes can still record it; never enable input capture while entering a
+// passphrase. Escape sequences (arrow keys etc.) are swallowed, backspace
 // removes one code point, Ctrl+C/Ctrl+D aborts, and a stream end, error, or
 // close fails closed instead of hanging. Resolves on Enter.
 export function readHiddenLine({ input, output, prompt = "" } = {}) {

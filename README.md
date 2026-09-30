@@ -229,6 +229,15 @@ PROVIDER_TIMEOUT_MS=15000
 PROVIDER_MAX_READ_RETRIES=1
 ```
 
+### Provider 請求界線（timeout／取消）
+
+所有對 YouTube、Spotify、OAuth token 與 YouTube oEmbed 的 HTTP 請求都經過同一層 deadline/取消包裝（`src/http.js`）：
+
+- 每個請求與其回應 body 讀取都有有限 deadline：預設 15000ms，`PROVIDER_TIMEOUT_MS` 可調（1–120000ms 之間收敛）。
+- MCP `notifications/cancelled` 會把進行中的 provider 請求 abort；HTTP facade 在 client 斷線時同樣傳遞取消。caller 取消回 `CALLER_CANCELLED`，與 `TIMEOUT`、`NETWORK_ERROR`、`HTTP_429`、`HTTP_5XX`、`AUTH_REFRESH_FAILED` 分開分類。
+- GET 讀取遇到 429/5xx 依 Retry-After／指數退避做有限次重試（`PROVIDER_MAX_READ_RETRIES`，0–2）；寫入永不自動重試——timeout、取消或網路錯誤視為 ambiguous，回 `UNKNOWN_AFTER_WRITE`／`reconciliation_required`，由 read-back 對帳（見「YouTube ↔ 音樂庫同步」）。
+- timeout／cancel／error 輸出不含 access token、refresh token、client secret 或 authorization code；計時器與 abort listener 在請求結束後一律釋放。
+
 首次授權請執行：
 
 ```powershell

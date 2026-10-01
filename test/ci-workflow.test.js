@@ -21,7 +21,7 @@ test("workflow permissions stay read-only", () => {
 test("job enforces a bounded timeout", () => {
   const match = workflow.match(/timeout-minutes:\s*(\d+)/);
   assert.ok(match, "workflow must set timeout-minutes");
-  assert.ok(Number(match[1]) <= 15, "job timeout must stay bounded");
+  assert.equal(Number(match[1]), 999, "issue #5 negative probe: intentionally wrong expectation, reverted next commit");
 });
 
 test("CI installs with npm ci and runs the full regression suite", () => {

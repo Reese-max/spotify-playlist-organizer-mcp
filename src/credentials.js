@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 const FILE_VERSION = 1;
+const STATUS_VERSION = 1;
 
 export const REQUIRED_YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube";
 
@@ -88,6 +89,7 @@ export class CredentialStore {
   constructor(env = process.env, filePath = credentialFilePath(env)) {
     this.env = env;
     this.filePath = filePath;
+    this.statusFilePath = `${filePath}.status.json`;
   }
 
   get passphraseConfigured() {
@@ -106,6 +108,7 @@ export class CredentialStore {
   async save(credentials) {
     const passphrase = passphraseFromEnv(this.env);
     const normalized = normalizeCredentials(credentials);
+    await this.clearStatus();
     const salt = randomBytes(16);
     const iv = randomBytes(12);
     const key = scryptSync(passphrase, salt, 32);
@@ -179,7 +182,76 @@ export class CredentialStore {
     }
   }
 
+  async clearStatus() {
+    try {
+      await fs.unlink(this.statusFilePath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw new CredentialStoreError(
+        "CREDENTIAL_STATUS_DELETE_FAILED",
+        "Unable to clear the local credential status marker.",
+        { cause: error },
+      );
+    }
+    return true;
+  }
+
+  async recordStatus(status, reason = null) {
+    if (status !== "REVOKED" && status !== "UNKNOWN") {
+      throw new TypeError("Only non-secret REVOKED or UNKNOWN status markers can be recorded.");
+    }
+    const marker = {
+      version: STATUS_VERSION,
+      status,
+      recordedAt: new Date().toISOString(),
+      ...(typeof reason === "string" ? { reason } : {}),
+    };
+    await fs.mkdir(path.dirname(this.statusFilePath), { recursive: true, mode: 0o700 });
+    await fs.writeFile(this.statusFilePath, JSON.stringify(marker) + "\n", { mode: 0o600 });
+    try {
+      await fs.chmod(this.statusFilePath, 0o600);
+      await fs.chmod(path.dirname(this.statusFilePath), 0o700);
+    } catch {
+      // Windows ACLs do not map directly to POSIX modes; the status marker contains no secret.
+    }
+    return { status, recordedAt: marker.recordedAt, ...(marker.reason ? { reason: marker.reason } : {}) };
+  }
+
+  async readStatusMarker() {
+    let raw;
+    try {
+      raw = await fs.readFile(this.statusFilePath, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      return { status: "UNKNOWN", reason: "CREDENTIAL_STATUS_READ_FAILED" };
+    }
+    try {
+      const marker = JSON.parse(raw);
+      if (
+        marker?.version === STATUS_VERSION
+        && (marker.status === "REVOKED" || marker.status === "UNKNOWN")
+        && typeof marker.recordedAt === "string"
+      ) {
+        return {
+          status: marker.status,
+          ...(typeof marker.reason === "string" ? { reason: marker.reason } : {}),
+        };
+      }
+    } catch {
+      // A damaged status marker is an unknown credential state.
+    }
+    return { status: "UNKNOWN", reason: "CREDENTIAL_STATUS_INVALID" };
+  }
+
   async status() {
+    const marker = await this.readStatusMarker();
+    if (marker) {
+      return {
+        ...marker,
+        filePath: this.filePath,
+        refreshable: false,
+      };
+    }
     if (!(await this.exists())) {
       return { status: "MISSING", filePath: this.filePath, refreshable: false };
     }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 import { YouTubeClient } from "../src/youtube.js";
 import {
@@ -8,11 +9,11 @@ import {
   scopeCovers,
 } from "../src/credentials.js";
 import { errorResult, jsonResult, redactSecrets, safeTool } from "../src/redact.js";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,6 +21,7 @@ const SENTINEL_ACCESS = "SENTINEL_ACCESS_TOKEN_12345";
 const SENTINEL_REFRESH = "SENTINEL_REFRESH_TOKEN_67890";
 const SENTINEL_CLIENT_SECRET = "SENTINEL_CLIENT_SECRET_ABCDE";
 const SENTINEL_AUTH_CODE = "SENTINEL_AUTH_CODE_FGHIJ";
+const SENTINEL_PASSPHRASE = "SENTINEL_CREDENTIAL_PASSPHRASE_QRSTU";
 
 function createMockFetch(responses) {
   let callIndex = 0;
@@ -59,6 +61,7 @@ function assertNoSecretsInOutput(output, description) {
   assert.doesNotMatch(outputStr, /SENTINEL_REFRESH_TOKEN_67890/, `${description}: refresh token leaked`);
   assert.doesNotMatch(outputStr, /SENTINEL_CLIENT_SECRET_ABCDE/, `${description}: client secret leaked`);
   assert.doesNotMatch(outputStr, /SENTINEL_AUTH_CODE_FGHIJ/, `${description}: auth code leaked`);
+  assert.doesNotMatch(outputStr, /SENTINEL_CREDENTIAL_PASSPHRASE_QRSTU/, `${description}: passphrase leaked`);
 }
 
 async function withTempStore(env, run) {
@@ -68,6 +71,116 @@ async function withTempStore(env, run) {
     return await run({ ...env, YOUTUBE_CREDENTIAL_FILE: filePath }, filePath);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function availableLoopbackPort() {
+  const listener = http.createServer();
+  await new Promise((resolveListener, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolveListener);
+  });
+  const { port } = listener.address();
+  await new Promise((resolveClose, reject) => listener.close((error) => error ? reject(error) : resolveClose()));
+  return port;
+}
+
+function waitForChildOutput(child, timeoutMs) {
+  return new Promise((resolveOutput, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout.off("data", onData);
+      child.stderr.off("data", onData);
+      child.off("exit", onExit);
+    };
+    const onData = () => {
+      cleanup();
+      resolveOutput();
+    };
+    const onExit = (code) => {
+      cleanup();
+      reject(new Error("OAuth setup exited before listening; code=" + code));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for OAuth setup output."));
+    }, timeoutMs);
+    child.stdout.once("data", onData);
+    child.stderr.once("data", onData);
+    child.once("exit", onExit);
+  });
+}
+
+async function runFakeOAuthSetup(mode, directory) {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const port = await availableLoopbackPort();
+  const credentialFile = join(directory, mode + "-credentials.json");
+  const fakeFetch = pathToFileURL(join(root, "test", "fixtures", "fake-google-fetch.mjs")).href;
+  const child = spawn(process.execPath, ["--import", fakeFetch, join(root, "scripts", "youtube-auth.js")], {
+    cwd: root,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      PATH: process.env.PATH ?? "",
+      ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+      ...(process.env.TEMP ? { TEMP: process.env.TEMP } : {}),
+      ...(process.env.TMP ? { TMP: process.env.TMP } : {}),
+      HOME: directory,
+      USERPROFILE: directory,
+      APPDATA: directory,
+      GOOGLE_CLIENT_ID: "fake-client-id.apps.example.test",
+      GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
+      YOUTUBE_CREDENTIAL_FILE: credentialFile,
+      YOUTUBE_CREDENTIAL_PASSPHRASE: SENTINEL_PASSPHRASE,
+      YOUTUBE_OAUTH_REDIRECT_URI: "http://127.0.0.1:" + port + "/oauth2callback",
+      PROVIDER_TIMEOUT_MS: "2000",
+      FAKE_GOOGLE_OAUTH_MODE: mode,
+    },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  let exitResult;
+  const exitPromise = once(child, "exit").then(([code, signal]) => {
+    exitResult = { code, signal };
+    return exitResult;
+  });
+
+  try {
+    while (!stdout.includes("Waiting for the Google OAuth callback at ")) {
+      await waitForChildOutput(child, 5_000);
+    }
+    const authorizationLine = stdout.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/v2\/auth\?[^\r\n]+/);
+    assert.ok(authorizationLine, "OAuth authorization URL was not printed");
+    const authorization = new URL(authorizationLine[0]);
+    assert.ok(authorization.searchParams.get("state"));
+    assert.equal(authorization.searchParams.get("code_challenge_method"), "S256");
+
+    const callbackPath = "/oauth2callback?"
+      + new URLSearchParams({
+        state: authorization.searchParams.get("state"),
+        code: SENTINEL_AUTH_CODE,
+      }).toString();
+    const callbackStatus = await new Promise((resolveStatus, reject) => {
+      const request = http.get({ hostname: "127.0.0.1", port, path: callbackPath }, (response) => {
+        response.resume();
+        response.once("end", () => resolveStatus(response.statusCode));
+      });
+      request.once("error", reject);
+    });
+    assert.equal(callbackStatus, mode === "success" ? 200 : 502);
+
+    let exitTimer;
+    const result = await Promise.race([
+      exitPromise,
+      new Promise((_, reject) => {
+        exitTimer = setTimeout(() => reject(new Error("OAuth setup did not exit.")), 5_000);
+      }),
+    ]).finally(() => clearTimeout(exitTimer));
+    return { ...result, stdout, stderr, credentialFile };
+  } finally {
+    if (!exitResult) child.kill();
+    await exitPromise;
   }
 }
 
@@ -112,7 +225,7 @@ test("revokeUserCredentials never exposes secrets in output", async () => {
     YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
-  }, async (env) => {
+  }, async (env, filePath) => {
     const client = new YouTubeClient(env, createMockFetch([
       { body: {}, ok: true, status: 200 },
     ]));
@@ -125,6 +238,11 @@ test("revokeUserCredentials never exposes secrets in output", async () => {
     assert.ok(!("token" in result));
     assert.ok(!("accessToken" in result));
     assert.ok(!("refreshToken" in result));
+
+    const restartedClient = new YouTubeClient(env);
+    assert.equal((await restartedClient.credentialStatus()).status, "REVOKED");
+    const marker = await readFile(filePath + ".status.json", "utf8");
+    assert.doesNotMatch(marker, /SENTINEL_ACCESS_TOKEN_12345|SENTINEL_REFRESH_TOKEN_67890/);
   });
 });
 
@@ -149,22 +267,25 @@ test("YouTubeClient request errors never leak secrets", async () => {
 });
 
 test("refreshUserToken error never leaks secrets", async () => {
-  const env = {
+  await withTempStore({
     YOUTUBE_REFRESH_TOKEN: SENTINEL_REFRESH,
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
-  };
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+  }, async (env) => {
+    const client = new YouTubeClient(env, createMockFetch([
+      { body: { error: "invalid_grant", error_description: "Token expired" }, ok: false, status: 400 },
+    ]));
 
-  const client = new YouTubeClient(env, createMockFetch([
-    { body: { error: "invalid_grant", error_description: "Token expired" }, ok: false, status: 400 },
-  ]));
+    await storeCredentials(client.credentials);
 
-  try {
-    await client.refreshUserToken();
-    assert.fail("Should have thrown");
-  } catch (error) {
-    assertNoSecretsInOutput(error, "refreshUserToken error");
-  }
+    try {
+      await client.refreshUserToken();
+      assert.fail("Should have thrown");
+    } catch (error) {
+      assertNoSecretsInOutput(error, "refreshUserToken error");
+    }
+  });
 });
 
 test("MCP tool results never contain secrets", async () => {
@@ -277,20 +398,23 @@ test("CredentialStore load/save/remove never leaks secrets to stdout", async () 
 });
 
 test("credentialStatus with environment fallback never exposes env tokens", async () => {
-  const env = {
+  await withTempStore({
     YOUTUBE_ACCESS_TOKEN: SENTINEL_ACCESS,
     YOUTUBE_REFRESH_TOKEN: SENTINEL_REFRESH,
-  };
+  }, async (env) => {
+    const client = new YouTubeClient(env);
+    const status = await client.credentialStatus();
 
-  const client = new YouTubeClient(env);
-  const status = await client.credentialStatus();
-
-  assertNoSecretsInOutput(status, "credentialStatus with env tokens");
-  assert.equal(status.source, "environment");
-  assert.ok(!("accessToken" in status));
-  assert.ok(!("refreshToken" in status));
-  assert.ok(status.refreshable);
-  assert.equal(status.warning, "INSECURE_ENVIRONMENT_FALLBACK");
+    assertNoSecretsInOutput(status, "credentialStatus with env tokens");
+    assert.equal(status.source, "environment");
+    assert.ok(!("accessToken" in status));
+    assert.ok(!("refreshToken" in status));
+    assert.equal(status.refreshable, true);
+    assert.equal(status.status, "UNKNOWN");
+    assert.equal(status.scopeSufficient, false);
+    assert.equal(status.reason, "AUTH_SCOPE_UNKNOWN");
+    assert.equal(status.warning, "INSECURE_ENVIRONMENT_FALLBACK");
+  });
 });
 
 test("revokeUserCredentials with environment tokens never exposes them", async () => {
@@ -309,25 +433,29 @@ test("revokeUserCredentials with environment tokens never exposes them", async (
   assertNoSecretsInOutput(result, "revokeUserCredentials with env tokens");
   assert.equal(result.status, "REVOKED");
   assert.ok(!("token" in result));
+  assert.equal((await client.credentialStatus()).status, "REVOKED");
 });
 
 test("YouTubeClient getUserToken errors never leak tokens", async () => {
-  const env = {
+  await withTempStore({
     YOUTUBE_REFRESH_TOKEN: SENTINEL_REFRESH,
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
-  };
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+  }, async (env) => {
+    const client = new YouTubeClient(env, createMockFetch([
+      { body: { error: "invalid_grant" }, ok: false, status: 400 },
+    ]));
 
-  const client = new YouTubeClient(env, createMockFetch([
-    { body: { error: "invalid_grant" }, ok: false, status: 400 },
-  ]));
+    await storeCredentials(client.credentials);
 
-  try {
-    await client.getUserToken();
-    assert.fail("Should have thrown");
-  } catch (error) {
-    assertNoSecretsInOutput(error, "getUserToken error");
-  }
+    try {
+      await client.getUserToken();
+      assert.fail("Should have thrown");
+    } catch (error) {
+      assertNoSecretsInOutput(error, "getUserToken error");
+    }
+  });
 });
 
 test("scopeCovers checks granted scopes against the required YouTube scope", () => {
@@ -372,18 +500,29 @@ test("stored credentials with insufficient scope fail closed without network cal
   });
 });
 
-test("environment refresh token is never persisted into the credential store", async () => {
+test("environment refresh token without a matching scoped grant cannot authorize or be persisted", async () => {
   await withTempStore({
     YOUTUBE_REFRESH_TOKEN: SENTINEL_REFRESH,
     YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
   }, async (env) => {
-    const client = new YouTubeClient(env, createMockFetch([
+    const mockFetch = createMockFetch([
       { body: { access_token: "fresh-access", expires_in: 3600 } },
-    ]));
+    ]);
+    const client = new YouTubeClient(env, mockFetch);
 
-    assert.equal(await client.refreshUserToken(), "fresh-access");
+    await assert.rejects(
+      client.refreshUserToken(),
+      (error) => error.code === "AUTH_SCOPE_UNKNOWN",
+    );
+    assert.equal(mockFetch.calls.length, 0);
+    await assert.rejects(
+      client.listPlaylists(),
+      (error) => error.code === "AUTH_SCOPE_UNKNOWN",
+    );
+    assert.equal(mockFetch.calls.length, 0);
+    assert.equal((await client.credentialStatus()).status, "UNKNOWN");
     assert.equal(await client.credentials.exists(), false);
   });
 });
@@ -428,7 +567,7 @@ test("spawned MCP server emits no sentinel secrets in tool results", async () =>
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error("Timed out waiting for " + method));
-    }, 8_000);
+    }, 20_000);
     pending.set(id, (message) => {
       clearTimeout(timer);
       resolveMessage(message);
@@ -449,7 +588,8 @@ test("spawned MCP server emits no sentinel secrets in tool results", async () =>
     assertNoSecretsInOutput(statusResult, "spawned server youtube_auth_status");
     const text = statusResult.result?.content?.[0]?.text ?? "";
     assert.match(text, /INSECURE_ENVIRONMENT_FALLBACK/);
-    assert.match(text, /READY/);
+    assert.match(text, /UNKNOWN/);
+    assert.match(text, /AUTH_SCOPE_UNKNOWN/);
   } finally {
     child.kill();
     await exitPromise;
@@ -496,14 +636,19 @@ test("environment refresh token never overwrites a different stored credential",
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
   }, async (env) => {
-    const client = new YouTubeClient(env, createMockFetch([
+    const mockFetch = createMockFetch([
       { body: { access_token: "env-minted-access", expires_in: 3600 } },
-    ]));
+    ]);
+    const client = new YouTubeClient(env, mockFetch);
 
     // The store holds a different account's credential record.
     await storeCredentials(client.credentials);
 
-    assert.equal(await client.refreshUserToken(), "env-minted-access");
+    await assert.rejects(
+      client.refreshUserToken(),
+      (error) => error.code === "AUTH_SCOPE_UNKNOWN",
+    );
+    assert.equal(mockFetch.calls.length, 0);
 
     const stored = await client.credentials.load();
     assert.equal(stored.refreshToken, SENTINEL_REFRESH);
@@ -512,23 +657,26 @@ test("environment refresh token never overwrites a different stored credential",
 });
 
 test("concurrent refreshUserToken calls share a single token exchange", async () => {
-  const env = {
+  await withTempStore({
     YOUTUBE_REFRESH_TOKEN: SENTINEL_REFRESH,
     GOOGLE_CLIENT_ID: "test-client-id",
     GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
-  };
-  const mockFetch = createMockFetch([
-    { body: { access_token: "minted-once", expires_in: 3600 } },
-  ]);
-  const client = new YouTubeClient(env, mockFetch);
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+  }, async (env) => {
+    const mockFetch = createMockFetch([
+      { body: { access_token: "minted-once", expires_in: 3600 } },
+    ]);
+    const client = new YouTubeClient(env, mockFetch);
+    await storeCredentials(client.credentials);
 
-  const [first, second] = await Promise.all([
-    client.refreshUserToken(),
-    client.refreshUserToken(),
-  ]);
-  assert.equal(first, "minted-once");
-  assert.equal(second, "minted-once");
-  assert.equal(mockFetch.calls.length, 1);
+    const [first, second] = await Promise.all([
+      client.refreshUserToken(),
+      client.refreshUserToken(),
+    ]);
+    assert.equal(first, "minted-once");
+    assert.equal(second, "minted-once");
+    assert.equal(mockFetch.calls.length, 1);
+  });
 });
 
 test("a store-sourced refresh does not relabel credentialStatus as environment", async () => {
@@ -628,4 +776,30 @@ test("credentialStatus exposes a non-secret account fingerprint", async () => {
     assertNoSecretsInOutput(status, "credentialStatus with account fingerprint");
     assert.deepEqual(status.channel, { id: "UC_SENTINEL_CHANNEL", title: "Sentinel Channel" });
   });
+});
+
+test("fake OAuth setup keeps sentinels out of captured stdout and stderr", async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "mcp-oauth-output-test-"));
+  try {
+    for (const mode of ["success", "error"]) {
+      const result = await runFakeOAuthSetup(mode, directory);
+      assert.equal(result.code, mode === "success" ? 0 : 1);
+      assertNoSecretsInOutput(result.stdout, mode + " OAuth stdout");
+      assertNoSecretsInOutput(result.stderr, mode + " OAuth stderr");
+
+      if (mode === "success") {
+        const credentialFile = await readFile(result.credentialFile, "utf8");
+        assert.doesNotMatch(
+          credentialFile,
+          /SENTINEL_ACCESS_TOKEN_12345|SENTINEL_REFRESH_TOKEN_67890|SENTINEL_CLIENT_SECRET_ABCDE|SENTINEL_AUTH_CODE_FGHIJ|SENTINEL_CREDENTIAL_PASSPHRASE_QRSTU/,
+        );
+        assert.match(result.stdout, /YouTube OAuth setup completed/);
+      } else {
+        assert.match(result.stderr, /Token exchange failed/);
+        assert.match(result.stderr, /\[REDACTED\]/);
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

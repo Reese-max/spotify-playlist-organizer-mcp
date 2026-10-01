@@ -1,11 +1,27 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { after, test } from "node:test";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   parseYouTubePlaylistReference,
   parseYouTubeVideoReference,
   YouTubeClient,
   youtubeVideoSummary,
 } from "../src/youtube.js";
+import {
+  CredentialStore,
+  credentialsFromTokenResponse,
+  REQUIRED_YOUTUBE_SCOPE,
+} from "../src/credentials.js";
+
+const temporaryCredentialDirectories = new Set();
+after(async () => {
+  await Promise.all([...temporaryCredentialDirectories].map((directory) => (
+    rm(directory, { recursive: true, force: true })
+  )));
+});
 
 function response(data, status = 200) {
   return {
@@ -109,10 +125,33 @@ test("lists, creates, and adds to playlists with a user OAuth token", async () =
 });
 
 function env(overrides = {}) {
+  const directory = path.join(os.tmpdir(), "music-youtube-test-" + randomUUID());
+  temporaryCredentialDirectories.add(directory);
   return {
-    YOUTUBE_CREDENTIAL_FILE: "C:/nonexistent-test-dir/no-credentials.json",
+    YOUTUBE_CREDENTIAL_FILE: path.join(directory, "no-credentials.json"),
     ...overrides,
   };
+}
+
+async function withStoredEnvironmentCredentials(overrides, run) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "youtube-scope-test-"));
+  const environment = env({
+    YOUTUBE_CREDENTIAL_FILE: path.join(directory, "youtube-credentials.json"),
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+    ...overrides,
+  });
+  try {
+    const store = new CredentialStore(environment);
+    await store.save(credentialsFromTokenResponse({
+      access_token: environment.YOUTUBE_ACCESS_TOKEN ?? null,
+      refresh_token: environment.YOUTUBE_REFRESH_TOKEN ?? null,
+      scope: REQUIRED_YOUTUBE_SCOPE,
+      expires_in: 3600,
+    }));
+    return await run(environment);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 test("retries a GET once on 5xx and surfaces the successful response", async () => {
@@ -150,16 +189,15 @@ test("does not retry POST writes and throws a typed YouTubeApiError", async () =
 });
 
 test("refreshes the user token on 401 and retries with the new bearer token", async () => {
-  const authHeaders = [];
-  const tokenPosts = [];
-  const client = new YouTubeClient(
-    env({
+  await withStoredEnvironmentCredentials({
       YOUTUBE_ACCESS_TOKEN: "stale-token",
       YOUTUBE_REFRESH_TOKEN: "refresh-1",
       GOOGLE_CLIENT_ID: "cid",
       GOOGLE_CLIENT_SECRET: "csecret",
-    }),
-    async (url, options) => {
+  }, async (environment) => {
+    const authHeaders = [];
+    const tokenPosts = [];
+    const client = new YouTubeClient(environment, async (url, options) => {
       if (url.startsWith("https://oauth2.googleapis.com/token")) {
         tokenPosts.push(String(options.body));
         return response({ access_token: "fresh-token", expires_in: 3600 });
@@ -169,15 +207,15 @@ test("refreshes the user token on 401 and retries with the new bearer token", as
         return response({ error: { message: "expired" } }, 401);
       }
       return response({ items: [{ id: "V_AFTER401", snippet: { title: "Ok" } }] });
-    },
-  );
+    });
 
-  const video = await client.getVideo("V_AFTER401");
-  assert.equal(video.id, "V_AFTER401");
-  assert.equal(tokenPosts.length, 1);
-  assert.match(tokenPosts[0], /grant_type=refresh_token/);
-  assert.match(tokenPosts[0], /refresh_token=refresh-1/);
-  assert.deepEqual(authHeaders, ["Bearer stale-token", "Bearer fresh-token"]);
+    const video = await client.getVideo("V_AFTER401");
+    assert.equal(video.id, "V_AFTER401");
+    assert.equal(tokenPosts.length, 1);
+    assert.match(tokenPosts[0], /grant_type=refresh_token/);
+    assert.match(tokenPosts[0], /refresh_token=refresh-1/);
+    assert.deepEqual(authHeaders, ["Bearer stale-token", "Bearer fresh-token"]);
+  });
 });
 
 test("throws a typed error when no user credential is available", async () => {

@@ -344,7 +344,7 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 
 `npm run test:coverage` 使用與 `npm test` 相同的 `node --test` 完整回歸套件，因此會包含 `test/mcp-smoke.test.js`；coverage 閘門另外要求行 ≥ 80%、分支 ≥ 75%、函數 ≥ 88%。Job 設有 5 分鐘上限，權限只有 `contents: read`，不提供 YouTube／Spotify OAuth 或 API key；測試使用 stub，不會修改真實播放清單，也不應在輸出中出現 secrets。
 
-每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及其他作業系統或 Node 版本，仍需另外驗證。
+每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及其他作業系統或 Node 版本，仍需另外驗證。2026-10-01 的實際 run 證據（含隔離負向測試失敗→復原）見 [`.github/quality-audits/2026-10-01-ci-regression-validation.md`](.github/quality-audits/2026-10-01-ci-regression-validation.md)。
 
 ## 官方文件
 

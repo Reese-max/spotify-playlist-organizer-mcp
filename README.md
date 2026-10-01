@@ -343,3 +343,18 @@ GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`
 - [YouTube 播放清單實作](https://developers.google.com/youtube/v3/guides/implementation/playlists)
 - [playlistItems.insert](https://developers.google.com/youtube/v3/docs/playlistItems/insert)
 - [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+
+## Batch Import Usage Example
+
+```bash
+# Preview import plan
+node src/batch-import.js preview_import --items "https://music.youtube.com/watch?v=abc123" "https://music.youtube.com/watch?v=def456"
+
+# Apply the import (writes to library)
+node src/batch-import.js import_music_batch --items "https://music.youtube.com/watch?v=abc123" "https://music.youtube.com/watch?v=def456"
+
+# Check status of a stored batch
+node src/batch-import.js import_status --batchId <batchId>
+```
+
+These commands demonstrate the three MCP tools: `preview_import`, `import_music_batch`, and `import_status`. The `preview_import` command shows counts and item resolution without writing to the library. `import_music_batch` writes resolved items and reports per‑item results. `import_status` summarizes a stored batch.

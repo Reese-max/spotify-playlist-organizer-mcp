@@ -1,3 +1,5 @@
+import { TextDecoder } from "node:util";
+
 const CTRL_C = 0x03;
 const CTRL_D = 0x04;
 const BACKSPACE = 0x08;
@@ -15,6 +17,28 @@ export class HiddenInputError extends Error {
     this.code = code;
     if (options.cause) this.cause = options.cause;
   }
+}
+
+// Kept so a stream error that arrives after a read settled cannot become an
+// uncaught exception (and crash the auth flow) once our listener is gone.
+function swallowLateError() {}
+
+const strictDecoder = new TextDecoder("utf-8", { fatal: true });
+
+// Decoding bytes that are not valid UTF-8 with the default replacement
+// behaviour would silently store a different passphrase than the one typed,
+// and with echo off the user cannot see the difference. Refuse instead.
+function decodeStrict(bytes) {
+  return bytes.length === 0 ? "" : strictDecoder.decode(bytes);
+}
+
+function invalidInputError(cause) {
+  return new HiddenInputError(
+    "HIDDEN_INPUT_INVALID",
+    "The terminal delivered malformed input, so the passphrase was not read. "
+      + "Set YOUTUBE_CREDENTIAL_PASSPHRASE in the local shell instead.",
+    cause ? { cause } : {},
+  );
 }
 
 // Hidden input is only possible when stdin is a TTY whose line discipline
@@ -103,6 +127,7 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
   return new Promise((resolve, reject) => {
     // 0 = normal, 1 = saw ESC, 2 = inside CSI (until final byte), 3 = inside SS3.
     let escape = 0;
+    let invalidCause = null;
 
     const detach = () => {
       input.off("data", onData);
@@ -110,6 +135,10 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
       input.off("error", onStreamEnd);
       input.off("close", onStreamEnd);
       output.off("error", onStreamEnd);
+      // A stream that errors after this read settled must not take the
+      // process down with it.
+      if (input.listenerCount("error") === 0) input.on("error", swallowLateError);
+      if (output.listenerCount?.("error") === 0) output.on("error", swallowLateError);
     };
 
     const finish = (error) => {
@@ -121,8 +150,16 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
       } catch {
         // The terminal output is already gone; the outcome below still stands.
       }
-      captured += pending.toString("utf8");
+      let trailing = "";
+      if (pending.length > 0) {
+        try {
+          trailing = decodeStrict(pending);
+        } catch (cause) {
+          if (!error) error = invalidInputError(cause);
+        }
+      }
       pending = Buffer.alloc(0);
+      captured += trailing;
       if (error) reject(error);
       else resolve(captured);
     };
@@ -148,13 +185,30 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
         }
         if (escape === 3) {
           escape = 0;
-        } else if (escape === 2) {
+          continue;
+        }
+        if (escape === 2) {
           if (byte >= 0x40 && byte <= 0x7e) escape = 0;
-        } else if (escape === 1) {
-          escape = byte === ESC ? 1 : byte === CSI_OPEN ? 2 : byte === SS3_OPEN ? 3 : 0;
+          continue;
+        }
+        if (escape === 1) {
+          if (byte === ESC) continue;
+          escape = 0;
+          if (byte === CSI_OPEN) {
+            escape = 2;
+            continue;
+          }
+          if (byte === SS3_OPEN) {
+            escape = 3;
+            continue;
+          }
+          // Unknown sequence after ESC: drop the ESC but keep this byte, so a
+          // real character is never silently lost from the passphrase.
         } else if (byte === ESC) {
           escape = 1;
-        } else if (byte === BACKSPACE || byte === DEL) {
+          continue;
+        }
+        if (byte === BACKSPACE || byte === DEL) {
           if (pending.length > 0) pending = Buffer.alloc(0);
           else captured = [...captured].slice(0, -1).join("");
         } else if (byte >= 0x20) {
@@ -167,8 +221,18 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
           if (starter || (continuation && pending.length > 0)) {
             pending = Buffer.concat([pending, Buffer.of(byte)]);
             const complete = incompleteTailStart(pending);
-            captured += pending.subarray(0, complete).toString("utf8");
-            pending = pending.subarray(complete);
+            if (complete > 0) {
+              let text;
+              try {
+                text = decodeStrict(pending.subarray(0, complete));
+              } catch (cause) {
+                done = "invalid";
+                invalidCause = cause;
+                break;
+              }
+              captured += text;
+              pending = pending.subarray(complete);
+            }
           }
         }
         // Other C0 control bytes (tab, etc.) are ignored.
@@ -179,6 +243,8 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
           "HIDDEN_INPUT_CANCELLED",
           "Passphrase entry cancelled.",
         ));
+      } else if (done === "invalid") {
+        finish(invalidInputError(invalidCause));
       }
     };
 

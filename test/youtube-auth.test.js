@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { Duplex, Writable } from "node:stream";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { canDisableEcho, readHiddenLine } from "../src/hidden-input.js";
 
@@ -76,7 +78,7 @@ async function waitFor(predicate, timeoutMs = 15_000) {
   }
 }
 
-test("hidden input resolves the typed passphrase without echoing it", async () => {
+test("hidden input resolves the typed passphrase without echoing it", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   const pending = readHiddenLine({ input, output, prompt: "Passphrase: " });
@@ -94,7 +96,7 @@ test("hidden input resolves the typed passphrase without echoing it", async () =
   assert.deepEqual(input.rawCalls, [true, false], "raw mode was not restored after entry");
 });
 
-test("terminals that cannot disable echo fail closed instead of prompting", async () => {
+test("terminals that cannot disable echo fail closed instead of prompting", { timeout: 20_000 }, async () => {
   const output = new FakeTtyOutput();
 
   const notTty = new FakeTtyInput();
@@ -129,7 +131,7 @@ test("canDisableEcho only accepts a TTY pair with raw-mode support", () => {
   assert.equal(canDisableEcho(null, new FakeTtyOutput()), false);
 });
 
-test("backspace edits, escape sequences are swallowed, and nothing echoes", async () => {
+test("backspace edits, escape sequences are swallowed, and nothing echoes", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
 
@@ -143,7 +145,7 @@ test("backspace edits, escape sequences are swallowed, and nothing echoes", asyn
   assert.equal(output.text.includes("s"), false);
 });
 
-test("Ctrl+C aborts entry without leaking text and restores the terminal", async () => {
+test("Ctrl+C aborts entry without leaking text and restores the terminal", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   const pending = readHiddenLine({ input, output, prompt: "Passphrase: " });
@@ -153,7 +155,76 @@ test("Ctrl+C aborts entry without leaking text and restores the terminal", async
   assert.equal(input.isRaw, false, "terminal left in raw mode after abort");
 });
 
-test("Escape then Enter still submits instead of swallowing the key", async () => {
+test("Escape followed by a printable key keeps the key instead of eating it", { timeout: 20_000 }, async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const pending = readHiddenLine({ input, output });
+  // A bare ESC (or ESC + an unknown two-byte sequence) must not swallow the
+  // next character: the stored passphrase has to match what was typed.
+  input.feed("ab\x1bXcd\r");
+  assert.equal(await pending, "abXcd");
+  assert.equal(output.text.includes("abXcd"), false);
+});
+
+test("SS3 escape sequences are swallowed whole", { timeout: 20_000 }, async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const pending = readHiddenLine({ input, output });
+  // "a" + SS3 F1 ("\x1bOP") + "b<Enter>" — the two SS3 payload bytes vanish.
+  input.feed("a\x1bOPb\r");
+  assert.equal(await pending, "ab");
+});
+
+test("malformed UTF-8 fails closed instead of storing a corrupted passphrase", { timeout: 20_000 }, async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const pending = readHiddenLine({ input, output });
+  // 0xC3 opens a two-byte character that never arrives; "(" is not a
+  // continuation byte, so the typed value is not valid UTF-8.
+  input.feed(Buffer.from([0x61, 0xc3, 0x28, 0x0d]));
+  await assert.rejects(pending, (error) => error.code === "HIDDEN_INPUT_INVALID");
+  assert.equal(output.text.includes("a"), false);
+});
+
+test("an unterminated multi-byte character is refused instead of mangled", { timeout: 20_000 }, async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const pending = readHiddenLine({ input, output });
+  // "a" + the first two bytes of "あ" (0xE3 0x81) then Enter.
+  input.feed(Buffer.from([0x61, 0xe3, 0x81, 0x0d]));
+  await assert.rejects(pending, (error) => error.code === "HIDDEN_INPUT_INVALID");
+});
+
+test("a stdin error after entry does not crash the process", { timeout: 20_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hidden-input-"));
+  const script = join(dir, "post-entry-error.mjs");
+  await writeFile(script, [
+    'import { Duplex } from "node:stream";',
+    `import { readHiddenLine } from ${JSON.stringify(pathToFileURL(join(root, "src", "hidden-input.js")).href)};`,
+    "const input = new Duplex({ read() {} });",
+    "input.isTTY = true;",
+    "input.setRawMode = () => input;",
+    "const output = { isTTY: true, write: () => true, on: () => {}, off: () => {}, once: () => {} };",
+    "const pending = readHiddenLine({ input, output });",
+    'input.push(Buffer.from("ok\\r"));',
+    "await pending;",
+    'input.emit("error", new Error("EIO after entry"));',
+    'await new Promise((r) => setTimeout(r, 50));',
+    'console.log("SURVIVED");',
+  ].join("\n"));
+  const child = spawn(process.execPath, [script], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  const exited = once(child, "exit");
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  const [code] = await exited;
+  assert.equal(stderr.includes("EIO after entry"), false, "unhandled stream error reached stderr");
+  assert.equal(code, 0, "the auth flow would crash on a late stdin error");
+  assert.match(stdout, /SURVIVED/);
+});
+
+test("Escape then Enter still submits instead of swallowing the key", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   const pending = readHiddenLine({ input, output });
@@ -161,7 +232,7 @@ test("Escape then Enter still submits instead of swallowing the key", async () =
   assert.equal(await pending, "abc");
 });
 
-test("backspace discards a partially delivered multi-byte character", async () => {
+test("backspace discards a partially delivered multi-byte character", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   const pending = readHiddenLine({ input, output });
@@ -172,7 +243,7 @@ test("backspace discards a partially delivered multi-byte character", async () =
   assert.equal(await pending, "ab");
 });
 
-test("stream end or error mid-entry fails closed instead of hanging", async () => {
+test("stream end or error mid-entry fails closed instead of hanging", { timeout: 20_000 }, async () => {
   const ended = new FakeTtyInput();
   const pendingEnd = readHiddenLine({ input: ended, output: new FakeTtyOutput() });
   ended.emit("end");
@@ -186,7 +257,7 @@ test("stream end or error mid-entry fails closed instead of hanging", async () =
   assert.equal(errored.isRaw, false);
 });
 
-test("a failing prompt write restores raw mode and fails closed", async () => {
+test("a failing prompt write restores raw mode and fails closed", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   output.write = () => {
@@ -199,7 +270,7 @@ test("a failing prompt write restores raw mode and fails closed", async () => {
   assert.equal(input.isRaw, false, "terminal left in raw mode after prompt failure");
 });
 
-test("a stream already flowing stays flowing after entry", async () => {
+test("a stream already flowing stays flowing after entry", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   input.resume();
@@ -209,7 +280,7 @@ test("a stream already flowing stays flowing after entry", async () => {
   assert.equal(input.isPaused(), false, "input was paused even though the caller resumed it");
 });
 
-test("stray continuation, C1, and impossible lead bytes are dropped", async () => {
+test("stray continuation, C1, and impossible lead bytes are dropped", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   const pending = readHiddenLine({ input, output });
@@ -277,6 +348,36 @@ test("PTY: a whitespace-only passphrase is rejected as empty", { timeout: 30_000
     const [code] = await exited;
     assert.equal(code, 1);
     assert.match(transcript, /non-empty credential passphrase/);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("PTY: Ctrl+C at the prompt exits with env guidance and echoes nothing", { timeout: 30_000 }, async (t) => {
+  if (!hasLinuxScriptPty()) {
+    t.skip("PTY capture requires util-linux script(1) on Linux");
+    return;
+  }
+  const SENTINEL = "SENTINEL-PASSPHRASE-CANCELLED";
+  const command = JSON.stringify(process.execPath) + " " + JSON.stringify(AUTH_SCRIPT);
+  const child = spawn("script", ["-qefc", command, "/dev/null"], {
+    cwd: root,
+    env: childEnv({ YOUTUBE_CREDENTIAL_PASSPHRASE: "" }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const exited = once(child, "exit");
+  let transcript = "";
+  child.stdout.on("data", (chunk) => { transcript += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk) => { transcript += chunk.toString("utf8"); });
+
+  try {
+    await waitFor(() => transcript.includes("passphrase"));
+    child.stdin.write(SENTINEL + "\x03");
+    const [code] = await exited;
+    assert.equal(code, 1);
+    assert.equal(transcript.includes(SENTINEL), false, "cancelled passphrase was echoed");
+    assert.match(transcript, /YOUTUBE_CREDENTIAL_PASSPHRASE is required/);
+    assert.match(transcript, /local shell/);
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL");
   }

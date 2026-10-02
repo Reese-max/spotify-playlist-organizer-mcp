@@ -39,7 +39,9 @@ async function ensurePassphrase() {
       prompt: "Credential passphrase (stored locally, never printed): ",
     });
   } catch (error) {
-    if (error?.code === "HIDDEN_INPUT_UNAVAILABLE") {
+    if (error?.code === "HIDDEN_INPUT_UNAVAILABLE"
+      || error?.code === "HIDDEN_INPUT_CANCELLED"
+      || error?.code === "HIDDEN_INPUT_INVALID") {
       throw new Error(
         "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the local shell before running npm run youtube:auth.",
         { cause: error },

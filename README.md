@@ -239,7 +239,7 @@ npm run youtube:auth
 
 這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`；不要把 passphrase、`.env` 或憑證檔提交到 Git。
 
-未設定 `YOUTUBE_CREDENTIAL_PASSPHRASE` 且 stdin/stdout 為 TTY 時，`youtube:auth` 會以 raw mode 關閉終端機回顯後才讀取 passphrase——輸入不會出現在螢幕、一般終端輸出錄影或 PTY output capture 中。若 recorder 或 host 另行擷取 stdin／按鍵，仍可能記錄輸入；輸入 passphrase 時不要啟用這類 capture。若執行環境無法保證關閉回顯（非 TTY、不支援 raw mode 的 host），腳本會在啟動 OAuth callback 或任何網路請求之前 fail closed，要求改用環境變數提供 passphrase。
+未設定 `YOUTUBE_CREDENTIAL_PASSPHRASE` 且 stdin/stdout 為 TTY 時，`youtube:auth` 會以 raw mode 關閉終端機回顯後才讀取 passphrase——輸入不會出現在螢幕、一般終端輸出錄影或 PTY output capture 中。若 recorder 或 host 另行擷取 stdin／按鍵，仍可能記錄輸入；輸入 passphrase 時不要啟用這類 capture。若執行環境無法保證關閉回顯（非 TTY、不支援 raw mode 的 host），腳本會在啟動 OAuth callback 或任何網路請求之前 fail closed，要求改用環境變數提供 passphrase。中途取消（Ctrl+C）或終端送來損壞、不完整的位元組也會走同一條 fail-closed 路徑，不會把被截斷的輸入當成 passphrase 存進憑證檔。
 
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
 

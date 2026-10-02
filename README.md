@@ -313,6 +313,7 @@ npm test                # 每個 commit 必跑（node:test）
 npm run smoke           # MCP stdio server 啟動煙霧測試
 npm run lint            # ESLint flat config（CI 也跑）
 npm run test:coverage   # 測試 + V8 coverage + 棘輪門檻（行≥80/分支≥75/函數≥88，校準於 CI Node 24）
+npm run persona-gate    # 固定 A01–J05 50-persona 品質閘門（見下）
 npm run crap            # CRAP 分數：cyclomatic complexity × coverage
 npm run crap -- --gate 30   # 有任何函數 CRAP > 30 就 exit 1（可做門檻）
 npm run mutate          # Stryker mutation testing（全檔很慢，見下）
@@ -333,6 +334,19 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 - **`src/spotify.js` 不計入 coverage**：legacy provider，YouTube-first 路線下去留未定；`server.js` 註冊層 6% 覆蓋是可接受的薄 wiring（mcp-smoke 涵蓋啟動）。
 - **CRAP 目前只做報表不做閘**：`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看基線再定閘值。
 - Baseline（2026-09，spotify.js 不計）：行 ~85% / 分支 ~78% / 函數 ~93%；`src/core.js` mutation score 46.6%（268 mutants）。
+
+### 固定 50-persona 品質閘門（`npm run persona-gate`）
+
+`scripts/persona-gate.mjs` 把 portfolio audit 協議固定的 A01–J05 共 50 個合成 persona 編碼成可重跑的閘門（issue #7）。每個 persona 映射到可在 repo 內驗證的 checks（直接呼叫 `saveMusic`、`MusicLibrary`、`CredentialStore`、`fetchWithDeadline` 與 stdio server 訊號，全程不碰真實 provider／OAuth），加上一份仍需真實執行證據的 runtime 清單。每列輸出四態之一：
+
+| 狀態 | 意義 |
+|---|---|
+| `PASS` | 指定 checks 全部通過，且無待補的 runtime 證據 |
+| `NEEDS_RUNTIME` | checks 通過；仍需真實 provider／client／OS／CI 執行證據（列出缺什麼） |
+| `TRACKED` | 有 check 失敗，但失敗已綁定既有 open issue（已知 current-default 缺陷，不是新 regression） |
+| `FAIL` | 有 check 失敗且沒有 tracker —— 新的可重現缺陷，閘門 exit 1 |
+
+只有 50 列全部 `PASS` 才是 `CLEAN`；`--strict` 在 verdict 不是 `CLEAN` 時 exit 1。`--json` 輸出完整 machine-readable 報表供 audit round 引用。閘門的目的是「沒有新的未追蹤缺陷」，不是靠降級或跳過假裝通過；新缺陷一旦出現在某個 persona 的 check 上，該列立即 `FAIL`。
 
 GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
 

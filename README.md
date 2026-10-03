@@ -239,7 +239,11 @@ npm run youtube:auth
 
 這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`；不要把 passphrase、`.env` 或憑證檔提交到 Git。
 
-`YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
+`YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 只可作為明確的本機 fallback，不建議在一般部署中使用，也不得提交到 repository；使用 fallback 時 `youtube_auth_status` 會回報 `warning: "INSECURE_ENVIRONMENT_FALLBACK"`。環境變數中的 token 必須與本機加密憑證檔內的同一個 OAuth grant 相符，且該檔記錄的 scope 必須包含 YouTube scope，否則狀態會是 `UNKNOWN`，工具會 fail closed。若原本只用 `.env` 裡的 token，請移除 `YOUTUBE_ACCESS_TOKEN`／`YOUTUBE_REFRESH_TOKEN`，設定本機 passphrase，重新執行 `npm run youtube:auth` 建立可驗證 scope 的加密憑證；不要把舊 token 複製進憑證檔或終端輸出。
+
+若設定環境變數 `YOUTUBE_REFRESH_TOKEN`，只有在它與加密憑證檔中的 refresh token 完全相符、且該檔記錄了必要的 YouTube scope 時，才會允許它刷新或授權 YouTube API；沒有可驗證的本機授權紀錄時會回報 `AUTH_SCOPE_UNKNOWN` 並在發出 token refresh/API 請求前拒絕。Environment fallback 仍會在 status 顯示警告。
+
+`youtube_auth_status` 只回報狀態與非機密資訊（`READY | EXPIRED | REVOKED | MISSING | UNKNOWN`、授權 scopes、到期時間、頻道 fingerprint），不會輸出 token。成功撤銷後會在憑證檔旁保存只含狀態與時間的 `.status.json` 標記，讓重啟後仍顯示 `REVOKED`；完成新授權並保存憑證時會清除此標記。無法讀取原憑證、因此不能確認遠端撤銷時，status 會保留 `UNKNOWN` 和原因。若授權時未取得必要的 YouTube scope，憑證會被標記 `AUTH_SCOPE_INSUFFICIENT` 並拒絕使用（fail closed）：請重新執行 `npm run youtube:auth` 並核准 YouTube 權限。MCP 工具的成功與錯誤輸出都會經過 secret redaction，避免憑證外洩。
 
 ## 使用範例
 

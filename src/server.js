@@ -51,35 +51,7 @@ import {
   removeFromPlaylist,
   renamePlaylistAdmin,
 } from "./playlist-admin.js";
-
-function jsonResult(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
-}
-
-function errorResult(error) {
-  const payload = {
-    error: error instanceof Error ? error.message : String(error),
-  };
-  if (typeof error?.code === "string") payload.code = error.code;
-  if (Number.isInteger(error?.status)) payload.status = error.status;
-  if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
-  if (typeof error?.operation === "string") payload.operation = error.operation;
-  if (typeof error?.nextStep === "string") payload.nextStep = error.nextStep;
-  return {
-    isError: true,
-    content: [{ type: "text", text: JSON.stringify(payload) }],
-  };
-}
-
-function safeTool(handler) {
-  return async (args, extra) => {
-    try {
-      return jsonResult(await handler(args, extra));
-    } catch (error) {
-      return errorResult(error);
-    }
-  };
-}
+import { safeTool } from "./redact.js";
 
 async function loadPlaylist(client, playlist, { signal } = {}) {
   const id = parsePlaylistId(playlist);

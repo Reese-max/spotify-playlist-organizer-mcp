@@ -6,6 +6,7 @@ node_modules/
 *.sqlite-wal
 *.sqlite-shm
 youtube-credentials.json
+youtube-credentials.json.status.json
 .youtube-credentials*
 .DS_Store
 npm-debug.log*

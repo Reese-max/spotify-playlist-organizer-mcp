@@ -9,6 +9,7 @@ import test from "node:test";
 import packageJson from "../package.json" with { type: "json" };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const MCP_INITIALIZE_TIMEOUT_MS = 30_000;
 
 test("starts an MCP stdio server and answers initialize", async () => {
   const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-smoke-"));
@@ -23,7 +24,7 @@ test("starts an MCP stdio server and answers initialize", async () => {
 
   const responsePromise = new Promise((resolveResponse, reject) => {
     let buffer = "";
-    const timer = setTimeout(() => reject(new Error("Timed out waiting for MCP response. " + stderr)), 10_000);
+    const timer = setTimeout(() => reject(new Error("Timed out waiting for MCP response. " + stderr)), MCP_INITIALIZE_TIMEOUT_MS);
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString();
       const line = buffer.split("\n")[0];

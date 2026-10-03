@@ -7,6 +7,11 @@ import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import {
+  CredentialStore,
+  credentialsFromTokenResponse,
+  REQUIRED_YOUTUBE_SCOPE,
+} from "../src/credentials.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -183,25 +188,33 @@ async function startYouTubeStub() {
   return state;
 }
 
-function spawnMcpServer(directory, apiBase) {
+async function spawnMcpServer(directory, apiBase) {
+  const environment = {
+    PATH: process.env.PATH ?? "",
+    SYSTEMROOT: process.env.SYSTEMROOT ?? process.env.SystemRoot ?? "",
+    SystemRoot: process.env.SystemRoot ?? "",
+    USERPROFILE: process.env.USERPROFILE ?? "",
+    HOME: process.env.HOME ?? "",
+    APPDATA: process.env.APPDATA ?? "",
+    MUSIC_LIBRARY_FILE: join(directory, "library.sqlite"),
+    YOUTUBE_API_BASE: apiBase,
+    YOUTUBE_API_KEY: "e2e-test-api-key",
+    YOUTUBE_ACCESS_TOKEN: SECRET_ACCESS_TOKEN,
+    GOOGLE_CLIENT_ID: "e2e-client-id",
+    GOOGLE_CLIENT_SECRET: SECRET_CLIENT_SECRET,
+    YOUTUBE_CREDENTIAL_FILE: join(directory, "youtube-credentials.json"),
+    YOUTUBE_CREDENTIAL_PASSPHRASE: SECRET_PASSPHRASE,
+  };
+  const credentials = new CredentialStore(environment);
+  await credentials.save(credentialsFromTokenResponse({
+    access_token: environment.YOUTUBE_ACCESS_TOKEN,
+    scope: REQUIRED_YOUTUBE_SCOPE,
+    expires_in: 3600,
+  }));
+
   const child = spawn(process.execPath, [join("src", "server.js")], {
     cwd: root,
-    env: {
-      PATH: process.env.PATH ?? "",
-      SYSTEMROOT: process.env.SYSTEMROOT ?? process.env.SystemRoot ?? "",
-      SystemRoot: process.env.SystemRoot ?? "",
-      USERPROFILE: process.env.USERPROFILE ?? "",
-      HOME: process.env.HOME ?? "",
-      APPDATA: process.env.APPDATA ?? "",
-      MUSIC_LIBRARY_FILE: join(directory, "library.sqlite"),
-      YOUTUBE_API_BASE: apiBase,
-      YOUTUBE_API_KEY: "e2e-test-api-key",
-      YOUTUBE_ACCESS_TOKEN: SECRET_ACCESS_TOKEN,
-      GOOGLE_CLIENT_ID: "e2e-client-id",
-      GOOGLE_CLIENT_SECRET: SECRET_CLIENT_SECRET,
-      YOUTUBE_CREDENTIAL_FILE: join(directory, "no-credentials.json"),
-      YOUTUBE_CREDENTIAL_PASSPHRASE: SECRET_PASSPHRASE,
-    },
+    env: environment,
     stdio: ["pipe", "pipe", "pipe"],
   });
   return child;
@@ -300,7 +313,7 @@ async function stopServer(child) {
 }
 
 async function startClient(directory, stub) {
-  const child = spawnMcpServer(directory, stub.url);
+  const child = await spawnMcpServer(directory, stub.url);
   const client = new McpStdioClient(child);
   try {
     await client.initialize();

@@ -527,6 +527,73 @@ test("environment refresh token without a matching scoped grant cannot authorize
   });
 });
 
+test("environment access token without a matching grant fails closed", async () => {
+  await withTempStore({
+    YOUTUBE_ACCESS_TOKEN: SENTINEL_ACCESS,
+    GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
+  }, async (env) => {
+    const mockFetch = createMockFetch([]);
+    const client = new YouTubeClient(env, mockFetch);
+
+    await assert.rejects(
+      client.getUserToken(),
+      (error) => error.code === "AUTH_SCOPE_UNKNOWN" && error.retryable === false,
+    );
+    const status = await client.credentialStatus();
+    assert.equal(status.status, "UNKNOWN");
+    assert.equal(status.reason, "AUTH_SCOPE_UNKNOWN");
+    assert.equal(status.scopeSufficient, false);
+    assert.equal(mockFetch.calls.length, 0);
+    assertNoSecretsInOutput(status, "environment access token without a stored grant");
+  });
+});
+
+test("environment access token with insufficient stored scope fails closed", async () => {
+  await withTempStore({
+    YOUTUBE_ACCESS_TOKEN: SENTINEL_ACCESS,
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+    GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
+  }, async (env) => {
+    const mockFetch = createMockFetch([]);
+    const client = new YouTubeClient(env, mockFetch);
+    await storeCredentials(client.credentials, {
+      scope: "https://www.googleapis.com/auth/youtube.readonly",
+    });
+
+    await assert.rejects(
+      client.getUserToken(),
+      (error) => error.code === "AUTH_SCOPE_INSUFFICIENT" && error.retryable === false,
+    );
+    const status = await client.credentialStatus();
+    assert.equal(status.status, "UNKNOWN");
+    assert.equal(status.reason, "AUTH_SCOPE_INSUFFICIENT");
+    assert.equal(status.scopeSufficient, false);
+    assert.equal(mockFetch.calls.length, 0);
+    assertNoSecretsInOutput(status, "environment access token with insufficient stored scope");
+  });
+});
+
+test("environment access token requires a matching stored grant with YouTube scope", async () => {
+  await withTempStore({
+    YOUTUBE_ACCESS_TOKEN: SENTINEL_ACCESS,
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+    GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
+  }, async (env) => {
+    const mockFetch = createMockFetch([]);
+    const client = new YouTubeClient(env, mockFetch);
+    await storeCredentials(client.credentials);
+
+    assert.equal(await client.getUserToken(), SENTINEL_ACCESS);
+    const status = await client.credentialStatus();
+    assert.equal(status.status, "READY");
+    assert.equal(status.source, "environment");
+    assert.equal(status.scopeSufficient, true);
+    assert.equal(status.warning, "INSECURE_ENVIRONMENT_FALLBACK");
+    assert.equal(mockFetch.calls.length, 0);
+    assertNoSecretsInOutput(status, "verified environment access token status");
+  });
+});
+
 test("spawned MCP server emits no sentinel secrets in tool results", async () => {
   const directory = await mkdtemp(join(os.tmpdir(), "mcp-secret-spawn-"));
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");

@@ -224,6 +224,19 @@ export class YouTubeClient {
     return stored;
   }
 
+  assertEnvironmentAccessScope(stored) {
+    const accessToken = this.env.YOUTUBE_ACCESS_TOKEN?.trim();
+    if (!stored || !accessToken || stored.accessToken !== accessToken) {
+      throw new ProviderRequestError(
+        "AUTH_SCOPE_UNKNOWN",
+        "The environment-supplied YouTube access token is not backed by a matching stored OAuth grant with verified scopes. Run npm run youtube:auth.",
+        { retryable: false },
+      );
+    }
+    this.assertStoredScopeSufficient(stored);
+    return stored;
+  }
+
   async refreshUserToken({ signal } = {}) {
     if (this.refreshingUserToken) return this.refreshingUserToken;
 
@@ -306,10 +319,19 @@ export class YouTubeClient {
     if (minted && (!minted.expiresAt || minted.expiresAt > Date.now())) {
       return minted.token;
     }
+    const environmentAccessToken = this.env.YOUTUBE_ACCESS_TOKEN?.trim();
+    let environmentGrant = null;
     if (this.env.YOUTUBE_REFRESH_TOKEN?.trim()) {
-      this.assertEnvironmentRefreshScope(await this.loadStoredCredentials());
+      environmentGrant = this.assertEnvironmentRefreshScope(await this.loadStoredCredentials());
+    } else if (environmentAccessToken) {
+      environmentGrant = this.assertEnvironmentAccessScope(await this.loadStoredCredentials());
     }
-    if (this.env.YOUTUBE_ACCESS_TOKEN?.trim()) return this.env.YOUTUBE_ACCESS_TOKEN.trim();
+    if (
+      environmentAccessToken
+      && (!environmentGrant?.expiresAt || environmentGrant.expiresAt > Date.now())
+    ) {
+      return environmentAccessToken;
+    }
     const stored = await this.loadStoredCredentials();
     if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now()) && scopeCovers(stored.scope)) {
       return stored.accessToken;
@@ -650,14 +672,33 @@ export class YouTubeClient {
     if (storedStatus.status === "REVOKED" || storedStatus.status === "UNKNOWN") return storedStatus;
     if (hasEnvironmentCredential) {
       if (!this.env.YOUTUBE_REFRESH_TOKEN?.trim()) {
-        return {
-          status: "READY",
-          source: "environment",
-          filePath: this.credentials.filePath,
-          refreshable: false,
-          scopeSufficient: null,
-          warning: "INSECURE_ENVIRONMENT_FALLBACK",
-        };
+        try {
+          const stored = this.assertEnvironmentAccessScope(await this.loadStoredCredentials());
+          const expired = stored.expiresAt !== null && stored.expiresAt <= Date.now();
+          return {
+            status: expired ? "EXPIRED" : "READY",
+            source: "environment",
+            filePath: this.credentials.filePath,
+            refreshable: false,
+            scope: stored.scope || null,
+            grantedScopes: grantedScopes(stored.scope),
+            requiredScope: REQUIRED_YOUTUBE_SCOPE,
+            scopeSufficient: true,
+            expiresAt: stored.expiresAt,
+            warning: "INSECURE_ENVIRONMENT_FALLBACK",
+          };
+        } catch (error) {
+          return {
+            status: "UNKNOWN",
+            source: "environment",
+            filePath: this.credentials.filePath,
+            refreshable: false,
+            requiredScope: REQUIRED_YOUTUBE_SCOPE,
+            scopeSufficient: false,
+            reason: error.code ?? "AUTH_SCOPE_UNKNOWN",
+            warning: "INSECURE_ENVIRONMENT_FALLBACK",
+          };
+        }
       }
       try {
         const stored = this.assertEnvironmentRefreshScope(await this.loadStoredCredentials());

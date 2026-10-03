@@ -78,7 +78,7 @@ test("searches YouTube with an API key and normalizes video results", async () =
 
 test("lists, creates, and adds to playlists with a user OAuth token", async () => {
   const calls = [];
-  const client = new YouTubeClient(
+  const client = clientWithScopedEnvironmentAccess(
     { YOUTUBE_ACCESS_TOKEN: "user-token" },
     async (url, options) => {
       calls.push({ url, options });
@@ -133,6 +133,19 @@ function env(overrides = {}) {
   };
 }
 
+function clientWithScopedEnvironmentAccess(environment, fetch) {
+  const client = new YouTubeClient(environment, fetch);
+  const accessToken = environment.YOUTUBE_ACCESS_TOKEN?.trim();
+  if (accessToken && !environment.YOUTUBE_REFRESH_TOKEN?.trim()) {
+    client.storedCredentials = credentialsFromTokenResponse({
+      access_token: accessToken,
+      scope: REQUIRED_YOUTUBE_SCOPE,
+      expires_in: 3600,
+    });
+  }
+  return client;
+}
+
 async function withStoredEnvironmentCredentials(overrides, run) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "youtube-scope-test-"));
   const environment = env({
@@ -176,7 +189,7 @@ test("retries a GET once on 5xx and surfaces the successful response", async () 
 
 test("does not retry POST writes and throws a typed YouTubeApiError", async () => {
   const calls = [];
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
     calls.push(options.method);
     return response({ error: { message: "quota gone" } }, 500);
   });
@@ -237,7 +250,7 @@ test("getVideo throws when the provider returns no items", async () => {
 });
 
 test("getVideo and getPlaylist tag empty-items errors NOT_FOUND for read-backs", async () => {
-  const client = new YouTubeClient(
+  const client = clientWithScopedEnvironmentAccess(
     env({ YOUTUBE_API_KEY: "k", YOUTUBE_ACCESS_TOKEN: "t" }),
     async () => response({ items: [] }),
   );
@@ -249,7 +262,7 @@ test("getVideo and getPlaylist tag empty-items errors NOT_FOUND for read-backs",
 
 test("getPlaylistItems follows pageToken and stops at the final page", async () => {
   const seenTokens = [];
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url) => {
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url) => {
     seenTokens.push(new URL(url).searchParams.get("pageToken"));
     if (seenTokens.length === 1) {
       return response({
@@ -270,7 +283,7 @@ test("getPlaylistItems follows pageToken and stops at the final page", async () 
 test("removeVideoFromPlaylist deletes by playlist-item id and reports not_in_playlist", async () => {
   const deletes = [];
   let pages = 0;
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
     if (options.method === "DELETE") {
       deletes.push(new URL(url).searchParams.get("id"));
       return response(null);
@@ -299,7 +312,7 @@ test("removeVideoFromPlaylist deletes by playlist-item id and reports not_in_pla
 
 test("renamePlaylist and deletePlaylist issue exact-ID PUT/DELETE calls", async () => {
   const calls = [];
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
     calls.push({ url, method: options.method, body: options.body && JSON.parse(options.body) });
     if (options.method === "PUT") {
       return response({ id: "PL_RENAMED001", snippet: { title: "New Name" }, status: {} });
@@ -340,7 +353,7 @@ test("youtubeVideoSummary keeps the playlist-item row ID for exact-row verificat
 
 test("renamePlaylist preserves existing description and mutable snippet fields", async () => {
   const puts = [];
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async (url, options) => {
     if (options.method === "PUT") {
       puts.push(JSON.parse(options.body));
       return response({
@@ -405,7 +418,7 @@ test("revokeUserCredentials reports MISSING when nothing is stored", async () =>
 });
 
 test("credentialStatus reports the environment source", async () => {
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async () => {
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async () => {
     throw new Error("fetch must not be called");
   });
   const status = await client.credentialStatus();
@@ -414,7 +427,7 @@ test("credentialStatus reports the environment source", async () => {
 });
 
 test("findPlaylistByName matches case-insensitively across whitespace", async () => {
-  const client = new YouTubeClient(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async () =>
+  const client = clientWithScopedEnvironmentAccess(env({ YOUTUBE_ACCESS_TOKEN: "t" }), async () =>
     response({
       items: [{ id: "PL_NAME000001", snippet: { title: "My  Chill   Mix" }, status: {} }],
     }));

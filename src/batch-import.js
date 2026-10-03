@@ -11,7 +11,7 @@
 import crypto from "node:crypto";
 
 import { parseLink } from "./core.js";
-import { LibraryError } from "./library.js";
+import { LibraryError, redactSecretishText } from "./library.js";
 import {
   parseYouTubePlaylistReference,
   youtubeVideoUrl,
@@ -26,7 +26,9 @@ const UNAVAILABLE_TITLES = new Set(["deleted video", "private video"]);
 function errorInfo(error) {
   return {
     code: error?.code ?? "PROVIDER_ERROR",
-    message: error instanceof Error ? error.message : String(error),
+    // Provider error text is untrusted and is persisted on the plan and read
+    // back through import_status — strip credential-shaped substrings first.
+    message: redactSecretishText(error instanceof Error ? error.message : String(error)),
     ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
   };
 }
@@ -379,6 +381,10 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     }
     syncTarget = parsed.id;
   }
+  // The sync preflight error describes ONE apply attempt, not the plan. A run
+  // that does not opt into sync performs no sync attempt, so drop a previous
+  // run's failure here instead of letting import_status report it as current.
+  delete plan.syncError;
   storePlan(library, plan);
 
   const results = [];
@@ -508,7 +514,6 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
       existing = new Set(
         (await youtube.getPlaylistItems(syncTarget, { signal })).map((entry) => entry.id),
       );
-      delete plan.syncError;
     } catch (error) {
       // The listing failure is persisted on the plan, not just the receipt —
       // a truncated results window must not lose the only copy of why.

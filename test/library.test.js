@@ -9,6 +9,7 @@ import {
   MusicLibrary,
   libraryFilePath,
   openLibrary,
+  redactSecretishText,
 } from "../src/library.js";
 
 async function tempLibrary() {
@@ -943,4 +944,29 @@ test("playlist metadata can link a verified source without stealing or crossing 
     library.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("redactSecretishText strips credential-shaped substrings and leaves other text alone", () => {
+  assert.equal(
+    redactSecretishText("call failed for Bearer ya29.a0AfH6SMBsecret-token"),
+    "call failed for [REDACTED]",
+  );
+  assert.equal(
+    redactSecretishText("bad key AIzaSyD0123456789abcdefghijklmnop"),
+    "bad key [REDACTED]",
+  );
+  // Several credentials in one message are all stripped, not just the first.
+  assert.equal(
+    redactSecretishText("Bearer ya29.a0AfH6SMBsecret and sk-proj-abcdefgh12345"),
+    "[REDACTED] and [REDACTED]",
+  );
+  // The guard must not be stateful across calls, and non-secrets pass through.
+  assert.equal(redactSecretishText("Bearer ya29.a0AfH6SMBsecret"), "[REDACTED]");
+  assert.equal(redactSecretishText("quota exhausted"), "quota exhausted");
+  assert.equal(redactSecretishText(""), "");
+  assert.equal(redactSecretishText(null), null);
+  assert.equal(redactSecretishText(undefined), undefined);
+  assert.deepEqual(redactSecretishText({ message: "Bearer ya29.a0AfH6SMBsecret" }), {
+    message: "Bearer ya29.a0AfH6SMBsecret",
+  });
 });

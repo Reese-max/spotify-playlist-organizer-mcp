@@ -733,3 +733,74 @@ test("in-batch duplicate rows mirror the primary item's sync outcome", async (t)
     ["added", "added"],
   );
 });
+
+test("credential-shaped provider error text is redacted before it is stored or reported", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Flaky Song" });
+  youtube.searchVideos = async () => {
+    throw Object.assign(
+      new Error("quota rejected for Bearer ya29.a0AfH6SMBnotarealsecret"),
+      { code: "HTTP_401", status: 401 },
+    );
+  };
+  youtube.getVideo = async () => {
+    throw Object.assign(
+      new Error("bad request with key AIzaSyD0123456789abcdefghijklmnop"),
+      { code: "HTTP_400", status: 400 },
+    );
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, "some song"] });
+  const byInput = new Map(preview.items.map((item) => [item.input, item]));
+  // VID_NEW1 resolves by exact id (getVideo), "some song" falls back to search.
+  assert.equal(byInput.get(VID_NEW1).status, "retryable");
+  assert.match(byInput.get(VID_NEW1).error.message, /\[REDACTED\]/);
+  assert.doesNotMatch(byInput.get(VID_NEW1).error.message, /AIzaSyD/);
+  assert.equal(byInput.get("some song").status, "unresolved");
+  assert.match(byInput.get("some song").error.message, /\[REDACTED\]/);
+  assert.doesNotMatch(byInput.get("some song").error.message, /ya29\./);
+  // Redaction must not destroy the triage fields.
+  assert.equal(byInput.get(VID_NEW1).error.code, "HTTP_400");
+  assert.equal(byInput.get(VID_NEW1).error.status, 400);
+  assert.equal(byInput.get("some song").error.code, "HTTP_401");
+
+  // The persisted plan is a Database row — nothing credential-shaped may land
+  // in it, or in the reconciliation page read back out of it.
+  const stored = library.getSyncState(`import.${preview.batchId}`);
+  assert.doesNotMatch(stored, /ya29\./);
+  assert.doesNotMatch(stored, /AIzaSyD/);
+  assert.match(stored, /\[REDACTED\]/);
+
+  const storedStatus = importStatus(library, { batchId: preview.batchId });
+  assert.doesNotMatch(JSON.stringify(storedStatus.items), /ya29\.|AIzaSyD/);
+});
+
+test("a stale sync preflight error does not resurface after a local-only re-apply", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Preflight Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  let listingFails = true;
+  youtube.getPlaylistItems = async (id) => {
+    if (id === PL_SYNC && listingFails) {
+      throw Object.assign(new Error("sync target listing timed out"), { code: "TIMEOUT", status: 503 });
+    }
+    return originalGetItems(id);
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const first = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(first.action, "partial_failure");
+  assert.equal(importStatus(library, { batchId: preview.batchId }).syncError.status, 503);
+
+  // A later apply that does not opt into sync performs no sync attempt, so the
+  // previous attempt's preflight failure must not be reported as this run's.
+  listingFails = false;
+  const second = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(second.sync, undefined);
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.equal(status.syncError, undefined);
+});

@@ -199,6 +199,16 @@ function sourceRow(row) {
 
 const SECRETISH_KEY = /token|secret|passphrase|password|credential|oauth|api[-_]?key|authorization/i;
 const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\.[A-Za-z0-9._-]{8,}|\bAIza[0-9A-Za-z_-]{20,}|\b1\/\/[A-Za-z0-9._-]{8,}/i;
+// `.test()` on a /g regex is stateful, so keep a separate global instance for
+// the replacement below rather than making the guard above stateful.
+const SECRETISH_VALUE_GLOBAL = new RegExp(SECRETISH_VALUE.source, "gi");
+
+// Untrusted provider text (error messages, upstream payloads) must not carry
+// credential-shaped substrings into the database or into MCP output.
+export function redactSecretishText(value) {
+  if (typeof value !== "string" || !SECRETISH_VALUE.test(value)) return value;
+  return value.replace(SECRETISH_VALUE_GLOBAL, "[REDACTED]");
+}
 
 function containsSecretishContent(value) {
   if (typeof value === "string") return SECRETISH_VALUE.test(value);

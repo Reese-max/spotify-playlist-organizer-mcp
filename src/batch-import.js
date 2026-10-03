@@ -521,8 +521,9 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
       delete plan.syncError;
     } catch (error) {
       // The listing failure is persisted on the plan, not just the receipt —
-      // a truncated results window must not lose the only copy of why.
-      syncPreflightError = errorInfo(error);
+      // a truncated results window must not lose the only copy of why. It names
+      // its target because a later cancelled run may retain it.
+      syncPreflightError = { playlistId: syncTarget, ...errorInfo(error) };
       plan.syncError = syncPreflightError;
       existing = null;
     }

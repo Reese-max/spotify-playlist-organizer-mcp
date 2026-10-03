@@ -969,4 +969,24 @@ test("redactSecretishText strips credential-shaped substrings and leaves other t
   assert.deepEqual(redactSecretishText({ message: "Bearer ya29.a0AfH6SMBsecret" }), {
     message: "Bearer ya29.a0AfH6SMBsecret",
   });
+  // A provider that echoes a parsed JSON body quotes the assignment. The exact
+  // surviving text is not the contract — losing the key name is acceptable
+  // over-redaction; leaking the value is not.
+  const jsonBody = redactSecretishText('{"client_secret":"GOCSPX-abc123def456"}');
+  assert.doesNotMatch(jsonBody, /GOCSPX-abc123def456/);
+  assert.match(jsonBody, /\[REDACTED\]/);
+  const quoted = redactSecretishText("rejected: invalid_client_id='abc123'");
+  assert.doesNotMatch(quoted, /abc123/);
+  assert.match(quoted, /\[REDACTED\]/);
+  // A bare Google client secret has no recognizable value prefix.
+  assert.equal(
+    redactSecretishText("secret GOCSPX-abc123def456 rejected"),
+    "secret [REDACTED] rejected",
+  );
+  // Redaction must not depend on state left by an earlier call.
+  const repeated = redactSecretishText('{"access_token":"GOCSPX-abc123def456"}');
+  assert.doesNotMatch(repeated, /GOCSPX-abc123def456/);
+  assert.match(repeated, /\[REDACTED\]/);
+  assert.equal(redactSecretishText("clean message"), "clean message");
+  assert.equal(redactSecretishText("clean message again"), "clean message again");
 });

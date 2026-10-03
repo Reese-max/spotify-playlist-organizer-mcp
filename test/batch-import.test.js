@@ -1084,3 +1084,29 @@ const mirroredDuplicates = (plan) => plan.items.filter(
   );
   assert.equal(counts[counts.length - 1], COUNT);
 });
+
+test("a persisted sync preflight failure names the playlist it belongs to", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_OTHER = "PL_IMPORT_OTHER1";
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Named Target" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.playlists.set(PL_OTHER, { id: PL_OTHER, name: "Other Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.items.set(PL_OTHER, []);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  youtube.getPlaylistItems = async (id) => {
+    if (id === PL_SYNC) {
+      throw Object.assign(new Error("sync target listing timed out"), { code: "TIMEOUT", status: 503 });
+    }
+    return originalGetItems(id);
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const applied = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.error.playlistId, PL_SYNC);
+  // The stored error is retained across a later cancelled run, so it must say
+  // which target it is about.
+  assert.equal(importStatus(library, { batchId: preview.batchId }).syncError.playlistId, PL_SYNC);
+});

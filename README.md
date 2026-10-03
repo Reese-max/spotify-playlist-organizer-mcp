@@ -141,9 +141,11 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 計數口徑：`sync.results`／`sync.failed`／`sync.unknown` 是**每次實際 append 嘗試**（同一 `videoId` 只算一次，批內重複列不重複加），`import_status.items` 則是**逐 plan 列**（重複列鏡射同一 `videoId` 的結果）。所以一個 videoId 失敗會讓 `import_status` 看到兩列 `syncResult:"failed"` 而 `sync.failed` 仍是 1——兩者都對，只是分母不同。`already_present` 不算 append 嘗試，所以只出現在 `import_status`。
 
-安全：provider 回傳的錯誤訊息屬外部輸入，落進 plan（sync_state）與任何 MCP output（包含 tool 丟出的 `error`）前都會過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`access_token=`／`client_secret=` 等 OAuth 指派、含前綴的變體如 `invalid_client_id=`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。這組較寬鬆的 OAuth 指派樣式**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。
+安全：batch import 落進 plan（sync_state）的 provider 錯誤訊息，以及 **MCP tool 丟出的 `error`／`nextStep` 與 HTTP facade 的錯誤 `message`**，都會先過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`GOCSPX-…`、含前綴的 OAuth 指派如 `invalid_client_id=`、JSON 引號形如 `"client_secret":"…"`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。這組較寬鬆的 OAuth 指派樣式**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。`save_music`／`library_sync`／`library_query` 各自在**成功回應**內嵌的 `errorInfo` 尚未接上這層 redact，不受本保證涵蓋。
 
-同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗仍是最後已知狀態。
+同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**並自帶 `playlistId`：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗（連同它所屬的目標 playlist）仍是最後已知狀態。
+
+`import_music_batch` 回應裡的 `counts` 是用 `countBy(plan.items)` 重述 plan 的**解析狀態**（`new`/`exactDuplicate`/… ，preview 那一套），不是這次 apply 的**結果**分佈；逐項結果看 `results`，逐項 sync 結果看 `import_status`。已匯入的項目仍會留在 `counts.new`，因為它解析時就是 `new`。
 
 取消／逾時／暫時 provider 錯誤：apply 每 25 項 chunk flush 一次 plan；未完成項目保持 pending，回 `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。caller abort 另回 `action:"cancelled"`。
 

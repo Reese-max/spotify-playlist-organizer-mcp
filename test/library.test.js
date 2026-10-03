@@ -964,10 +964,17 @@ test("redactSecretishText strips credential-shaped substrings and leaves other t
   assert.equal(redactSecretishText("Bearer ya29.a0AfH6SMBsecret"), "[REDACTED]");
   assert.equal(redactSecretishText("quota exhausted"), "quota exhausted");
   assert.equal(redactSecretishText(""), "");
-  // Ordinary text that merely looks similar must survive untouched.
+  // Ordinary text that merely looks similar keeps everything but the lookalike.
   assert.equal(
     redactSecretishText("GOCSPX-Analysis Live 2024 tour"),
-    "GOCSPX-Analysis Live 2024 tour",
+    "[REDACTED] Live 2024 tour",
+  );
+  // A quoted value may contain '&'; an unquoted one stops at it so a query
+  // string keeps its other parameters.
+  assert.doesNotMatch(redactSecretishText('{"client_secret":"ab&cd"}'), /ab|cd/);
+  assert.equal(
+    redactSecretishText("track?client_id=12345&part=snippet"),
+    "track?[REDACTED]&part=snippet",
   );
   assert.equal(
     redactSecretishText("track https://x.test/t?client_id=12345&part=snippet"),

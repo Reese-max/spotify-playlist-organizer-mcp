@@ -1110,3 +1110,28 @@ test("a persisted sync preflight failure names the playlist it belongs to", asyn
   // which target it is about.
   assert.equal(importStatus(library, { batchId: preview.batchId }).syncError.playlistId, PL_SYNC);
 });
+
+test("a pasted credential in the import input is redacted from the stored plan", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Fine Song" });
+  // `input` is pasted free text persisted verbatim on the plan. It must not be
+  // the one untrusted field that reaches the database unredacted.
+  const pasted = "https://example.com/track?access_token=ya29.leakedbypastevalue";
+
+  const preview = await previewImport({ library, youtube }, { items: [pasted, VID_NEW1] });
+  assert.equal(preview.counts.total, 2);
+  assert.doesNotMatch(preview.items[0].input, /ya29\./);
+  assert.match(preview.items[0].input, /\[REDACTED\]/);
+
+  const stored = library.getSyncState(`import.${preview.batchId}`);
+  assert.doesNotMatch(stored, /leakedbypastevalue/);
+  // Redaction keeps the row exportable — the exporter's drop rule stays strict.
+  const keys = library.exportRows().syncState.map((row) => row.key);
+  assert.ok(keys.includes(`import.${preview.batchId}`));
+
+  const applied = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(applied.results[0].status, "unresolved");
+  assert.doesNotMatch(applied.results[0].input, /ya29\./);
+  assert.equal(applied.results[1].status, "imported");
+  assert.doesNotMatch(JSON.stringify(importStatus(library, { batchId: applied.batchId })), /ya29\./);
+});

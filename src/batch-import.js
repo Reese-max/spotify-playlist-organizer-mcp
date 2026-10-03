@@ -170,15 +170,20 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
   const items = [];
   const firstById = new Map();
   const push = (item) => {
-    const first = item.videoId ? firstById.get(item.videoId) : null;
+    // `input` is pasted free text persisted verbatim on the plan, so it is
+    // untrusted on the same footing as a provider error message. Redact once
+    // here, at the single construction point, so the stored plan, the preview,
+    // the apply receipt and import_status all agree.
+    const built = { ...item, input: redactSecretishText(item.input) };
+    const first = built.videoId ? firstById.get(built.videoId) : null;
     if (first) {
       const status = first.status === "unavailable" ? "unavailable"
         : first.status === "retryable" ? "retryable" : "exact_duplicate";
-      items.push({ ...item, status, inBatchDuplicate: true });
+      items.push({ ...built, status, inBatchDuplicate: true });
       return;
     }
-    if (item.videoId) firstById.set(item.videoId, item);
-    items.push(item);
+    if (built.videoId) firstById.set(built.videoId, built);
+    items.push(built);
   };
 
   for (const input of rawItems) {

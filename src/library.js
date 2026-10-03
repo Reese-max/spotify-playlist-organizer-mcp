@@ -205,10 +205,12 @@ const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\
 // No `\b` before the names: `invalid_client_id=` is the same secret shape.
 // Quotes are optional so a provider echoing a parsed JSON body is covered too.
 // GOCSPX- belongs here rather than in SECRETISH_VALUE for the same reason: its
-// tail is ordinary word characters, so "GOCSPX-Analysis Live" would otherwise
-// drop an entire plan. The lookbehind keeps the delimiter out of the match so
-// surrounding diagnostic text survives.
-const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*["']?[^\s"'&,;}\]]+["']?|\bGOCSPX-[A-Za-z0-9_-]{20,}|\bSID=["']?[^\s"',;}\]]+/gi;
+// tail is ordinary word characters, so "GOCSPX-Analysis Live" must not gate a
+// row. Redaction-only means a false positive costs one mangled diagnostic
+// string, never a dropped plan. The lookbehind keeps the delimiter out of the
+// match so surrounding diagnostic text survives; a quoted value may contain "&"
+// while an unquoted one stops at it, so "?a=1&part=x" keeps its tail.
+const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s"'&,;}\]]+)|\bGOCSPX-[A-Za-z0-9_-]{8,}|\bSID=["']?[^\s"',;}\]]+/gi;
 
 // Untrusted provider text (error messages, upstream payloads) must not carry
 // credential-shaped substrings into the database or into MCP output.

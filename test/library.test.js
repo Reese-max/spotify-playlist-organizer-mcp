@@ -980,6 +980,19 @@ test("redactSecretishText strips credential-shaped substrings and leaves other t
     redactSecretishText("track https://x.test/t?client_id=12345&part=snippet"),
     "track https://x.test/t?[REDACTED]&part=snippet",
   );
+  // A truncated JSON body or a clipped shell fragment still has an opening
+  // quote and no closing one — it must still be redacted.
+  for (const truncated of [
+    '{"client_secret":"abc',
+    "{'client_secret':'abc",
+    'client_secret="abc',
+    "client_secret='abc",
+    'client_secret" : "abc',
+  ]) {
+    assert.doesNotMatch(redactSecretishText(truncated), /abc/, truncated);
+  }
+  // An unquoted SID value stops at '&' like every other unquoted value.
+  assert.equal(redactSecretishText("?SID=abc123&other=1"), "?[REDACTED]&other=1");
   assert.equal(redactSecretishText(null), null);
   assert.equal(redactSecretishText(undefined), undefined);
   assert.deepEqual(redactSecretishText({ message: "Bearer ya29.a0AfH6SMBsecret" }), {

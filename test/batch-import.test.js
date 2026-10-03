@@ -1135,3 +1135,36 @@ test("a pasted credential in the import input is redacted from the stored plan",
   assert.equal(applied.results[1].status, "imported");
   assert.doesNotMatch(JSON.stringify(importStatus(library, { batchId: applied.batchId })), /ya29\./);
 });
+
+test("import_status redacts provider text in a plan written before write-side redaction", async (t) => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  t.after(async () => {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  // A plan persisted by an older build, with the credential in the clear.
+  library.setSyncState("import.LEGACYPLAN", {
+    batchId: "LEGACYPLAN",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    playlistId: null,
+    items: [{
+      input: "V_LEGACY001",
+      videoId: "V_LEGACY001",
+      title: "Legacy Song",
+      status: "retryable",
+      result: "retryable",
+      error: { code: "TIMEOUT", message: "quota rejected for Bearer ya29.oldleakedleaked" },
+    }],
+    syncError: { playlistId: PL_SYNC, code: "TIMEOUT", message: "listing failed: SID=oldsecretvalue" },
+  });
+
+  const status = importStatus(library, { batchId: "LEGACYPLAN" });
+  const serialized = JSON.stringify(status);
+  assert.doesNotMatch(serialized, /ya29\.|oldsecretvalue/);
+  assert.match(serialized, /\[REDACTED\]/);
+  // Non-secret fields still come through untouched.
+  assert.equal(status.items[0].error.code, "TIMEOUT");
+  assert.equal(status.syncError.playlistId, PL_SYNC);
+});

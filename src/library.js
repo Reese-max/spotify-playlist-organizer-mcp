@@ -210,7 +210,7 @@ const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\
 // string, never a dropped plan. The lookbehind keeps the delimiter out of the
 // match so surrounding diagnostic text survives; a quoted value may contain "&"
 // while an unquoted one stops at it, so "?a=1&part=x" keeps its tail.
-const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s"'&,;}\]]+)|\bGOCSPX-[A-Za-z0-9_-]{8,}|\bSID=["']?[^\s"',;}\]]+/gi;
+const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*(?:"[^"]*"?|'[^']*'?|[^\s"'&,;}\]]+)|\bGOCSPX-[A-Za-z0-9_-]{8,}|\bSID=["']?[^\s"'&,;}\]]+/gi;
 
 // Untrusted provider text (error messages, upstream payloads) must not carry
 // credential-shaped substrings into the database or into MCP output.

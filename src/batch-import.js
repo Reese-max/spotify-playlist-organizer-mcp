@@ -277,6 +277,18 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
   };
 }
 
+function publicError(error) {
+  if (!error || typeof error !== "object") return error;
+  return {
+    ...error,
+    // Plans written by a build without write-side redaction can still hold
+    // provider text in the clear, so the read path redacts too.
+    ...(typeof error.message === "string"
+      ? { message: redactSecretishText(error.message) }
+      : {}),
+  };
+}
+
 function publicItem(item) {
   return {
     input: item.input,
@@ -291,7 +303,7 @@ function publicItem(item) {
     ...(item.result ? { result: item.result } : {}),
     ...(item.syncResult ? { syncResult: item.syncResult } : {}),
     ...(item.syncPlaylistId ? { syncPlaylistId: item.syncPlaylistId } : {}),
-    ...(item.error ? { error: item.error } : {}),
+    ...(item.error ? { error: publicError(item.error) } : {}),
   };
 }
 
@@ -359,7 +371,7 @@ export function importStatus(library, args = {}) {
     itemsTotal: plan.items.length,
     itemsTruncated: nextOffset !== null,
     nextOffset,
-    ...(plan.syncError ? { syncError: plan.syncError } : {}),
+    ...(plan.syncError ? { syncError: publicError(plan.syncError) } : {}),
   };
 }
 

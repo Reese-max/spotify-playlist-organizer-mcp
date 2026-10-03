@@ -198,13 +198,17 @@ function sourceRow(row) {
 }
 
 const SECRETISH_KEY = /token|secret|passphrase|password|credential|oauth|api[-_]?key|authorization/i;
-const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\.[A-Za-z0-9._-]{8,}|\bAIza[0-9A-Za-z_-]{20,}|\b1\/\/[A-Za-z0-9._-]{8,}|\bGOCSPX-[A-Za-z0-9_-]{8,}/i;
+const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\.[A-Za-z0-9._-]{8,}|\bAIza[0-9A-Za-z_-]{20,}|\b1\/\/[A-Za-z0-9._-]{8,}/i;
 // OAuth credential *assignments* are too common in innocent text to gate a
 // whole sync_state row on ("?client_id=12345" in a pasted URL would drop the
 // row), so they only drive redaction, never the exporter's drop decision.
 // No `\b` before the names: `invalid_client_id=` is the same secret shape.
 // Quotes are optional so a provider echoing a parsed JSON body is covered too.
-const SECRETISH_ASSIGNMENT = /(?:^|[^A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*["']?[^\s"',;}\]]+["']?|\bSID=["']?[^\s"',;}\]]+/gi;
+// GOCSPX- belongs here rather than in SECRETISH_VALUE for the same reason: its
+// tail is ordinary word characters, so "GOCSPX-Analysis Live" would otherwise
+// drop an entire plan. The lookbehind keeps the delimiter out of the match so
+// surrounding diagnostic text survives.
+const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*["']?[^\s"'&,;}\]]+["']?|\bGOCSPX-[A-Za-z0-9_-]{20,}|\bSID=["']?[^\s"',;}\]]+/gi;
 
 // Untrusted provider text (error messages, upstream payloads) must not carry
 // credential-shaped substrings into the database or into MCP output.

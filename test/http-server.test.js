@@ -7,7 +7,7 @@ import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 
 import { createHttpServer, createSessionStore } from "../src/http-server.js";
-import { openLibrary } from "../src/library.js";
+import { LibraryError, openLibrary } from "../src/library.js";
 import packageJson from "../package.json" with { type: "json" };
 
 const PL_A = "PL_HTTP_TEST_AAAA";
@@ -418,4 +418,27 @@ test("main() boots a real server that serves health and session exchange", async
     await new Promise((resolve) => child.once("exit", resolve));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+test("the facade error chokepoint redacts a credential carried by a thrown error", async (t) => {
+  const { base, library } = await startServer(t);
+  const token = await session(base);
+  // A provider error bubbled up through the service layer reaches sendError;
+  // the facade must not emit the credential it carries.
+  library.listTracks = () => {
+    throw new LibraryError("PROVIDER_ERROR", "upstream said: Bearer ya29.notarealsecretvalue");
+  };
+
+  const response = await api(base, "GET", "/api/library/tracks", { token });
+  assert.equal(response.status, 400);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "PROVIDER_ERROR");
+  assert.doesNotMatch(payload.error.message, /ya29\./);
+  assert.match(payload.error.message, /\[REDACTED\]/);
+  // A non-secret message still comes through unchanged.
+  library.listTracks = () => {
+    throw new LibraryError("LIBRARY_INPUT_INVALID", "limit must be an integer");
+  };
+  const clean = await api(base, "GET", "/api/library/tracks", { token });
+  assert.equal((await clean.json()).error.message, "limit must be an integer");
 });

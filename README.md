@@ -143,7 +143,7 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 安全：batch import 落進 plan（sync_state）的 provider 錯誤訊息，以及 **MCP tool 丟出的 `error`／`nextStep` 與 HTTP facade 的錯誤 `message`**，都會先過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`GOCSPX-…`、含前綴的 OAuth 指派如 `invalid_client_id=`、JSON 引號形如 `"client_secret":"…"`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。這組較寬鬆的 OAuth 指派樣式**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。`save_music`／`library_sync`／`library_query` 各自在**成功回應**內嵌的 `errorInfo` 尚未接上這層 redact，不受本保證涵蓋。
 
-同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**並自帶 `playlistId`：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗（連同它所屬的目標 playlist）仍是最後已知狀態。
+同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**並自帶 `playlistId`（此欄位只有本版之後寫入的 plan 才有，早期 plan 沒有）：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗（連同它所屬的目標 playlist）仍是最後已知狀態。apply 回應的 `sync.error` 是同一份內容（`playlistId`/`code`/`message`/`status`）：preflight 失敗時它取代了舊版塞在 `results` 裡的 `sync_failed` 項目，所以**光看 `results` 會看不到這筆失敗**，要改看 `sync.error`。`import_status` 的逐項視窗另含 `syncPlaylistId`，指出該列最後一次同步寫進哪個 playlist。
 
 `import_music_batch` 回應裡的 `counts` 是用 `countBy(plan.items)` 重述 plan 的**解析狀態**（`new`/`exactDuplicate`/… ，preview 那一套），不是這次 apply 的**結果**分佈；逐項結果看 `results`，逐項 sync 結果看 `import_status`。已匯入的項目仍會留在 `counts.new`，因為它解析時就是 `new`。
 

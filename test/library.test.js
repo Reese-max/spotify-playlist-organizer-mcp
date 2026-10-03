@@ -964,6 +964,15 @@ test("redactSecretishText strips credential-shaped substrings and leaves other t
   assert.equal(redactSecretishText("Bearer ya29.a0AfH6SMBsecret"), "[REDACTED]");
   assert.equal(redactSecretishText("quota exhausted"), "quota exhausted");
   assert.equal(redactSecretishText(""), "");
+  // Ordinary text that merely looks similar must survive untouched.
+  assert.equal(
+    redactSecretishText("GOCSPX-Analysis Live 2024 tour"),
+    "GOCSPX-Analysis Live 2024 tour",
+  );
+  assert.equal(
+    redactSecretishText("track https://x.test/t?client_id=12345&part=snippet"),
+    "track https://x.test/t?[REDACTED]&part=snippet",
+  );
   assert.equal(redactSecretishText(null), null);
   assert.equal(redactSecretishText(undefined), undefined);
   assert.deepEqual(redactSecretishText({ message: "Bearer ya29.a0AfH6SMBsecret" }), {
@@ -972,20 +981,20 @@ test("redactSecretishText strips credential-shaped substrings and leaves other t
   // A provider that echoes a parsed JSON body quotes the assignment. The exact
   // surviving text is not the contract — losing the key name is acceptable
   // over-redaction; leaking the value is not.
-  const jsonBody = redactSecretishText('{"client_secret":"GOCSPX-abc123def456"}');
-  assert.doesNotMatch(jsonBody, /GOCSPX-abc123def456/);
+  const jsonBody = redactSecretishText('{"client_secret":"GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy"}');
+  assert.doesNotMatch(jsonBody, /GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy/);
   assert.match(jsonBody, /\[REDACTED\]/);
   const quoted = redactSecretishText("rejected: invalid_client_id='abc123'");
   assert.doesNotMatch(quoted, /abc123/);
   assert.match(quoted, /\[REDACTED\]/);
   // A bare Google client secret has no recognizable value prefix.
   assert.equal(
-    redactSecretishText("secret GOCSPX-abc123def456 rejected"),
+    redactSecretishText("secret GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy rejected"),
     "secret [REDACTED] rejected",
   );
   // Redaction must not depend on state left by an earlier call.
-  const repeated = redactSecretishText('{"access_token":"GOCSPX-abc123def456"}');
-  assert.doesNotMatch(repeated, /GOCSPX-abc123def456/);
+  const repeated = redactSecretishText('{"access_token":"GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy"}');
+  assert.doesNotMatch(repeated, /GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy/);
   assert.match(repeated, /\[REDACTED\]/);
   assert.equal(redactSecretishText("clean message"), "clean message");
   assert.equal(redactSecretishText("clean message again"), "clean message again");

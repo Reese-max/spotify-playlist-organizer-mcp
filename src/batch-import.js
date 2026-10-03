@@ -381,10 +381,11 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     }
     syncTarget = parsed.id;
   }
-  // The sync preflight error describes ONE apply attempt, not the plan. A run
-  // that does not opt into sync performs no sync attempt, so drop a previous
-  // run's failure here instead of letting import_status report it as current.
-  delete plan.syncError;
+  // The sync preflight error describes ONE apply attempt. A run that does not
+  // opt into sync performs no sync attempt, so drop a previous run's failure
+  // here instead of letting import_status report it as current. A run that DOES
+  // opt in keeps the old value until its own preflight actually resolves it.
+  if (!syncTarget) delete plan.syncError;
   storePlan(library, plan);
 
   const results = [];
@@ -514,6 +515,9 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
       existing = new Set(
         (await youtube.getPlaylistItems(syncTarget, { signal })).map((entry) => entry.id),
       );
+      // This attempt reached the provider, so any earlier preflight failure is
+      // superseded by a real listing.
+      delete plan.syncError;
     } catch (error) {
       // The listing failure is persisted on the plan, not just the receipt —
       // a truncated results window must not lose the only copy of why.
@@ -555,17 +559,23 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
         if (syncProcessed % CHUNK_SIZE === 0) flush();
       }
       // In-batch duplicate rows share the primary's videoId — mirror the
-      // outcome so every row reconciles identically through import_status.
+      // outcome so every row reconciles identically through import_status. The
+      // mirror is a refresh, not a fill: re-syncing the batch to another
+      // playlist must not leave one row reporting the previous target.
       const syncByVideo = new Map();
       for (const item of plan.items) {
-        if (item.videoId && item.syncResult) syncByVideo.set(item.videoId, item);
+        // Only the primary row is a mirror source. A duplicate row still
+        // carrying a previous run's syncResult must not shadow the primary.
+        if (!item.inBatchDuplicate && item.videoId && item.syncResult) {
+          syncByVideo.set(item.videoId, item);
+        }
       }
       for (const item of plan.items) {
         const primary = item.inBatchDuplicate && item.videoId ? syncByVideo.get(item.videoId) : null;
-        if (primary && !item.syncResult) {
-          item.syncResult = primary.syncResult;
-          item.syncPlaylistId = primary.syncPlaylistId;
-        }
+        if (!primary) continue;
+        if (item.syncResult === primary.syncResult && item.syncPlaylistId === primary.syncPlaylistId) continue;
+        item.syncResult = primary.syncResult;
+        item.syncPlaylistId = primary.syncPlaylistId;
       }
     }
     // Per-item sync outcomes live on the stored plan so a lost response can
@@ -589,7 +599,14 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
 
   let nextStep;
   if (syncUnknown.length) {
-    nextStep = `Verify exact video IDs ${syncUnknown.map((entry) => entry.videoId).join(", ")} in playlist ${syncTarget} before retrying any additions; the provider write may have succeeded. Local imports remain saved.`;
+    // The prose receipt is part of the same bounded response as results and
+    // sync.results — never name an unbounded list of video IDs in it.
+    const named = syncUnknown.slice(0, MAX_DETAIL_ITEMS);
+    const extra = syncUnknown.length - named.length;
+    nextStep = `Verify exact video IDs ${named.map((entry) => entry.videoId).join(", ")}`
+      + `${extra > 0 ? ` and ${extra} more` : ""}`
+      + ` in playlist ${syncTarget} before retrying any additions; the provider write may have succeeded.`
+      + " Local imports remain saved.";
   } else if (cancelled) {
     nextStep = `Re-run import_music_batch with batchId "${plan.batchId}" and resume:true to continue from item ${plan.items.length - remaining + 1}.`;
   } else if (failed) {

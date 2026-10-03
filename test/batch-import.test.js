@@ -804,3 +804,134 @@ test("a stale sync preflight error does not resurface after a local-only re-appl
   const status = importStatus(library, { batchId: preview.batchId });
   assert.equal(status.syncError, undefined);
 });
+
+test("re-syncing to a second playlist refreshes every duplicate row's sync target", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_SECOND = "PL_IMPORT_SECOND";
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Resync Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.playlists.set(PL_SECOND, { id: PL_SECOND, name: "Second Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.items.set(PL_SECOND, []);
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, VID_NEW1] });
+  const first = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(
+    first.sync.results.map((entry) => entry.playlistId),
+    [PL_SYNC],
+  );
+
+  // Same batch, a different explicit sync target: every row for this videoId
+  // must report the current target, never a mix of the two.
+  const second = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SECOND },
+  );
+  assert.equal(second.sync.playlistId, PL_SECOND);
+
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.deepEqual(
+    status.items.map((item) => item.syncResult),
+    ["added", "added"],
+  );
+  assert.deepEqual(
+    status.items.map((item) => item.syncPlaylistId),
+    [PL_SECOND, PL_SECOND],
+  );
+  // The first target really was written before the re-sync.
+  assert.deepEqual(youtube.addCalls, [`${PL_SYNC}:${VID_NEW1}`, `${PL_SECOND}:${VID_NEW1}`]);
+});
+
+test("an UNKNOWN_AFTER_WRITE receipt names a bounded set of video IDs", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_MANY = "PL_IMPORT_MANY01";
+  const entries = [];
+  for (let i = 0; i < 520; i += 1) {
+    const id = `UNK_${String(i).padStart(4, "0")}`;
+    entries.push({ id, name: `Unknown Song ${i}` });
+    youtube.videos.set(id, { id, name: `Unknown Song ${i}`, channel: "Chan" });
+  }
+  youtube.playlists.set(PL_MANY, { id: PL_MANY, name: "Many Source" });
+  youtube.items.set(PL_MANY, entries);
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("add timed out"), { code: "TIMEOUT", status: 503 });
+  };
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { playlist: PL_MANY, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.action, "UNKNOWN_AFTER_WRITE");
+  assert.equal(applied.sync.results.length, 500);
+  assert.equal(applied.sync.resultsTruncated, true);
+  // The prose receipt must stay bounded too — it is part of the same response.
+  const named = applied.nextStep.match(/UNK_\d{4}/g) ?? [];
+  assert.ok(named.length <= 500, `nextStep named ${named.length} video IDs`);
+  assert.match(applied.nextStep, /and 20 more|import_status/);
+  assert.ok(applied.nextStep.length < 12000, `nextStep is ${applied.nextStep.length} chars`);
+});
+
+test("a cancelled apply that opted into sync keeps the previous preflight failure", async (t) => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  t.after(async () => {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const controller = new AbortController();
+  const youtube = new StubYouTube({ abortAfter: 1, controller });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  // Three pending items: the abort fires during the second read-back, so the
+  // third is what trips the loop's cancellation check.
+  const pending = ["V_PEND00001", "V_PEND00002", "V_PEND00003"].map((videoId) => ({
+    input: videoId,
+    videoId,
+    title: "Pending Song",
+    status: "new",
+  }));
+  for (const item of pending) {
+    youtube.videos.set(item.videoId, { id: item.videoId, name: item.title, channel: "Chan" });
+  }
+  library.setSyncState("import.SEEDEDBATCH", {
+    batchId: "SEEDEDBATCH",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    playlistId: null,
+    syncPlaylistId: null,
+    syncError: { code: "TIMEOUT", message: "sync target listing timed out", status: 503 },
+    items: pending,
+  });
+
+  const applied = await importMusicBatch(
+    { library, youtube },
+    { batchId: "SEEDEDBATCH", syncPlaylist: PL_SYNC },
+    { signal: controller.signal },
+  );
+  assert.equal(applied.action, "cancelled");
+  // No sync was attempted, so the last known sync failure is still the truth.
+  assert.deepEqual(applied.sync.results, []);
+  assert.equal(importStatus(library, { batchId: "SEEDEDBATCH" }).syncError.status, 503);
+});
+
+test("OAuth credential shapes echoed by a provider are redacted from stored errors", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Echoing Song" });
+  youtube.getVideo = async () => {
+    throw Object.assign(
+      new Error("request rejected: access_token=ya29.notrealbutsecretvalue expired"),
+      { code: "HTTP_403", status: 403 },
+    );
+  };
+
+  const applied = await importMusicBatch({ library, youtube }, { items: [VID_NEW1] });
+  assert.equal(applied.results[0].status, "retryable");
+  assert.match(applied.results[0].error.message, /\[REDACTED\]/);
+  assert.doesNotMatch(applied.results[0].error.message, /access_token=/);
+  assert.doesNotMatch(
+    library.getSyncState(`import.${applied.batchId}`),
+    /access_token=/,
+  );
+});

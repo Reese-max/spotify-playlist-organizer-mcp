@@ -935,3 +935,152 @@ test("OAuth credential shapes echoed by a provider are redacted from stored erro
     /access_token=/,
   );
 });
+
+test("a sync row already present in the target records already_present instead of a stale outcome", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Unknown Then Present" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("add timed out"), { code: "TIMEOUT", status: 503 });
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const first = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(first.action, "UNKNOWN_AFTER_WRITE");
+  assert.equal(importStatus(library, { batchId: preview.batchId }).items[0].syncResult, "unknown_after_write");
+
+  // The caller verifies the video really did land, then re-syncs. The plan must
+  // clear the uncertain state instead of reporting it forever.
+  youtube.addVideoToPlaylist = async (playlistId, videoId) => {
+    youtube.addCalls.push(`${playlistId}:${videoId}`);
+    return { added: true };
+  };
+  youtube.items.set(PL_SYNC, [{ id: VID_NEW1, name: "Unknown Then Present" }]);
+  const second = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(second.action, "imported");
+  assert.deepEqual(second.sync.results, []);
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.equal(status.items[0].syncResult, "already_present");
+  assert.equal(status.items[0].syncPlaylistId, PL_SYNC);
+});
+
+test("in-batch duplicate rows mirror an already_present outcome", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Present Dup" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, [{ id: VID_NEW1, name: "Present Dup" }]);
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { items: [VID_NEW1, VID_NEW1], syncPlaylist: PL_SYNC },
+  );
+  assert.equal(youtube.addCalls.length, 0);
+  const status = importStatus(library, { batchId: applied.batchId });
+  assert.deepEqual(
+    status.items.map((item) => item.syncResult),
+    ["already_present", "already_present"],
+  );
+});
+
+test("an innocuous OAuth-looking query parameter does not drop the import plan from a backup", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const plain = "https://example.com/track?client_id=12345";
+
+  const preview = await previewImport({ library, youtube }, { items: [plain] });
+  const exported = library.exportRows();
+  const keys = exported.syncState.map((row) => row.key);
+  assert.ok(
+    keys.includes(`import.${preview.batchId}`),
+    `import plan missing from backup; keys=${JSON.stringify(keys)}`,
+  );
+  assert.equal(exported.skippedSecrets, 0);
+});
+
+test("prefixed OAuth assignment shapes are redacted from provider error text", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Prefixed Echo" });
+  youtube.getVideo = async () => {
+    throw Object.assign(
+      new Error("rejected: invalid_client_id=abc123def and SID=xyz987"),
+      { code: "HTTP_403", status: 403 },
+    );
+  };
+
+  const applied = await importMusicBatch({ library, youtube }, { items: [VID_NEW1] });
+  const { message } = applied.results[0].error;
+  assert.doesNotMatch(message, /invalid_client_id=/);
+  assert.doesNotMatch(message, /SID=xyz987/);
+  assert.match(message, /\[REDACTED\]/);
+});
+
+test("import_status clamps an explicit limit of 0 to the documented minimum", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_PAGE = "PL_IMPORT_PAGE01";
+  const entries = [];
+  for (let i = 0; i < 10; i += 1) {
+    entries.push({ id: `PAGE_${String(i).padStart(4, "0")}`, name: `Page Song ${i}` });
+  }
+  youtube.playlists.set(PL_PAGE, { id: PL_PAGE, name: "Page Source" });
+  youtube.items.set(PL_PAGE, entries);
+
+  const preview = await previewImport({ library, youtube }, { playlist: PL_PAGE });
+  const status = importStatus(library, { batchId: preview.batchId, limit: 0 });
+  assert.equal(status.items.length, 1); // clamped to the documented minimum
+  assert.equal(status.itemsTotal, 10);
+  assert.equal(importStatus(library, { batchId: preview.batchId, limit: "abc" }).items.length, 10);
+});
+
+test("duplicate-row mirror corrections are persisted incrementally, not only at the end", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_MIRROR = "PL_MIRROR_FLUSH";
+  const COUNT = 30; // more than CHUNK_SIZE so the mirror loop crosses a boundary
+  const entries = [];
+  for (let i = 0; i < COUNT; i += 1) {
+    entries.push({ id: `MIRROR_${String(i).padStart(4, "0")}`, name: `Mirror Song ${i}` });
+    youtube.videos.set(`MIRROR_${String(i).padStart(4, "0")}`, {
+      id: `MIRROR_${String(i).padStart(4, "0")}`,
+      name: `Mirror Song ${i}`,
+      channel: "Chan",
+    });
+  }
+  youtube.playlists.set(PL_MIRROR, { id: PL_MIRROR, name: "Mirror Source" });
+  youtube.items.set(PL_MIRROR, entries);
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  // Snapshot every write so a mid-mirror crash can be simulated: the plan must
+  // already be consistent before the final flush.
+  const snapshots = [];
+  const realSetSyncState = library.setSyncState.bind(library);
+  library.setSyncState = (key, value) => {
+    if (typeof key === "string" && key.startsWith("import.")) {
+      snapshots.push(JSON.parse(JSON.stringify(value)));
+    }
+    return realSetSyncState(key, value);
+  };
+
+  const inputs = entries.flatMap((entry) => [entry.id, entry.id]);
+  const applied = await importMusicBatch(
+    { library, youtube }, { items: inputs, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.results.length, COUNT);
+
+  // Only the mirror pass writes duplicate rows, so a snapshot showing corrected
+// duplicates proves the mirror phase flushed incrementally rather than the
+// whole correction landing in the final flush.
+const mirroredDuplicates = (plan) => plan.items.filter(
+    (item) => item.inBatchDuplicate && item.syncResult === "added" && item.syncPlaylistId === PL_SYNC,
+  ).length;
+  const counts = snapshots.map(mirroredDuplicates);
+  const beforeFinal = counts.slice(0, -1);
+  assert.ok(beforeFinal.length > 0, "expected an intermediate plan snapshot");
+  assert.ok(
+    Math.max(...beforeFinal) > 0,
+    `no pre-final snapshot carried mirror corrections; counts=${JSON.stringify(counts)}`,
+  );
+  assert.equal(counts[counts.length - 1], COUNT);
+});

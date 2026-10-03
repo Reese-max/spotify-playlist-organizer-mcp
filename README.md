@@ -137,11 +137,13 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 - `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`retryable`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`，失敗項附 `error`）。精確 ID 的 provider 暫時錯誤標為 `retryable`；僅確認不存在、私人或刪除的影片標為 `unavailable`。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
 - `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷或暫時失敗的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`retryable`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。`results` 與 `sync.results` 皆以 500 筆為上限，超過時標 `resultsTruncated`/`resultsTotal`；完整逐項紀錄（含逐項 sync 結果）存於 plan，用 `import_status` 分頁取回。
-- `import_status`：查已存批次的 `counts`＋`done`/`pending`，並以 `offset`/`limit`（預設 100、上限 500）回傳有界的逐項 `status`/`result`/`syncResult`/`error` 視窗，`itemsTruncated`/`nextOffset` 標示續頁。apply 回應因逾時或中斷遺失時，這裡是逐項對帳點。`syncResult` 只有三個值：`added`（provider 已確認加入）、`failed`（確定失敗，可直接重試）、`unknown_after_write`（**寫入結果不明**——重試前必須先用 exact video ID 核對 playlist，否則會重複加入）。
+- `import_status`：查已存批次的 `counts`＋`done`/`pending`，並以 `offset`/`limit`（預設 100、上限 500）回傳有界的逐項 `status`/`result`/`syncResult`/`error` 視窗，`itemsTruncated`/`nextOffset` 標示續頁。apply 回應因逾時或中斷遺失時，這裡是逐項對帳點。`syncResult` 有四個值：`added`（provider 已確認加入）、`already_present`（這次同步時該影片已在目標 playlist，未發出 append）、`failed`（確定失敗，可直接重試）、`unknown_after_write`（**寫入結果不明**——重試前必須先用 exact video ID 核對 playlist，否則會重複加入）。
 
-計數口徑：`sync.results`／`sync.failed`／`sync.unknown` 是**每次實際 append 嘗試**（同一 `videoId` 只算一次，批內重複列不重複加），`import_status.items` 則是**逐 plan 列**（重複列鏡射同一 `videoId` 的結果）。所以一個 videoId 失敗會讓 `import_status` 看到兩列 `syncResult:"failed"` 而 `sync.failed` 仍是 1——兩者都對，只是分母不同。
+計數口徑：`sync.results`／`sync.failed`／`sync.unknown` 是**每次實際 append 嘗試**（同一 `videoId` 只算一次，批內重複列不重複加），`import_status.items` 則是**逐 plan 列**（重複列鏡射同一 `videoId` 的結果）。所以一個 videoId 失敗會讓 `import_status` 看到兩列 `syncResult:"failed"` 而 `sync.failed` 仍是 1——兩者都對，只是分母不同。`already_present` 不算 append 嘗試，所以只出現在 `import_status`。
 
-安全：provider 回傳的錯誤訊息屬外部輸入，落進 plan（sync_state）與 MCP output 前會先過 `redactSecretishText`，憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。同步 preflight 失敗記在 plan 的 `syncError`，只描述**該次 apply**；下一次沒傳 `syncPlaylist` 的呼叫會清掉它，`import_status` 不會把上次的失敗當成這次的結果。
+安全：provider 回傳的錯誤訊息屬外部輸入，落進 plan（sync_state）與任何 MCP output（包含 tool 丟出的 `error`）前都會過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`access_token=`／`client_secret=` 等 OAuth 指派、含前綴的變體如 `invalid_client_id=`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。這組較寬鬆的 OAuth 指派樣式**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。
+
+同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗仍是最後已知狀態。
 
 取消／逾時／暫時 provider 錯誤：apply 每 25 項 chunk flush 一次 plan；未完成項目保持 pending，回 `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。caller abort 另回 `action:"cancelled"`。
 

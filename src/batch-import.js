@@ -337,8 +337,9 @@ export function importStatus(library, args = {}) {
   // Item detail is returned as a bounded page — a caller that lost the apply
   // response (timeout/cancel) can reconcile per-item outcomes from here.
   const offset = Math.max(0, Math.floor(Number(args.offset)) || 0);
+  const rawLimit = Number(args.limit);
   const limit = Math.min(
-    Math.max(Math.floor(Number(args.limit)) || STATUS_DEFAULT_LIMIT, 1),
+    Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : STATUS_DEFAULT_LIMIT, 1),
     MAX_DETAIL_ITEMS,
   );
   const nextOffset = offset + limit < plan.items.length ? offset + limit : null;
@@ -534,8 +535,18 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
       let syncProcessed = 0;
       for (const item of plan.items) {
         if (signal?.aborted) { cancelled = true; break; }
-        if (!item.videoId || !syncable.has(item.videoId) || existing.has(item.videoId)
-          || attempted.has(item.videoId)) continue;
+        if (!item.videoId || !syncable.has(item.videoId)) continue;
+        if (existing.has(item.videoId)) {
+          // No add is attempted, but the row must still record THIS run's
+          // outcome. Otherwise an unknown_after_write (or a failure against a
+          // previous target) would stay on the plan forever and never clear.
+          if (item.syncResult !== "already_present" || item.syncPlaylistId !== syncTarget) {
+            item.syncResult = "already_present";
+            item.syncPlaylistId = syncTarget;
+          }
+          continue;
+        }
+        if (attempted.has(item.videoId)) continue;
         if (!["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(item.result)) continue;
         attempted.add(item.videoId);
         try {
@@ -570,12 +581,18 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
           syncByVideo.set(item.videoId, item);
         }
       }
+      let mirrored = 0;
       for (const item of plan.items) {
         const primary = item.inBatchDuplicate && item.videoId ? syncByVideo.get(item.videoId) : null;
         if (!primary) continue;
         if (item.syncResult === primary.syncResult && item.syncPlaylistId === primary.syncPlaylistId) continue;
         item.syncResult = primary.syncResult;
         item.syncPlaylistId = primary.syncPlaylistId;
+        // Flush on the same cadence as the add loop: a crash mid-batch must not
+        // leave primaries corrected while their duplicates still hold stale
+        // values from an earlier run.
+        mirrored += 1;
+        if (mirrored % CHUNK_SIZE === 0) flush();
       }
     }
     // Per-item sync outcomes live on the stored plan so a lost response can

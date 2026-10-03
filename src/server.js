@@ -19,7 +19,7 @@ import {
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
-import { openLibrary } from "./library.js";
+import { openLibrary, redactSecretishText } from "./library.js";
 import { classifyMusic } from "./classify.js";
 import { saveMusic } from "./save-music.js";
 import {
@@ -58,13 +58,17 @@ function jsonResult(value) {
 
 function errorResult(error) {
   const payload = {
-    error: error instanceof Error ? error.message : String(error),
+    // Provider errors embed provider-controlled text; a thrown error must not
+    // be able to carry a credential out through the MCP response.
+    error: redactSecretishText(error instanceof Error ? error.message : String(error)),
   };
   if (typeof error?.code === "string") payload.code = error.code;
   if (Number.isInteger(error?.status)) payload.status = error.status;
   if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
   if (typeof error?.operation === "string") payload.operation = error.operation;
-  if (typeof error?.nextStep === "string") payload.nextStep = error.nextStep;
+  if (typeof error?.nextStep === "string") {
+    payload.nextStep = redactSecretishText(error.nextStep);
+  }
   return {
     isError: true,
     content: [{ type: "text", text: JSON.stringify(payload) }],

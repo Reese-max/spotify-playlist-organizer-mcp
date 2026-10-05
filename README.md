@@ -343,7 +343,17 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 - **CRAP 目前只做報表不做閘**：`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看基線再定閘值。
 - Baseline（2026-09，spotify.js 不計）：行 ~85% / 分支 ~78% / 函數 ~93%；`src/core.js` mutation score 46.6%（268 mutants）。
 
-GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
+### GitHub Actions 驗證
+
+`.github/workflows/ci.yml` 會在每次 push 與 pull request 以 Ubuntu、Node.js 24 執行：
+
+1. `npm ci`
+2. `npm run lint`
+3. `npm run test:coverage`
+
+`npm run test:coverage` 使用與 `npm test` 相同的 `node --test` 完整回歸套件，因此會包含 `test/mcp-smoke.test.js`；coverage 閘門另外要求行 ≥ 80%、分支 ≥ 75%、函數 ≥ 88%。Job 設有 5 分鐘上限，權限只有 `contents: read`，不提供 YouTube／Spotify OAuth 或 API key；測試使用 stub，不會修改真實播放清單，也不應在輸出中出現 secrets。
+
+每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及 Windows、macOS 或其他 Node 版本，仍需另外驗證。Issue #5 的實際 run 證據（含隔離負向測試失敗→復原）見 [`.github/quality-audits/2026-10-01-ci-regression-validation.md`](.github/quality-audits/2026-10-01-ci-regression-validation.md)。
 
 ## 官方文件
 

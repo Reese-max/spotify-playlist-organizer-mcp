@@ -316,7 +316,10 @@ async function withYouTubeWriteLocks(youtube, keys, signal, operation) {
     const key = keys[index];
     const previous = byKey.get(key);
     let release;
-    const current = new Promise((resolve) => { release = resolve; });
+    const released = new Promise((resolve) => { release = resolve; });
+    // Cancelling a waiter releases its own slot promptly, but the queued
+    // ownership chain must still wait for the earlier writer to finish.
+    const current = previous ? previous.then(() => released) : released;
     byKey.set(key, current);
 
     try {
@@ -325,7 +328,9 @@ async function withYouTubeWriteLocks(youtube, keys, signal, operation) {
       return await run(index + 1);
     } finally {
       release();
-      if (byKey.get(key) === current) byKey.delete(key);
+      void current.then(() => {
+        if (byKey.get(key) === current) byKey.delete(key);
+      });
     }
   }
 

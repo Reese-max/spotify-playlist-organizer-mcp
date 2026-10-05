@@ -3,6 +3,7 @@ import { CredentialStore, credentialsFromTokenResponse } from "./credentials.js"
 import {
   awaitWithDeadline,
   fetchWithDeadline,
+  maxReadRetriesFromEnv,
   retryDelayMs,
   timeoutFromEnv,
   waitForRetry,
@@ -164,7 +165,7 @@ export class YouTubeClient {
     this.fetch = fetchImpl;
     this.refreshingUserToken = null;
     this.timeoutMs = timeoutFromEnv(this.env);
-    this.maxReadRetries = Math.min(Math.max(Number(this.env.PROVIDER_MAX_READ_RETRIES) || 1, 0), 2);
+    this.maxReadRetries = maxReadRetriesFromEnv(this.env);
     this.credentials = new CredentialStore(this.env);
     this.storedCredentials = undefined;
   }
@@ -344,12 +345,13 @@ export class YouTubeClient {
             : "Retry this YouTube operation after its quota is available; no fallback is guaranteed.";
           throw error;
         }
-        const detail = typeof data === "object"
-          ? data?.error?.message ?? data?.error?.errors?.[0]?.reason
-          : null;
         throw new YouTubeApiError(
           response.status,
-          "YouTube API request failed" + (detail ? ": " + detail : ""),
+          // Never echo provider-supplied text: error bodies may reflect
+          // request URLs (which carry the API key) or other secrets. The raw
+          // body stays on error.body for local debugging; tool output only
+          // carries this fixed message plus the typed code/status.
+          "YouTube API request failed for " + method + " " + path + " with status " + response.status + ".",
           data,
           response.status === 429 ? "HTTP_429" : response.status >= 500 ? "HTTP_5XX" : null,
         );

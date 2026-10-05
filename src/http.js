@@ -20,6 +20,12 @@ export function timeoutFromEnv(env = process.env, name = "PROVIDER_TIMEOUT_MS", 
   return Math.min(Math.max(Math.round(value), 1), 120_000);
 }
 
+export function maxReadRetriesFromEnv(env = process.env, name = "PROVIDER_MAX_READ_RETRIES", fallback = 1) {
+  const raw = Number(env[name]);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.min(Math.max(Math.floor(raw), 0), 2);
+}
+
 function cancelledError(operation, cause = null) {
   return new ProviderRequestError(
     REQUEST_CODES.CALLER_CANCELLED,

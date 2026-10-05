@@ -79,6 +79,7 @@ async function startYouTubeStub() {
     failNextAddItem: false,
     failSearchQuota: false,
     failSearchForbidden: false,
+    failPlaylistListWithSecret: false,
     delayAddMs: 0,
     hangSearch: false,
     rejectAddItem: null,
@@ -142,6 +143,14 @@ async function startYouTubeStub() {
       }
       if (req.method === "GET" && pathname === "/playlists") {
         const id = url.searchParams.get("id");
+        if (state.failPlaylistListWithSecret) {
+          return sendJson(403, {
+            error: {
+              message: "playlist listing denied for Bearer ya29.E2ELEAKEDLEAKEDLEAKED",
+              errors: [{ reason: "forbidden" }],
+            },
+          });
+        }
         const items = id
           ? [state.playlists.get(id)].filter(Boolean)
           : [...state.playlists.values()];
@@ -1112,6 +1121,27 @@ test("E2E: youtube_add_to_playlist returns FAILED_NO_CONFIRMED_EFFECT on a deter
     assert.equal(stub.counters.createPlaylist, 0);
     assert.equal(stub.counters.addItem, 1);
     assertNoSecrets(client.stdoutText, client.stderrText, apply.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: a credential echoed by the provider is redacted from a thrown tool error", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.failPlaylistListWithSecret = true;
+  const { child, client } = await startClient(directory, stub);
+
+  try {
+    // The provider error body carries a Bearer token; YouTubeApiError embeds
+    // that text in its message, and preview_import lets it propagate.
+    const preview = await client.callTool("preview_import", { playlist: "PLstub0001" });
+    assert.equal(preview.result.isError, true);
+    assert.doesNotMatch(preview.text, /ya29\./, "provider credential leaked into the tool error");
+    assert.match(preview.text, /\[REDACTED\]/);
+    assertNoSecrets(preview.text);
   } finally {
     await stopServer(child);
     await stub.close();

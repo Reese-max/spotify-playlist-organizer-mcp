@@ -7,10 +7,10 @@
 // sync_youtube explicitly.
 
 import { LibraryError } from "./library.js";
+import { APP_VERSION } from "./version.js";
 
 const BACKUP_FORMAT = "music-library-backup";
 const BACKUP_FORMAT_VERSION = 1;
-const APP_VERSION = "0.2.0";
 
 function parseBackup(input) {
   let backup = input;
@@ -69,7 +69,7 @@ export function exportLibrary(library, { format = "json" } = {}) {
       note: "Sync state is a point-in-time snapshot; provider playlists may have changed since export. Re-run sync_status / sync_youtube after restore.",
     },
     counts,
-    excluded: { secrets: rows.skippedSecrets },
+    excluded: { secrets: rows.skippedSecrets, malformedSyncState: rows.skippedMalformed },
     data: {
       tracks: rows.tracks,
       sources: rows.sources,

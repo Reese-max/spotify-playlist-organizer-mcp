@@ -1,6 +1,6 @@
 {
   "name": "spotify-playlist-organizer-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Provider-neutral MCP server for saving, classifying, and organizing YouTube and Spotify music links.",
   "type": "module",

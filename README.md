@@ -1,5 +1,7 @@
 # Music Playlist Organizer MCP
 
+目前產品版本：**v0.3.0**。MCP server、HTTP `/version` 與音樂庫備份的版本資訊都從 `package.json` 讀取。
+
 這是一個以 Node.js 撰寫的 MCP Server，讓你把找到的歌曲名稱或 YouTube／YouTube Music 連結，辨識後分類、去重，並加入自己的 YouTube 播放清單，之後可以直接回到 YouTube 觀看。
 
 目前以 YouTube 為主要 provider；Spotify 工具仍保留，但屬於選配的 legacy provider。
@@ -18,9 +20,10 @@ save_music({
 - `input` 接受歌曲名稱、YouTube／YouTube Music 影片連結或 11 字元 video ID；`videoId` 可指定候選影片。
 - `mode` 預設 `"preview"`（不寫入）；`"apply"` 才會實際寫入。
 - `syncToYouTube` 預設 `true`；preview 模式仍會預覽 YouTube 步驟，設 `false` 可只寫本機音樂庫。
+- `remoteDedupe` 預設 `"canonical"`：目標播放清單已有同一首歌時不再加入——判斷依據包含同一 canonical track 在 Library 裡的其他 YouTube 來源，以及 metadata canonicalize 出相同 key 的播放清單項目（例如 Official MV 與 Official Audio，即使 Library 沒見過該上傳）；命中時回報 `skipped_canonical_duplicate`。傳 `"source"` 則只擋相同 `videoId`，允許同一首歌的多個來源版本同列。live／cover／remix 等不同 version 的 canonical key 不同，不會被歌曲層級去重吞掉。receipt 以 `youtube.duplicateKind`（`exact_source`／`canonical_track`）與 `youtube.matchedVideoId` 明確指出遠端判斷依據。
 - `tags`／`category` 會成為使用者標籤（只增不覆寫既有使用者標籤）；`category` 同時決定目標播放清單名稱，`playlist` 可直接指定播放清單（名稱、URL 或 ID）。
 - 精確連結或 video ID 走 fast path；自由文字無法唯一綁定時回傳 `selection_required` 與 `candidates`，**不會**默默收藏搜尋第一名——請用回傳的 `videoId` 重新呼叫。
-- 本機音樂庫寫入與 YouTube 寫入是獨立步驟：一邊失敗時 receipt 會回報真實的 partial `writeState`（如 `UNKNOWN_AFTER_WRITE`、`PARTIAL_PLAYLIST_CREATED`）、`completedSteps` 與安全的 `nextStep`，不會把部分成功包成一般錯誤。重複收藏同一 `videoId` 是冪等的（`skipped_duplicate`）。
+- 本機音樂庫寫入與 YouTube 寫入是獨立步驟：一邊失敗時 receipt 會回報真實的 partial `writeState`（如 `UNKNOWN_AFTER_WRITE`、`PARTIAL_PLAYLIST_CREATED`）、`completedSteps` 與安全的 `nextStep`，不會把部分成功包成一般錯誤。重複收藏同一 `videoId` 是冪等的（`skipped_duplicate`）；同一首歌的不同來源在預設 `remoteDedupe: "canonical"` 下也冪等（`skipped_canonical_duplicate`）。
 
 若使用底層工具，對「歌曲名稱或搜尋文字」仍可採用兩階段流程：
 
@@ -92,7 +95,7 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
   - `pull`：把 `youtube_only` 影片以 `upsertTrack` 匯入音樂庫，走原有 dedup 與 playlist 精確 ID 關聯。
   - `reconcile`：只修本機狀態，不做 provider 寫入——同步 playlist 改名（不會新建重複 playlist）、標記 `unavailable` source、補 `unlinked` 關聯、用已讀回的項目解 `unknown_after_write` marker。
   - 寫入遇到 timeout/5xx/429 不盲目 retry：該筆標記 `unknown_after_write`，整體回 `reconciliation_required`。
-- `reconcile_track`：對單曲做 exact-ID read-back——逐 source 呼叫 `getVideo` 判斷 deleted/private（標 `unavailable`，**不刪** canonical track）、對 linked playlist 讀回 membership、`unknown_after_write` 解為 `synced`／`local_only`／`unavailable`。
+- `reconcile_track`：對單曲做 exact-ID read-back——只有明確 missing/deleted/private 才把 source 標 `unavailable`（**不刪** canonical track）；timeout、取消、429、5xx、網路或認證失敗會保留 source availability，將待重試的 `unknown` 狀態存入 Library（原有 `unknown_after_write` 也保留），重啟後仍可再次 reconcile。receipt 對每個失敗 lookup 回傳不含 provider 原始訊息的錯誤類型與安全下一步；確認成功後才解為 `synced`／`local_only`／`unavailable`。
 
 同步狀態存在 `sync.<trackId>` marker（JSON，無 secrets），與 `list_unsynced_music` 的 `provider_unavailable` 過濾相容。schema v3 在 `track_sources` 增加 `status` 欄位（`ok`／`unavailable`），source 失效不等於歌曲消失。
 
@@ -126,23 +129,31 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 ### 收藏 UI（`GET /`）
 
-`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
+`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge（含 playlist 內 canonical 重複的「different upload」標示）、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt——YouTube step 回 `skipped_canonical_duplicate` 時改顯示「Same song already in playlist」（同一首歌的其他上傳已在 playlist，library 改為連結既有 source），失敗步驟列出各自 error message；`UNKNOWN_AFTER_WRITE`/`PARTIAL_PLAYLIST_CREATED` 提供一鍵 `POST /api/reconcile` read-back 與安全 nextStep。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
 
 ## 批次匯入
 
 `src/batch-import.js` 把既有 YouTube / YouTube Music 收藏一次帶進音樂庫，不必逐首 `save_music`。管線：parse → resolve → canonicalize → dedupe → preview plan → apply → 可選 YouTube 同步。
 
-- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`）。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
-- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。
-- `import_status`：查已存批次的 `counts`＋`done`/`pending`。
+- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`retryable`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`，失敗項附 `error`）。精確 ID 的 provider 暫時錯誤標為 `retryable`；僅確認不存在、私人或刪除的影片標為 `unavailable`。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
+- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷或暫時失敗的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`retryable`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。`results` 與 `sync.results` 皆以 500 筆為上限，超過時標 `resultsTruncated`/`resultsTotal`；完整逐項紀錄（含逐項 sync 結果）存於 plan，用 `import_status` 分頁取回。
+- `import_status`：查已存批次的 `counts`＋`done`/`pending`，並以 `offset`/`limit`（預設 100、上限 500）回傳有界的逐項 `status`/`result`/`syncResult`/`error` 視窗，`itemsTruncated`/`nextOffset` 標示續頁。apply 回應因逾時或中斷遺失時，這裡是逐項對帳點。`syncResult` 有四個值：`added`（provider 已確認加入）、`already_present`（這次同步時該影片已在目標 playlist，未發出 append）、`failed`（確定失敗，可直接重試）、`unknown_after_write`（**寫入結果不明**——重試前必須先用 exact video ID 核對 playlist，否則會重複加入）。
 
-取消／逾時：apply 每 25 項 chunk flush 一次 plan；caller abort 後回 `action:"cancelled"` ＋ `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。
+計數口徑：`sync.results`／`sync.failed`／`sync.unknown` 是**每次實際 append 嘗試**（同一 `videoId` 只算一次，批內重複列不重複加），`import_status.items` 則是**逐 plan 列**（重複列鏡射同一 `videoId` 的結果）。所以一個 videoId 失敗會讓 `import_status` 看到兩列 `syncResult:"failed"` 而 `sync.failed` 仍是 1——兩者都對，只是分母不同。`already_present` 不算 append 嘗試，所以只出現在 `import_status`。
+
+安全：batch import 落進 plan（sync_state）的 provider 錯誤訊息與**呼叫端貼上的 `items` 文字**，以及 **MCP tool 丟出的 `error`／`nextStep` 與 HTTP facade 的錯誤 `message`**，都會先過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`GOCSPX-…`、含前綴的 OAuth 指派如 `invalid_client_id=`、JSON 引號形如 `"client_secret":"…"`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。因此 `preview_import`／`import_status` 回傳的 `input` 會與你貼的原文不同——那是刻意的。讀取端同樣會 redact，所以舊版本寫入、當時未經處理的 plan 也不會在 `import_status` 回吐憑證。這組較寬鬆的樣式（OAuth 指派與 `GOCSPX-…`）**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。`save_music`／`library_sync`／`library_query` 各自在**成功回應**內嵌的 `errorInfo` 尚未接上這層 redact，不受本保證涵蓋。
+
+同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**並自帶 `playlistId`（此欄位只有本版之後寫入的 plan 才有，早期 plan 沒有）：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗（連同它所屬的目標 playlist）仍是最後已知狀態。apply 回應的 `sync.error` 是同一份內容（`playlistId`/`code`/`message`/`status`）：preflight 失敗時它取代了舊版塞在 `results` 裡的 `sync_failed` 項目，所以**光看 `results` 會看不到這筆失敗**，要改看 `sync.error`。`import_status` 的逐項視窗另含 `syncPlaylistId`，指出該列最後一次同步寫進哪個 playlist。
+
+`import_music_batch` 回應裡的 `counts` 是用 `countBy(plan.items)` 重述 plan 的**解析狀態**（`new`/`exactDuplicate`/… ，preview 那一套），不是這次 apply 的**結果**分佈；逐項結果看 `results`，逐項 sync 結果看 `import_status`。已匯入的項目仍會留在 `counts.new`，因為它解析時就是 `new`。
+
+取消／逾時／暫時 provider 錯誤：apply 每 25 項 chunk flush 一次 plan；未完成項目保持 pending，回 `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。caller abort 另回 `action:"cancelled"`。
 
 ## 備份與還原
 
 `src/library-backup.js` 讓音樂庫可離線備份、搬移與還原，不綁死單一 SQLite 檔。
 
-- `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。匯出絕不含 OAuth token、refresh token、client secret、credential passphrase——`sync_state` 逐列過 secret-key 掃描，可疑列計入 `excluded.secrets` 而非輸出。
+- `export_library`：`format:"json"` 輸出 deterministic、versioned JSON——含 canonical tracks、YouTube sources/exact IDs、tags、playlist mappings、aliases、identity decisions、`sync_state` 快照（`meta.syncStateIsSnapshot` 明確標示不保證 provider 端仍相同）。`format:"csv"` 輸出每曲一列的可讀分析格式（**非**無損，restore 一律走 JSON）。`sync_state` 匯出會排除憑證形狀的 key／value，並將無法安全解析的結構化值另外列入 `excluded.malformedSyncState`；兩者分別計數。任意純文字仍可能包含無法辨識的秘密，因此憑證應只放在 credential store。
 - `restore_library`：預設 `preview` 回報 `insert`/`update`/`unchanged`/`conflict`/`unsupported` 計數，不寫任何東西；`apply` 在單一 transaction 內寫入（失敗整批 rollback，不會部分破壞）。同一 backup 重複 restore 冪等（`INSERT OR IGNORE`＋id/canonical_key 比對）；`schemaVersion` 不相容直接 fail safe。Restore **不觸發任何 provider 寫入**——還原後用 `sync_status`/`sync_youtube` 對帳。
 
 ## YouTube Playlist 管理
@@ -225,6 +236,15 @@ YOUTUBE_PLAYLIST_PREFIX=
 PROVIDER_TIMEOUT_MS=15000
 PROVIDER_MAX_READ_RETRIES=1
 ```
+
+### Provider 請求界線（timeout／取消）
+
+所有對 YouTube、Spotify、OAuth token 與 YouTube oEmbed 的 HTTP 請求都經過同一層 deadline/取消包裝（`src/http.js`）：
+
+- 每個請求與其回應 body 讀取都有有限 deadline：預設 15000ms，`PROVIDER_TIMEOUT_MS` 可調（1–120000ms 之間收敛）。
+- MCP `notifications/cancelled` 會把進行中的 provider 請求 abort；HTTP facade 在 client 斷線時同樣傳遞取消。caller 取消回 `CALLER_CANCELLED`，與 `TIMEOUT`、`NETWORK_ERROR`、`HTTP_429`、`HTTP_5XX`、`AUTH_REFRESH_FAILED` 分開分類。
+- GET 讀取遇到 429/5xx 依 Retry-After／指數退避做有限次重試（`PROVIDER_MAX_READ_RETRIES`，0–2）；寫入永不自動重試——timeout、取消或網路錯誤視為 ambiguous，回 `UNKNOWN_AFTER_WRITE`／`reconciliation_required`，由 read-back 對帳（見「YouTube ↔ 音樂庫同步」）。
+- timeout／cancel／error 輸出不含 access token、refresh token、client secret 或 authorization code；計時器與 abort listener 在請求結束後一律釋放。
 
 首次授權請執行：
 
@@ -331,7 +351,17 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 - **CRAP 目前只做報表不做閘**：`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看基線再定閘值。
 - Baseline（2026-09，spotify.js 不計）：行 ~85% / 分支 ~78% / 函數 ~93%；`src/core.js` mutation score 46.6%（268 mutants）。
 
-GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
+### GitHub Actions 驗證
+
+`.github/workflows/ci.yml` 會在每次 push 與 pull request 以 Ubuntu、Node.js 24 執行：
+
+1. `npm ci`
+2. `npm run lint`
+3. `npm run test:coverage`
+
+`npm run test:coverage` 使用與 `npm test` 相同的 `node --test` 完整回歸套件，因此會包含 `test/mcp-smoke.test.js`；coverage 閘門另外要求行 ≥ 80%、分支 ≥ 75%、函數 ≥ 88%。Job 設有 5 分鐘上限，權限只有 `contents: read`，不提供 YouTube／Spotify OAuth 或 API key；測試使用 stub，不會修改真實播放清單，也不應在輸出中出現 secrets。
+
+每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及 Windows、macOS 或其他 Node 版本，仍需另外驗證。Issue #5 的實際 run 證據（含隔離負向測試失敗→復原）見 [`.github/quality-audits/2026-10-01-ci-regression-validation.md`](.github/quality-audits/2026-10-01-ci-regression-validation.md)。
 
 ## 官方文件
 

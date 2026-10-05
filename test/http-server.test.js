@@ -4,9 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
 
 import { createHttpServer, createSessionStore } from "../src/http-server.js";
-import { openLibrary } from "../src/library.js";
+import { LibraryError, openLibrary } from "../src/library.js";
+import packageJson from "../package.json" with { type: "json" };
 
 const PL_A = "PL_HTTP_TEST_AAAA";
 const VID_A = "V_HTTP00001";
@@ -119,7 +121,7 @@ test("health and version are reachable without a session", async (t) => {
   assert.equal(version.status, 200);
   const body = await version.json();
   assert.equal(body.name, "music-playlist-organizer");
-  assert.ok(body.version);
+  assert.equal(body.version, packageJson.version);
 });
 
 test("unauthorized requests cannot read the library or write", async (t) => {
@@ -276,6 +278,63 @@ test("concurrent effectful requests are bounded with 429", async (t) => {
   assert.deepEqual(statuses, [200, 429]);
 });
 
+test("overlapping authenticated HTTP saves add one provider playlist row", async (t) => {
+  const youtube = new StubYouTube();
+  const { base, library } = await startServer(t, { youtube, maxConcurrentWrites: 2 });
+  youtube.playlists.set(PL_A, { id: PL_A, name: "HTTP PL" });
+  youtube.items.set(PL_A, []);
+  youtube.videos.set(VID_A, { id: VID_A, name: "Saved Song" });
+  const token = await session(base);
+
+  let releaseFirstRead;
+  let signalFirstRead;
+  let signalSecondVideo;
+  const firstRead = new Promise((resolve) => { signalFirstRead = resolve; });
+  const secondVideo = new Promise((resolve) => { signalSecondVideo = resolve; });
+  const firstReadGate = new Promise((resolve) => { releaseFirstRead = resolve; });
+  const originalGetVideo = youtube.getVideo.bind(youtube);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  let reads = 0;
+  let videos = 0;
+  youtube.getVideo = async (id) => {
+    const video = await originalGetVideo(id);
+    videos += 1;
+    if (videos === 2) signalSecondVideo();
+    return video;
+  };
+  youtube.getPlaylistItems = async (id) => {
+    reads += 1;
+    const snapshot = await originalGetItems(id);
+    if (reads === 1) {
+      signalFirstRead();
+      await firstReadGate;
+    }
+    return snapshot;
+  };
+
+  const payload = { input: "Saved Song", videoId: VID_A, mode: "apply", playlist: PL_A };
+  try {
+    const first = api(base, "POST", "/api/save_music", { token, body: payload });
+    await firstRead;
+    const second = api(base, "POST", "/api/save_music", { token, body: payload });
+    await secondVideo;
+    await setImmediate();
+    assert.equal(youtube.addCalls, 0);
+    releaseFirstRead();
+
+    const responses = await Promise.all([first, second]);
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    const receipts = await Promise.all(responses.map((response) => response.json()));
+    assert.deepEqual(receipts.map((receipt) => receipt.youtube.action).sort(), ["added", "skipped_duplicate"]);
+    assert.equal(youtube.addCalls, 1);
+    assert.equal(youtube.items.get(PL_A).length, 1);
+    assert.equal(library.trackCount(), 1);
+    assert.equal(reads, 2);
+  } finally {
+    releaseFirstRead();
+  }
+});
+
 test("responses never leak credential material and ignore client-supplied paths", async (t) => {
   const { base, youtube } = await startServer(t);
   youtube.videos.set("CANDIDATE01", { id: "CANDIDATE01", name: "Song A" });
@@ -359,4 +418,27 @@ test("main() boots a real server that serves health and session exchange", async
     await new Promise((resolve) => child.once("exit", resolve));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+test("the facade error chokepoint redacts a credential carried by a thrown error", async (t) => {
+  const { base, library } = await startServer(t);
+  const token = await session(base);
+  // A provider error bubbled up through the service layer reaches sendError;
+  // the facade must not emit the credential it carries.
+  library.listTracks = () => {
+    throw new LibraryError("PROVIDER_ERROR", "upstream said: Bearer ya29.notarealsecretvalue");
+  };
+
+  const response = await api(base, "GET", "/api/library/tracks", { token });
+  assert.equal(response.status, 400);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "PROVIDER_ERROR");
+  assert.doesNotMatch(payload.error.message, /ya29\./);
+  assert.match(payload.error.message, /\[REDACTED\]/);
+  // A non-secret message still comes through unchanged.
+  library.listTracks = () => {
+    throw new LibraryError("LIBRARY_INPUT_INVALID", "limit must be an integer");
+  };
+  const clean = await api(base, "GET", "/api/library/tracks", { token });
+  assert.equal((await clean.json()).error.message, "limit must be an integer");
 });

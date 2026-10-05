@@ -331,9 +331,184 @@ test("reconcile_track marks a deleted video source unavailable without deleting 
     const track = await seedTrack(library, { title: "Dead Source", videoId: "DELETEDVID0" });
     const result = await reconcileTrack({ library, youtube }, { trackId: track.id });
     assert.equal(result.sources[0].status, "unavailable");
+    assert.equal(result.sources[0].error.type, "missing");
+    assert.match(result.sources[0].nextStep, /source/i);
+    assert.equal(result.sync.state, "unavailable");
     assert.ok(library.getTrackById(track.id));
     assert.equal(library.source("youtube", "DELETEDVID0").status, "unavailable");
   } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("reconcile_track treats a private video response as confirmed unavailable", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube({
+    async getVideo(id) {
+      return { id, name: "Private video", status: "private" };
+    },
+  });
+  try {
+    const track = await seedTrack(library, { title: "Private Source", videoId: "V_PRIVATE001" });
+    const result = await reconcileTrack({ library, youtube }, { trackId: track.id });
+    assert.equal(result.sources[0].status, "unavailable");
+    assert.equal(result.sources[0].error.type, "private");
+    assert.equal(library.source("youtube", "V_PRIVATE001").status, "unavailable");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("reconcile_track keeps a private-only playlist placeholder unavailable", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube({
+    async getVideo(id) { return { id, status: "private" }; },
+  });
+  try {
+    const track = await seedTrack(library, {
+      title: "Private Placeholder", videoId: "V_PRIVATE002", playlistId: "PL_PRIVATE",
+    });
+    youtube.items.set("PL_PRIVATE", [
+      { playlistItemId: "PI_PRIVATE", videoId: "V_PRIVATE002", status: "private" },
+    ]);
+
+    const result = await reconcileTrack({ library, youtube }, { trackId: track.id });
+    assert.equal(result.presence[0].present, true);
+    assert.equal(result.sources[0].status, "unavailable");
+    assert.equal(result.sync.state, "unavailable");
+    const unsynced = library.listUnsynced({ reason: "provider_unavailable" });
+    assert.deepEqual(unsynced.items.map((item) => item.track.id), [track.id]);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("reconcile_track counts only available sources as playable playlist presence", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube({
+    async getVideo(id) { return { id, status: id === "V_PRIVATE003" ? "private" : "public" }; },
+  });
+  try {
+    const track = await seedTrack(library, {
+      title: "Mixed Sources", videoId: "V_PRIVATE003", playlistId: "PL_MIXED",
+    });
+    library.upsertTrack({ title: "Mixed Sources", source: youtubeSource("V_PUBLIC0003") });
+    youtube.items.set("PL_MIXED", [{ playlistItemId: "PI_PRIVATE", videoId: "V_PRIVATE003" }]);
+
+    const placeholderOnly = await reconcileTrack({ library, youtube }, { trackId: track.id });
+    assert.equal(placeholderOnly.sync.state, "local_only");
+
+    youtube.items.get("PL_MIXED").push({ playlistItemId: "PI_PUBLIC", videoId: "V_PUBLIC0003" });
+    const playable = await reconcileTrack({ library, youtube }, { trackId: track.id });
+    assert.equal(playable.sync.state, "synced");
+    assert.equal(playable.sync.videoId, "V_PUBLIC0003");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("reconcile_track treats a provider NOT_FOUND code as confirmed missing", async () => {
+  const { directory, library } = await tempLibrary();
+  const youtube = stubYouTube({
+    async getVideo() {
+      throw Object.assign(new Error("video absent"), { code: "NOT_FOUND" });
+    },
+  });
+  try {
+    const track = await seedTrack(library, { title: "Missing Source", videoId: "V_MISSING001" });
+    const result = await reconcileTrack({ library, youtube }, { trackId: track.id });
+    assert.equal(result.sources[0].status, "unavailable");
+    assert.equal(result.sources[0].error.type, "missing");
+    assert.equal(library.source("youtube", "V_MISSING001").status, "unavailable");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const [name, failure, type] of [
+  ["timeout", { code: "TIMEOUT" }, "timeout"],
+  ["cancellation", { code: "CALLER_CANCELLED" }, "cancelled"],
+  ["rate limit", { code: "HTTP_429", status: 429 }, "rate_limited"],
+  ["server error", { code: "HTTP_5XX", status: 503 }, "provider_error"],
+  ["network error", { code: "NETWORK_ERROR" }, "network_error"],
+  ["authentication error", { status: 401 }, "authentication"],
+]) {
+  test(`reconcile_track keeps all ${name} lookups retryable and preserves source truth`, async () => {
+    const { directory, library } = await tempLibrary();
+    const error = Object.assign(new Error("PRIVATE_PROVIDER_DETAIL"), failure);
+    const youtube = stubYouTube({
+      async getVideo(_id, { signal } = {}) {
+        if (type === "cancelled") assert.equal(signal?.aborted, true);
+        throw error;
+      },
+      async getPlaylistItems(_id, { signal } = {}) {
+        if (type === "cancelled") assert.equal(signal?.aborted, true);
+        throw error;
+      },
+    });
+    try {
+      const track = await seedTrack(library, {
+        title: `Transient ${name}`, videoId: "V_RETRY00001", playlistId: "PL_RETRY",
+      });
+      library.setSyncState(`sync.${track.id}`, {
+        state: "synced", playlistId: "PL_RETRY", videoId: "V_RETRY00001",
+      });
+
+      const controller = new AbortController();
+      if (type === "cancelled") controller.abort();
+      const result = await reconcileTrack(
+        { library, youtube }, { trackId: track.id }, { signal: controller.signal },
+      );
+      assert.equal(result.sources[0].status, "unknown");
+      assert.equal(result.sources[0].error.type, type);
+      assert.match(result.sources[0].nextStep, /reconcile_track/);
+      assert.equal(result.presence[0].error.type, type);
+      assert.match(result.presence[0].nextStep, /reconcile_track/);
+      assert.equal(result.sync.state, "unknown");
+      assert.equal(result.sync.lastKnownState, "synced");
+      assert.equal(library.source("youtube", "V_RETRY00001").status, "ok");
+      assert.equal(JSON.parse(library.getSyncState(`sync.${track.id}`)).state, "unknown");
+      assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PROVIDER_DETAIL/);
+    } finally {
+      library.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("reconcile_track persists unknown across restart and resolves it on a later read", async () => {
+  const { directory, library } = await tempLibrary();
+  const dbPath = path.join(directory, "library.sqlite");
+  const track = await seedTrack(library, {
+    title: "Restart Retry", videoId: "V_RESTART01", playlistId: "PL_RESTART",
+  });
+  const failing = stubYouTube({
+    async getVideo() { throw Object.assign(new Error("timeout"), { code: "TIMEOUT" }); },
+    async getPlaylistItems() { throw Object.assign(new Error("timeout"), { code: "TIMEOUT" }); },
+  });
+  let reopened;
+  try {
+    const uncertain = await reconcileTrack({ library, youtube: failing }, { trackId: track.id });
+    assert.equal(uncertain.sync.state, "unknown");
+    library.close();
+    reopened = openLibrary(dbPath);
+    assert.equal(JSON.parse(reopened.getSyncState(`sync.${track.id}`)).state, "unknown");
+    const status = await syncStatus({ library: reopened, youtube: stubYouTube() });
+    assert.equal(status.tracks.find((entry) => entry.trackId === track.id).status, "unknown");
+
+    const recovered = stubYouTube();
+    recovered.items.set("PL_RESTART", [{ playlistItemId: "PI_RESTART", videoId: "V_RESTART01" }]);
+    const resolved = await reconcileTrack({ library: reopened, youtube: recovered }, { trackId: track.id });
+    assert.equal(resolved.resolvedFrom, "unknown");
+    assert.equal(resolved.sync.state, "synced");
+    assert.equal(JSON.parse(reopened.getSyncState(`sync.${track.id}`)).state, "synced");
+  } finally {
+    reopened?.close();
     library.close();
     await rm(directory, { recursive: true, force: true });
   }

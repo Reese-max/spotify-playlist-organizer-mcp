@@ -14,6 +14,7 @@ import {
 } from "../src/classify.js";
 import { DIMENSIONS, TAXONOMY_VERSION } from "../src/taxonomy.js";
 import { openLibrary } from "../src/library.js";
+import { reclassifyMusic } from "../src/library-query.js";
 
 async function tempLibrary() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "music-classify-"));
@@ -285,6 +286,136 @@ test("a new canonical source keeps the existing track's user classification", as
     const stored = JSON.parse(library.getSyncState(classificationSyncKey(saved.trackId)));
     assert.equal(stored.dimensions.genre[0].value, "j-pop");
     assert.equal(stored.dimensions.genre[0].source, "user");
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("official MV and audio merge without replacing user genre, mood, or language", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const first = await classifyMusic({
+      title: "Luminous (Official MV)", artist: "Example Artist",
+      userClassification: { genre: "j-pop", mood: "nostalgic", language: "ja" },
+    });
+    const saved = persistClassification(library, {
+      title: "Luminous (Official MV)", artist: "Example Artist",
+      source: { provider: "youtube", sourceId: "V_LUMINOUS1" },
+    }, first);
+    const automatic = await classifyMusic({
+      title: "Luminous (Official Audio)", artist: "Example Artist",
+      description: "rock sad English workout 1992",
+    });
+    assert.equal(automatic.provenance.genre, "rule");
+    assert.equal(automatic.provenance.activity, "rule");
+
+    const second = persistClassification(library, {
+      title: "Luminous (Official Audio)", artist: "Example Artist",
+      source: { provider: "youtube", sourceId: "V_LUMINOUS2" },
+    }, automatic);
+    assert.equal(second.identity.level, "SAME_CANONICAL_TRACK");
+    assert.equal(second.trackId, saved.trackId);
+    assert.equal(library.trackCount(), 1);
+    assert.equal(library.listTrackSources(saved.trackId).length, 2);
+    for (const [dimension, value] of Object.entries({
+      genre: "j-pop", mood: "nostalgic", language: "ja",
+    })) {
+      assert.equal(second.track[dimension], value);
+      assert.deepEqual(
+        second.classification.dimensions[dimension].map((entry) => [entry.value, entry.source]),
+        [[value, "user"]],
+      );
+      assert.equal(second.classification.provenance[dimension], "user");
+      assert.ok(second.preserved.includes(dimension));
+    }
+    assert.equal(second.track.activity, "workout");
+    assert.equal(second.classification.provenance.activity, "rule");
+    assert.equal(second.track.era, "1990s");
+
+    const reclassified = await reclassifyMusic(library, { trackId: saved.trackId });
+    for (const dimension of ["genre", "mood", "language"]) {
+      assert.equal(reclassified.after.provenance[dimension], "user");
+      assert.equal(library.getTrackById(saved.trackId)[dimension], second.track[dimension]);
+    }
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a canonical alias attaches a new source without losing target user values", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const user = await classifyMusic({
+      title: "Alias Song (Official Video)", artist: "Example Artist",
+      userClassification: { genre: "j-pop", mood: "nostalgic", language: "ja" },
+    });
+    const original = persistClassification(library, {
+      title: "Alias Song (Official Video)", artist: "Example Artist",
+      source: { provider: "youtube", sourceId: "V_ALIAS00001" },
+    }, user);
+    const live = library.upsertTrack({
+      title: "Alias Song (Live)", artist: "Example Artist",
+      source: { provider: "youtube", sourceId: "V_ALIASLIVE1" },
+    });
+    assert.notEqual(live.track.id, original.trackId);
+    library.mergeTracks(original.trackId, live.track.id);
+
+    const automatic = await classifyMusic({
+      title: "Alias Song (Live)", artist: "Example Artist",
+      description: "rock sad English workout",
+    });
+    const attached = persistClassification(library, {
+      title: "Alias Song (Live)", artist: "Example Artist",
+      source: { provider: "youtube", sourceId: "V_ALIASLIVE2" },
+    }, automatic);
+    assert.equal(attached.identity.level, "SAME_CANONICAL_TRACK");
+    assert.equal(attached.identity.matchedBy, "canonical_alias");
+    assert.equal(attached.trackId, original.trackId);
+    assert.equal(library.trackCount(), 1);
+    for (const [dimension, value] of Object.entries({
+      genre: "j-pop", mood: "nostalgic", language: "ja",
+    })) {
+      assert.equal(attached.track[dimension], value);
+      assert.equal(attached.classification.dimensions[dimension][0].source, "user");
+    }
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("unmerged live and remix versions keep separate classifications", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const studio = persistClassification(library, {
+      title: "Separate Song (Official Video)", artist: "Example Artist",
+      source: { provider: "youtube", sourceId: "V_STUDIO0001" },
+    }, await classifyMusic({
+      title: "Separate Song (Official Video)", artist: "Example Artist",
+      userClassification: { genre: "j-pop" },
+    }));
+    for (const [version, id, genre] of [
+      ["Live", "V_LIVE000001", "rock"],
+      ["Remix", "V_REMIX00001", "edm"],
+    ]) {
+      const title = `Separate Song (${version})`;
+      const other = persistClassification(library, {
+        title, artist: "Example Artist",
+        source: { provider: "youtube", sourceId: id },
+      }, await classifyMusic({ title, artist: "Example Artist", description: genre }));
+      assert.notEqual(other.trackId, studio.trackId);
+      assert.equal(other.classification.provenance.genre, "rule");
+      assert.equal(other.track.genre, genre);
+    }
+    assert.equal(library.trackCount(), 3);
+    assert.equal(library.getTrackById(studio.trackId).genre, "j-pop");
+    const stored = JSON.parse(library.getSyncState(classificationSyncKey(studio.trackId)));
+    assert.equal(stored.provenance.genre, "user");
   } finally {
     library.close();
     await rm(directory, { recursive: true, force: true });

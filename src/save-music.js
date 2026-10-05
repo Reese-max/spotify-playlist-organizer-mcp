@@ -7,6 +7,7 @@
 // whole call into a generic error.
 
 import { classifyTrack, DEFAULT_RULES, parseLink } from "./core.js";
+import { ProviderRequestError, REQUEST_CODES } from "./http.js";
 import {
   classificationToTrackFields,
   classifyMusic,
@@ -121,6 +122,10 @@ async function runYouTubeStep(youtube, {
   mode,
   signal,
   completedSteps,
+  remoteDedupe = "canonical",
+  siblingVideoIds = [],
+  canonicalKey = null,
+  siblingSourcesError = null,
 }) {
   let loaded;
   try {
@@ -140,27 +145,64 @@ async function runYouTubeStep(youtube, {
   }
 
   const targetName = loaded.details?.name ?? targetReference;
-  const duplicate = loaded.id
+  const exactDuplicate = loaded.id
     ? loaded.items.find((item) => item.id === video.id) ?? null
     : null;
+  // Canonical policy: the same song may already sit in the playlist under a
+  // different YouTube upload (e.g. Official MV vs Official Audio). Membership
+  // is proven two ways: a sibling source of the matched canonical track, or a
+  // playlist item whose metadata canonicalizes to the same key — the latter
+  // also catches uploads the local library has never seen. The exact-source
+  // policy only skips this videoId.
+  const canonicalDuplicate = remoteDedupe === "canonical" && !exactDuplicate
+    ? loaded.items.find((item) => (
+      siblingVideoIds.includes(item.id)
+      || (canonicalKey != null
+        && canonicalizeSource({ title: item.name, channelTitle: item.channel }).canonicalKey
+          === canonicalKey)
+    )) ?? null
+    : null;
+  const duplicate = exactDuplicate ?? canonicalDuplicate;
+  const duplicateKind = exactDuplicate
+    ? "exact_source"
+    : canonicalDuplicate
+      ? "canonical_track"
+      : null;
   const base = {
     enabled: true,
     videoId: video.id,
     playlist: playlistInfo(loaded, targetName),
     playlistAction: loaded.id ? "use_existing" : "create_if_missing",
+    dedupePolicy: remoteDedupe,
     duplicate: Boolean(duplicate),
+    duplicateKind,
+    matchedVideoId: duplicate?.id ?? null,
     existingItem: duplicate,
+    ...(siblingSourcesError ? { dedupeError: siblingSourcesError } : {}),
   };
 
   if (mode === "preview") {
     return {
       ...base,
-      action: duplicate ? "would_skip_duplicate" : "would_add",
+      action: duplicate
+        ? duplicateKind === "canonical_track"
+          ? "would_skip_canonical_duplicate"
+          : "would_skip_duplicate"
+        : "would_add",
       writeState: "PREVIEW",
     };
   }
 
   if (duplicate) {
+    if (duplicateKind === "canonical_track") {
+      completedSteps.push("youtube_canonical_already_present");
+      return {
+        ...base,
+        action: "skipped_canonical_duplicate",
+        writeState: "ALREADY_PRESENT",
+        nextStep: "The playlist already contains another source of the same canonical track; re-run with remoteDedupe \"source\" to add this video anyway.",
+      };
+    }
     completedSteps.push("youtube_already_present");
     return { ...base, action: "skipped_duplicate", writeState: "ALREADY_PRESENT" };
   }
@@ -214,10 +256,92 @@ function normalizeTags(tags) {
   )];
 }
 
+// One client can receive overlapping stdio or HTTP saves. Hold each provider
+// read-before-write sequence by its overlapping identities: exact video,
+// canonical song, and playlist name when creation may be needed. Acquiring
+// keys in sorted order prevents cycles between different combinations.
+const youtubeWriteLocks = new WeakMap();
+
+function writeLockKeys({ videoId, canonicalKey, remoteDedupe, targetReference }) {
+  const keys = [`video:${videoId}`];
+  if (remoteDedupe === "canonical" && canonicalKey) {
+    keys.push(`canonical:${canonicalKey}`);
+  }
+  try {
+    const parsed = parseYouTubePlaylistReference(targetReference);
+    if (!parsed.id && parsed.name) {
+      keys.push(`playlist-name:${parsed.name.trim().toLocaleLowerCase()}`);
+    }
+  } catch {
+    // runYouTubeStep reports invalid playlist references in its normal receipt.
+  }
+  return keys.sort();
+}
+
+function callerCancelled(operation) {
+  return new ProviderRequestError(
+    REQUEST_CODES.CALLER_CANCELLED,
+    operation + " was cancelled by the caller.",
+    { retryable: true },
+  );
+}
+
+// Waits on the previous write holding a key, but wakes promptly on caller
+// cancellation with the typed CALLER_CANCELLED outcome instead of a bare
+// AbortError once the lock finally frees.
+function waitForWriteLock(previous, signal) {
+  if (signal?.aborted) return Promise.reject(callerCancelled("YouTube write"));
+  if (!signal) return previous;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(callerCancelled("YouTube write"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const settle = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    // The lock promise is resolved unconditionally by release().
+    previous.then(settle, settle);
+  });
+}
+
+async function withYouTubeWriteLocks(youtube, keys, signal, operation) {
+  let byKey = youtubeWriteLocks.get(youtube);
+  if (!byKey) {
+    byKey = new Map();
+    youtubeWriteLocks.set(youtube, byKey);
+  }
+
+  async function run(index) {
+    if (index === keys.length) return operation();
+    const key = keys[index];
+    const previous = byKey.get(key);
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    // Cancelling a waiter releases its own slot promptly, but the queued
+    // ownership chain must still wait for the earlier writer to finish.
+    const current = previous ? previous.then(() => released) : released;
+    byKey.set(key, current);
+
+    try {
+      if (previous) await waitForWriteLock(previous, signal);
+      if (signal?.aborted) throw callerCancelled("YouTube write");
+      return await run(index + 1);
+    } finally {
+      release();
+      void current.then(() => {
+        if (byKey.get(key) === current) byKey.delete(key);
+      });
+    }
+  }
+
+  return run(0);
+}
+
 export async function saveMusic({ youtube, library }, args = {}, { signal } = {}) {
   const input = args.input;
   const mode = args.mode === "apply" ? "apply" : "preview";
   const syncToYouTube = args.syncToYouTube !== false;
+  const remoteDedupe = args.remoteDedupe === "source" ? "source" : "canonical";
   const category = typeof args.category === "string" && args.category.trim()
     ? args.category.trim()
     : null;
@@ -285,16 +409,51 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     : generatedName;
 
   const completedSteps = [];
-  const youtubeStep = syncToYouTube
-    ? await runYouTubeStep(youtube, {
-      video,
-      targetReference,
-      selectedCategory,
-      mode,
-      signal,
-      completedSteps,
-    })
-    : { enabled: false, action: "disabled", writeState: "NOT_REQUESTED" };
+  // When the input canonicalizes onto an existing track, that track's other
+  // YouTube sources may already represent the song in the target playlist.
+  // Under the default "canonical" remote dedupe policy both those sibling
+  // sources and same-canonical-key playlist items count as membership;
+  // "source" only skips the same videoId.
+  let siblingVideoIds = [];
+  let siblingSourcesError = null;
+  if (syncToYouTube && remoteDedupe === "canonical" && identityDecision?.matchedTrackId != null) {
+    try {
+      siblingVideoIds = library
+        .listTrackSources(identityDecision.matchedTrackId)
+        .filter((source) => source.provider === "youtube" && source.sourceId !== video.id)
+        .map((source) => source.sourceId);
+    } catch (error) {
+      // A failed source lookup must not silently weaken the dedupe decision —
+      // remote canonical-key evidence still applies, and the receipt reports
+      // the degraded lookup.
+      siblingSourcesError = {
+        code: error?.code ?? "DEDUPE_LOOKUP_FAILED",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  const runProviderStep = () => runYouTubeStep(youtube, {
+    video,
+    targetReference,
+    selectedCategory,
+    mode,
+    signal,
+    completedSteps,
+    remoteDedupe,
+    siblingVideoIds,
+    canonicalKey: canonicalData.canonicalKey,
+    siblingSourcesError,
+  });
+  const youtubeStep = !syncToYouTube
+    ? { enabled: false, action: "disabled", writeState: "NOT_REQUESTED" }
+    : mode === "apply"
+      ? await withYouTubeWriteLocks(youtube, writeLockKeys({
+        videoId: video.id,
+        canonicalKey: canonicalData.canonicalKey,
+        remoteDedupe,
+        targetReference,
+      }), signal, runProviderStep)
+      : await runProviderStep();
 
   let libraryStep;
   let identity = identityDecision;
@@ -346,10 +505,38 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     }
   }
 
+  if (mode === "apply" && libraryStep.writeState === "SAVED"
+    && youtubeStep.action === "skipped_canonical_duplicate") {
+    const matched = youtubeStep.existingItem;
+    try {
+      const linked = library.attachCanonicalSource(libraryStep.trackId, {
+        provider: "youtube",
+        sourceId: youtubeStep.matchedVideoId,
+        title: matched?.name,
+        channelTitle: matched?.channel,
+        url: matched?.url ?? youtubeVideoUrl(youtubeStep.matchedVideoId),
+      });
+      libraryStep.remoteSource = {
+        action: linked.action,
+        sourceId: youtubeStep.matchedVideoId,
+      };
+      if (linked.action === "linked") completedSteps.push("canonical_remote_source_linked");
+    } catch (error) {
+      libraryStep.remoteSource = {
+        action: "failed",
+        sourceId: youtubeStep.matchedVideoId,
+        error: errorInfo(error),
+      };
+    }
+  }
+
   const libraryOk = libraryStep.writeState === "SAVED";
+  const sourceLinkFailed = libraryStep.remoteSource?.action === "failed";
+  const youtubeSkipped = ["skipped_duplicate", "skipped_canonical_duplicate"]
+    .includes(youtubeStep.action);
   const youtubeOk = !syncToYouTube
     || youtubeStep.action === "added"
-    || youtubeStep.action === "skipped_duplicate";
+    || youtubeSkipped;
   const youtubeAmbiguous = syncToYouTube
     && ["UNKNOWN_AFTER_WRITE", "PARTIAL_PLAYLIST_CREATED"].includes(youtubeStep.writeState);
 
@@ -358,8 +545,10 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     action = identity?.level === "EXACT_SOURCE_DUPLICATE" && youtubeStep.duplicate
       ? "would_skip_duplicate"
       : "would_save";
+  } else if (sourceLinkFailed) {
+    action = "reconciliation_required";
   } else if (libraryOk && youtubeOk) {
-    action = youtubeStep.action === "skipped_duplicate" && identity?.level === "EXACT_SOURCE_DUPLICATE"
+    action = youtubeSkipped && libraryStep.action === "existing"
       ? "skipped_duplicate"
       : "saved";
   } else if (youtubeAmbiguous) {
@@ -375,6 +564,8 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     syncState = "preview";
   } else if (!syncToYouTube) {
     syncState = "not_requested";
+  } else if (sourceLinkFailed) {
+    syncState = "partial";
   } else if (youtubeOk && libraryOk) {
     syncState = "synced";
   } else if (youtubeAmbiguous) {
@@ -394,6 +585,8 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
     if (!libraryOk) {
       nextStep += " The local library write also failed; re-run after reconciling YouTube.";
     }
+  } else if (sourceLinkFailed) {
+    nextStep = "The playlist contains the matched video, but its source could not be linked to the local track. Inspect the exact video ID and track identity, then reconcile before pushing library changes to this playlist.";
   } else if (mode === "apply" && !libraryOk) {
     nextStep = "The local library write failed; re-run the same save_music call after fixing the library error — the YouTube side is deduplicated and the retry is idempotent.";
   } else if (mode === "apply" && syncToYouTube && !youtubeOk) {
@@ -401,8 +594,12 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
       ?? "The YouTube write failed before any confirmed change; the track is saved in the local library — fix the reported error and re-run the same call.";
   }
   if (identity?.level === "POSSIBLE_MATCH" && action !== "reconciliation_required") {
+    const stored = mode === "preview" ? "would be stored" : "was stored";
     nextStep = (nextStep ? nextStep + " " : "")
-      + "The track was stored as a possible duplicate (needs_review); inspect the identity review queue and merge or split if it is the same song.";
+      + `The track ${stored} as a possible duplicate (needs_review); inspect the identity review queue and merge or split if it is the same song.`;
+  }
+  if (!nextStep && youtubeStep.action === "skipped_canonical_duplicate") {
+    nextStep = youtubeStep.nextStep;
   }
 
   return {
@@ -430,6 +627,7 @@ export async function saveMusic({ youtube, library }, args = {}, { signal } = {}
       level: identity?.level ?? "UNKNOWN",
       state: identity?.state ?? "unknown",
       youtubePlaylistItem: youtubeStep.duplicate ?? false,
+      youtubePlaylistItemKind: youtubeStep.duplicateKind ?? null,
     },
     syncState,
     completedSteps,

@@ -15,10 +15,11 @@ import { loadEnvFile } from "./env.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "./spotify.js";
 import {
   parseYouTubePlaylistReference,
+  parseYouTubeVideoReference,
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
-import { openLibrary } from "./library.js";
+import { openLibrary, redactSecretishText } from "./library.js";
 import { classifyMusic } from "./classify.js";
 import { saveMusic } from "./save-music.js";
 import {
@@ -35,6 +36,7 @@ import {
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
 import { exportLibrary, restoreLibrary } from "./library-backup.js";
+import { APP_VERSION } from "./version.js";
 import {
   listIdentityReviews,
   mergeMusicTracks,
@@ -56,11 +58,17 @@ function jsonResult(value) {
 
 function errorResult(error) {
   const payload = {
-    error: error instanceof Error ? error.message : String(error),
+    // Provider errors embed provider-controlled text; a thrown error must not
+    // be able to carry a credential out through the MCP response.
+    error: redactSecretishText(error instanceof Error ? error.message : String(error)),
   };
   if (typeof error?.code === "string") payload.code = error.code;
   if (Number.isInteger(error?.status)) payload.status = error.status;
   if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
+  if (typeof error?.operation === "string") payload.operation = error.operation;
+  if (typeof error?.nextStep === "string") {
+    payload.nextStep = redactSecretishText(error.nextStep);
+  }
   return {
     isError: true,
     content: [{ type: "text", text: JSON.stringify(payload) }],
@@ -69,8 +77,14 @@ function errorResult(error) {
 
 function safeTool(handler) {
   return async (args, extra) => {
+    // The SDK exposes per-request cancellation at ctx.mcpReq.signal (aborted
+    // by notifications/cancelled); handlers read the conventional
+    // extra.signal, so forward it when the transport doesn't flatten it.
+    const forwarded = extra?.signal || !extra?.mcpReq?.signal
+      ? extra
+      : { ...extra, signal: extra.mcpReq.signal };
     try {
-      return jsonResult(await handler(args, extra));
+      return jsonResult(await handler(args, forwarded));
     } catch (error) {
       return errorResult(error);
     }
@@ -143,7 +157,9 @@ async function resolveYouTubeMatch(youtubeClient, input, { limit = 5, regionCode
       match: await youtubeClient.getVideo(videoId, { signal }),
     };
   }
-  const source = parseLink(input);
+  const source = /^[A-Za-z0-9_-]{11}$/.test(input.trim())
+    ? parseYouTubeVideoReference(input)
+    : parseLink(input);
   if (source.kind === "youtube-video") {
     return { source, match: await youtubeClient.getVideo(source.id, { signal }) };
   }
@@ -175,7 +191,7 @@ export function createServer(library) {
   // configuration (credential file path, timeouts, retry bounds) sees it.
   const client = new SpotifyClient();
   const youtubeClient = new YouTubeClient();
-  const server = new McpServer({ name: "music-playlist-organizer", version: "0.2.0" });
+  const server = new McpServer({ name: "music-playlist-organizer", version: APP_VERSION });
 
   server.registerTool(
     "library_status",
@@ -275,6 +291,7 @@ export function createServer(library) {
             ...(await client.searchTracks(query, { limit: 5, market, signal: extra?.signal })),
           });
         } catch (error) {
+          if (error?.code === "CALLER_CANCELLED") throw error;
           results.push({ input, error: error instanceof Error ? error.message : String(error) });
         }
       }
@@ -448,6 +465,8 @@ export function createServer(library) {
             error: error instanceof Error ? error.message : String(error),
             ...(typeof error?.code === "string" ? { code: error.code } : {}),
             ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
+            ...(typeof error?.operation === "string" ? { operation: error.operation } : {}),
+            ...(typeof error?.nextStep === "string" ? { nextStep: error.nextStep } : {}),
           });
         }
       }
@@ -729,6 +748,7 @@ export function createServer(library) {
         playlist: z.string().min(1).optional(),
         mode: z.enum(["preview", "apply"]).default("preview"),
         syncToYouTube: z.boolean().default(true),
+        remoteDedupe: z.enum(["canonical", "source"]).default("canonical"),
       }),
     },
     safeTool((args, extra) => (
@@ -981,7 +1001,7 @@ export function createServer(library) {
   server.registerTool(
     "reconcile_track",
     {
-      description: "Exact-ID read-back for one library track (or youtube videoId): checks each source against the provider, marks deleted/private videos unavailable without deleting the canonical track, and resolves unknown_after_write markers to synced/local_only/unavailable.",
+      description: "Exact-ID read-back for one library track (or youtube videoId): marks only confirmed missing/private sources unavailable; transient read failures keep source availability and a retryable marker, with typed failures and safe next steps in the receipt.",
       inputSchema: z.object({
         trackId: z.number().int().min(1).optional(),
         videoId: z.string().regex(/^[A-Za-z0-9_-]{11}$/).optional(),
@@ -996,7 +1016,7 @@ export function createServer(library) {
   server.registerTool(
     "preview_import",
     {
-      description: "Resolve a mixed batch of YouTube/YouTube Music video URLs, video IDs, free-text lines, and/or one playlist URL/ID into an import plan (new/exact_duplicate/canonical_duplicate/unresolved/unavailable). Writes nothing; stores the plan under a batchId for import_music_batch.",
+      description: "Resolve a mixed batch of YouTube/YouTube Music video URLs, video IDs, free-text lines, and/or one playlist URL/ID into an import plan (new/exact_duplicate/canonical_duplicate/unresolved/retryable/unavailable). Transient provider failures are retryable; only confirmed missing, private, or deleted videos are unavailable. Writes nothing; stores the plan under a batchId for import_music_batch.",
       inputSchema: z.object({
         items: z.array(z.string().min(1)).max(2000).optional(),
         playlist: z.string().min(1).optional(),
@@ -1011,7 +1031,7 @@ export function createServer(library) {
   server.registerTool(
     "import_music_batch",
     {
-      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch). Only resolved items are written; per-item results are returned and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly.",
+      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch or retry transient provider failures). Only resolved items are written; per-item results distinguish retryable from unavailable, and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly. Receipts are bounded at 500 entries; page the full per-item record through import_status.",
       inputSchema: z.object({
         items: z.array(z.string().min(1)).max(2000).optional(),
         playlist: z.string().min(1).optional(),
@@ -1028,9 +1048,11 @@ export function createServer(library) {
   server.registerTool(
     "import_status",
     {
-      description: "Read-only progress of a stored import batch: total counts plus done/pending item tallies.",
+      description: "Read-only progress of a stored import batch: total counts, done/pending tallies, and a bounded page of per-item detail (status/result/sync outcome/error). Use offset+limit to page through large batches; nextOffset continues the window. This is the reconciliation point when an apply response was lost to timeout or cancellation.",
       inputSchema: z.object({
         batchId: z.string().min(1),
+        offset: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(500).optional(),
       }),
     },
     safeTool((args) => importStatus(library, args)),

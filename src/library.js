@@ -198,6 +198,41 @@ function sourceRow(row) {
 }
 
 const SECRETISH_KEY = /token|secret|passphrase|password|credential|oauth|api[-_]?key|authorization/i;
+const SECRETISH_VALUE = /\bBearer\s+\S+|\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}|\bya29\.[A-Za-z0-9._-]{8,}|\bAIza[0-9A-Za-z_-]{20,}|\b1\/\/[A-Za-z0-9._-]{8,}/i;
+// OAuth credential *assignments* are too common in innocent text to gate a
+// whole sync_state row on ("?client_id=12345" in a pasted URL would drop the
+// row), so they only drive redaction, never the exporter's drop decision.
+// No `\b` before the names: `invalid_client_id=` is the same secret shape.
+// Quotes are optional so a provider echoing a parsed JSON body is covered too.
+// GOCSPX- belongs here rather than in SECRETISH_VALUE for the same reason: its
+// tail is ordinary word characters, so "GOCSPX-Analysis Live" must not gate a
+// row. Redaction-only means a false positive costs one mangled diagnostic
+// string, never a dropped plan. The lookbehind keeps the delimiter out of the
+// match so surrounding diagnostic text survives; a quoted value may contain "&"
+// while an unquoted one stops at it, so "?a=1&part=x" keeps its tail.
+const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|client_secret|client_id)\s*["']?\s*[=:]\s*(?:"[^"]*"?|'[^']*'?|[^\s"'&,;}\]]+)|\bGOCSPX-[A-Za-z0-9_-]{8,}|\bSID=["']?[^\s"'&,;}\]]+/gi;
+
+// Untrusted provider text (error messages, upstream payloads) must not carry
+// credential-shaped substrings into the database or into MCP output.
+export function redactSecretishText(value) {
+  if (typeof value !== "string") return value;
+  // `.test()` on a /g regex is stateful, so gate on the non-global instance
+  // and only ever call `.replace()` on the global one.
+  if (!SECRETISH_VALUE.test(value)) {
+    SECRETISH_ASSIGNMENT.lastIndex = 0;
+    if (!SECRETISH_ASSIGNMENT.test(value)) return value;
+  }
+  return value
+    .replace(SECRETISH_ASSIGNMENT, "[REDACTED]")
+    .replace(new RegExp(SECRETISH_VALUE.source, "gi"), "[REDACTED]");
+}
+
+function containsSecretishContent(value) {
+  if (typeof value === "string") return SECRETISH_VALUE.test(value);
+  if (Array.isArray(value)) return value.some(containsSecretishContent);
+  if (value && typeof value === "object") return Object.values(value).some(containsSecretishContent);
+  return false;
+}
 
 function assertNoSecretKeys(value) {
   if (Array.isArray(value)) {
@@ -638,6 +673,63 @@ export class MusicLibrary {
       writeState: "SAVED",
       identity,
     };
+  }
+
+  attachCanonicalSource(trackId, input) {
+    this.assertOpen();
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "A source object is required.");
+    }
+    assertNoSecretKeys(input);
+    const provider = optionalText(input.provider, "source.provider");
+    const sourceId = optionalText(input.sourceId, "source.sourceId");
+    const title = optionalText(input.title, "source.title");
+    if (!provider || !sourceId) {
+      throw new LibraryError("LIBRARY_INPUT_INVALID", "provider and sourceId are required.");
+    }
+    const source = {
+      provider,
+      sourceId,
+      url: optionalText(input.url, "source.url"),
+      versionType: optionalText(input.versionType, "source.versionType"),
+      channelTitle: optionalText(input.channelTitle, "source.channelTitle"),
+    };
+    let action;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const track = this.requireTrack(trackId);
+      const existing = this.db
+        .prepare("SELECT track_id FROM track_sources WHERE provider = ? AND source_id = ?")
+        .get(provider, sourceId);
+      if (existing?.track_id === track.id) {
+        action = "existing";
+      } else if (existing) {
+        throw new LibraryError("LIBRARY_IDENTITY_CONFLICT", "The source belongs to another track.");
+      } else if (track.identityLocked) {
+        throw new LibraryError("LIBRARY_IDENTITY_LOCKED", "The track identity is locked.");
+      } else {
+        if (!title) {
+          throw new LibraryError("LIBRARY_INPUT_INVALID", "A title is required to link a new source.");
+        }
+        const canonical = canonicalizeSource({
+          title,
+          channelTitle: source.channelTitle,
+          versionType: source.versionType,
+        });
+        if (track.canonicalKey !== canonical.canonicalKey) {
+          throw new LibraryError("LIBRARY_IDENTITY_CONFLICT", "The source metadata does not match the track.");
+        }
+        this.insertSource(track.id, { source }, canonical, {
+          matchedBy: "playlist_metadata", confidence: 1,
+        }, new Date().toISOString());
+        action = "linked";
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      writeFailed(error);
+    }
+    return { action, source: this.source(provider, sourceId) };
   }
 
   evaluateIdentity(canonical) {
@@ -1716,22 +1808,30 @@ export class MusicLibrary {
     const all = (sql) => this.db.prepare(sql).all();
     const syncState = [];
     let skippedSecrets = 0;
+    let skippedMalformed = 0;
     for (const row of all("SELECT key, value, updated_at FROM sync_state ORDER BY key")) {
       if (SECRETISH_KEY.test(row.key)) {
         skippedSecrets += 1;
         continue;
       }
       let parsed = row.value;
+      let malformedStructured = false;
       try {
         parsed = JSON.parse(row.value);
       } catch {
-        // setSyncState also accepts plain strings such as youtube.lastPull.
-        // A malformed object/array could hide credential fields, so exclude it.
-        const first = typeof row.value === "string" ? row.value.trimStart()[0] : null;
-        if (first === "{" || first === "[" || (typeof row.value === "string" && SECRETISH_KEY.test(row.value))) {
-          skippedSecrets += 1;
-          continue;
-        }
+        // Plain scalars are lossless. A value that looks like a broken JSON
+        // object/array cannot be inspected safely for hidden credential keys.
+        malformedStructured = typeof row.value === "string" && ["{", "["].includes(row.value.trimStart()[0]);
+      }
+      // Inspect both representations: raw text catches credential-shaped
+      // strings, while parsed JSON catches escaped text inside nested values.
+      if (containsSecretishContent(row.value) || containsSecretishContent(parsed)) {
+        skippedSecrets += 1;
+        continue;
+      }
+      if (malformedStructured) {
+        skippedMalformed += 1;
+        continue;
       }
       try {
         assertNoSecretKeys(parsed);
@@ -1755,6 +1855,7 @@ export class MusicLibrary {
       ),
       syncState,
       skippedSecrets,
+      skippedMalformed,
     };
   }
 

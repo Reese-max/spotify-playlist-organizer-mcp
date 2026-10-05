@@ -21,7 +21,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadEnvFile } from "./env.js";
-import { LibraryError, openLibrary } from "./library.js";
+import { LibraryError, openLibrary, redactSecretishText } from "./library.js";
 import {
   getMusic,
   listMusic,
@@ -35,9 +35,9 @@ import {
 import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { saveMusic } from "./save-music.js";
 import { YouTubeClient } from "./youtube.js";
+import { APP_VERSION } from "./version.js";
 
 const SERVER_NAME = "music-playlist-organizer";
-const SERVER_VERSION = "0.2.0";
 const DEFAULT_BODY_LIMIT = 64 * 1024;
 const INDEX_HTML_PATH = new URL("../public/index.html", import.meta.url);
 const UI_HEADERS = {
@@ -100,7 +100,9 @@ function sendJson(response, status, body, headers = {}) {
 }
 
 function sendError(response, status, code, message, headers = {}) {
-  sendJson(response, status, { error: { code, message } }, headers);
+  // Same chokepoint as the MCP errorResult path: a thrown provider error must
+  // not be able to carry a credential out through the facade either.
+  sendJson(response, status, { error: { code, message: redactSecretishText(message) } }, headers);
 }
 
 function readBody(request, limit) {
@@ -215,7 +217,7 @@ export function createHttpServer({
   // [method, pattern, {auth, write}, handler(params, body, query, signal)]
   const routes = [
     ["GET", "/health", { auth: false }, () => ({ status: "ok" })],
-    ["GET", "/version", { auth: false }, () => ({ name: SERVER_NAME, version: SERVER_VERSION })],
+    ["GET", "/version", { auth: false }, () => ({ name: SERVER_NAME, version: APP_VERSION })],
     ["GET", "/api/library/tracks", { auth: true }, (_p, _b, q) =>
       listMusic(library, numericParams(q))],
     ["GET", "/api/library/recent", { auth: true }, (_p, _b, q) =>
@@ -246,7 +248,7 @@ export function createHttpServer({
     ["POST", "/api/library/remove", { auth: true, write: true }, (_p, body, _q, signal) =>
       removeMusic(services, pick(body, ["trackId", "mode", "local", "youtubePlaylist", "videoId"]), { signal })],
     ["POST", "/api/save_music", { auth: true, write: true }, (_p, body, _q, signal) =>
-      saveMusic(services, pick(body, ["input", "videoId", "tags", "category", "playlist", "mode", "syncToYouTube"]), { signal })],
+      saveMusic(services, pick(body, ["input", "videoId", "tags", "category", "playlist", "mode", "syncToYouTube", "remoteDedupe"]), { signal })],
     ["GET", "/api/sync/status", { auth: true }, (_p, _b, q, signal) =>
       syncStatus(services, { playlist: q.get("playlist") ?? undefined }, { signal })],
     ["POST", "/api/sync", { auth: true, write: true }, (_p, body, _q, signal) =>

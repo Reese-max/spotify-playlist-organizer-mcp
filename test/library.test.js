@@ -9,6 +9,7 @@ import {
   MusicLibrary,
   libraryFilePath,
   openLibrary,
+  redactSecretishText,
 } from "../src/library.js";
 
 async function tempLibrary() {
@@ -901,4 +902,120 @@ test("unsynced paging excludes healthy sync markers before counting and slicing"
     library.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("playlist metadata can link a verified source without stealing or crossing identities", async () => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  try {
+    const one = library.upsertTrack({
+      title: "First Song", artist: "Artist",
+      source: { provider: "youtube", sourceId: "V_FIRST0001" },
+    }).track;
+    const two = library.upsertTrack({
+      title: "Second Song", artist: "Artist",
+      source: { provider: "youtube", sourceId: "V_OTHER0001" },
+    }).track;
+    const matched = {
+      provider: "youtube", sourceId: "V_MATCH0001",
+      title: "Artist - First Song (Official Audio)", channelTitle: "Artist",
+    };
+    const linked = library.attachCanonicalSource(one.id, matched);
+    assert.equal(linked.action, "linked");
+    assert.equal(library.getTrackBySource("youtube", matched.sourceId)?.id, one.id);
+    assert.equal(library.attachCanonicalSource(one.id, matched).action, "existing");
+    assert.throws(
+      () => library.attachCanonicalSource(two.id, matched),
+      (error) => error instanceof LibraryError && error.code === "LIBRARY_IDENTITY_CONFLICT",
+    );
+    assert.throws(
+      () => library.attachCanonicalSource(one.id, { ...matched, sourceId: "V_WRONG0001", title: "Different Song" }),
+      (error) => error instanceof LibraryError && error.code === "LIBRARY_IDENTITY_CONFLICT",
+    );
+    library.setIdentityLocked(one.id, true);
+    assert.throws(
+      () => library.attachCanonicalSource(one.id, { ...matched, sourceId: "V_LOCKD0001" }),
+      (error) => error instanceof LibraryError && error.code === "LIBRARY_IDENTITY_LOCKED",
+    );
+    assert.equal(library.getTrackBySource("youtube", "V_WRONG0001"), null);
+    assert.equal(library.getTrackBySource("youtube", "V_LOCKD0001"), null);
+    assert.equal(library.getTrackBySource("youtube", "V_OTHER0001")?.id, two.id);
+  } finally {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("redactSecretishText strips credential-shaped substrings and leaves other text alone", () => {
+  assert.equal(
+    redactSecretishText("call failed for Bearer ya29.a0AfH6SMBsecret-token"),
+    "call failed for [REDACTED]",
+  );
+  assert.equal(
+    redactSecretishText("bad key AIzaSyD0123456789abcdefghijklmnop"),
+    "bad key [REDACTED]",
+  );
+  // Several credentials in one message are all stripped, not just the first.
+  assert.equal(
+    redactSecretishText("Bearer ya29.a0AfH6SMBsecret and sk-proj-abcdefgh12345"),
+    "[REDACTED] and [REDACTED]",
+  );
+  // The guard must not be stateful across calls, and non-secrets pass through.
+  assert.equal(redactSecretishText("Bearer ya29.a0AfH6SMBsecret"), "[REDACTED]");
+  assert.equal(redactSecretishText("quota exhausted"), "quota exhausted");
+  assert.equal(redactSecretishText(""), "");
+  // Ordinary text that merely looks similar keeps everything but the lookalike.
+  assert.equal(
+    redactSecretishText("GOCSPX-Analysis Live 2024 tour"),
+    "[REDACTED] Live 2024 tour",
+  );
+  // A quoted value may contain '&'; an unquoted one stops at it so a query
+  // string keeps its other parameters.
+  assert.doesNotMatch(redactSecretishText('{"client_secret":"ab&cd"}'), /ab|cd/);
+  assert.equal(
+    redactSecretishText("track?client_id=12345&part=snippet"),
+    "track?[REDACTED]&part=snippet",
+  );
+  assert.equal(
+    redactSecretishText("track https://x.test/t?client_id=12345&part=snippet"),
+    "track https://x.test/t?[REDACTED]&part=snippet",
+  );
+  // A truncated JSON body or a clipped shell fragment still has an opening
+  // quote and no closing one — it must still be redacted.
+  for (const truncated of [
+    '{"client_secret":"abc',
+    "{'client_secret':'abc",
+    'client_secret="abc',
+    "client_secret='abc",
+    'client_secret" : "abc',
+  ]) {
+    assert.doesNotMatch(redactSecretishText(truncated), /abc/, truncated);
+  }
+  // An unquoted SID value stops at '&' like every other unquoted value.
+  assert.equal(redactSecretishText("?SID=abc123&other=1"), "?[REDACTED]&other=1");
+  assert.equal(redactSecretishText(null), null);
+  assert.equal(redactSecretishText(undefined), undefined);
+  assert.deepEqual(redactSecretishText({ message: "Bearer ya29.a0AfH6SMBsecret" }), {
+    message: "Bearer ya29.a0AfH6SMBsecret",
+  });
+  // A provider that echoes a parsed JSON body quotes the assignment. The exact
+  // surviving text is not the contract — losing the key name is acceptable
+  // over-redaction; leaking the value is not.
+  const jsonBody = redactSecretishText('{"client_secret":"GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy"}');
+  assert.doesNotMatch(jsonBody, /GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy/);
+  assert.match(jsonBody, /\[REDACTED\]/);
+  const quoted = redactSecretishText("rejected: invalid_client_id='abc123'");
+  assert.doesNotMatch(quoted, /abc123/);
+  assert.match(quoted, /\[REDACTED\]/);
+  // A bare Google client secret has no recognizable value prefix.
+  assert.equal(
+    redactSecretishText("secret GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy rejected"),
+    "secret [REDACTED] rejected",
+  );
+  // Redaction must not depend on state left by an earlier call.
+  const repeated = redactSecretishText('{"access_token":"GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy"}');
+  assert.doesNotMatch(repeated, /GOCSPX-uW4rPx9Q2mZk7Ls3Nv6Bh1Jd0Fy/);
+  assert.match(repeated, /\[REDACTED\]/);
+  assert.equal(redactSecretishText("clean message"), "clean message");
+  assert.equal(redactSecretishText("clean message again"), "clean message again");
 });

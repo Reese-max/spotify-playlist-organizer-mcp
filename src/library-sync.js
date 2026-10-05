@@ -30,6 +30,58 @@ function isAmbiguousWriteError(error) {
     || error?.status >= 500;
 }
 
+// Reconcile receipts must classify read failures without echoing provider
+// messages, which can contain request details. Only confirmed missing video
+// evidence changes source availability.
+function reconcileReadFailure(error) {
+  const status = Number.isInteger(error?.status) ? error.status : null;
+  const code = error?.code;
+  let type;
+  let safeCode;
+  if (status === 429 || code === "HTTP_429") {
+    type = "rate_limited";
+    safeCode = "HTTP_429";
+  } else if (status >= 500 || code === "HTTP_5XX") {
+    type = "provider_error";
+    safeCode = "HTTP_5XX";
+  } else if (status === 401 || status === 403) {
+    type = "authentication";
+    safeCode = "AUTH_ERROR";
+  } else if (code === "CALLER_CANCELLED" || code === "ABORT_ERR" || error?.name === "AbortError") {
+    type = "cancelled";
+    safeCode = "CALLER_CANCELLED";
+  } else if (code === "TIMEOUT" || code === "ETIMEDOUT") {
+    type = "timeout";
+    safeCode = "TIMEOUT";
+  } else if (["NETWORK_ERROR", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN"].includes(code)) {
+    type = "network_error";
+    safeCode = "NETWORK_ERROR";
+  } else if (status === 404 || status === 410 || code === "NOT_FOUND") {
+    type = "missing";
+    safeCode = "NOT_FOUND";
+  } else {
+    type = "unverified";
+    safeCode = "PROVIDER_ERROR";
+  }
+  return { type, code: safeCode, ...(status === null ? {} : { status }) };
+}
+
+function reconcileNextStep(type, resource = "source") {
+  if (type === "missing" || type === "private") {
+    return resource === "playlist"
+      ? "Verify the exact playlist ID before retrying reconcile_track; do not retry a write."
+      : "Review this source and choose a confirmed replacement; do not retry a write.";
+  }
+  if (type === "authentication") {
+    return "Restore YouTube authorization, then retry reconcile_track with the same exact IDs; do not retry a write.";
+  }
+  return "Retry reconcile_track with the same exact IDs after provider access recovers; do not retry a write.";
+}
+
+function unknownMarkerStatus(marker) {
+  return UNKNOWN_STATES.has(marker?.state) ? marker.state : null;
+}
+
 function readMarker(library, trackId) {
   const raw = library.getSyncState(syncKey(trackId));
   if (typeof raw !== "string" || !raw) return null;
@@ -149,7 +201,7 @@ async function scanSync({ library, youtube }, { playlist, signal } = {}) {
 
     const statusFor = (presentIds, readFailed) => {
       if (track.needsReview) return "conflict";
-      if (marker && UNKNOWN_STATES.has(marker.state)) return "unknown_after_write";
+      if (unknownMarkerStatus(marker)) return marker.state;
       if (readFailed) return "unknown";
       return presentIds.length ? "in_sync" : "local_only";
     };
@@ -163,8 +215,8 @@ async function scanSync({ library, youtube }, { playlist, signal } = {}) {
         presentVideoIds: [],
         status: track.needsReview
           ? "conflict"
-          : marker && UNKNOWN_STATES.has(marker.state)
-            ? "unknown_after_write"
+          : unknownMarkerStatus(marker)
+            ? marker.state
             : "local_only",
         reason: "no_managed_playlist",
       });
@@ -544,17 +596,29 @@ export async function reconcileTrack({ library, youtube }, args = {}, { signal }
   let verificationUnknown = false;
   for (const source of sources) {
     try {
-      await youtube.getVideo(source.sourceId, { signal });
+      const video = await youtube.getVideo(source.sourceId, { signal });
+      if (video?.status === "private") {
+        library.setSourceStatus("youtube", source.sourceId, "unavailable");
+        sourceReports.push({
+          sourceId: source.sourceId,
+          status: "unavailable",
+          error: { type: "private", code: "PRIVATE" },
+          nextStep: reconcileNextStep("private"),
+        });
+        continue;
+      }
       if (source.status !== "ok") library.setSourceStatus("youtube", source.sourceId, "ok");
       sourceReports.push({ sourceId: source.sourceId, status: "ok" });
     } catch (error) {
-      const missing = error?.code === "NOT_FOUND" || error?.status === 404 || error?.status === 410;
+      const failure = reconcileReadFailure(error);
+      const missing = failure.type === "missing";
       if (missing) library.setSourceStatus("youtube", source.sourceId, "unavailable");
       else verificationUnknown = true;
       sourceReports.push({
         sourceId: source.sourceId,
         status: missing ? "unavailable" : "unknown",
-        error: errorInfo(error),
+        error: failure,
+        nextStep: reconcileNextStep(failure.type),
       });
     }
   }
@@ -579,39 +643,55 @@ export async function reconcileTrack({ library, youtube }, args = {}, { signal }
       }
     } catch (error) {
       verificationUnknown = true;
-      presence.push({ playlistId: link.playlistId, error: errorInfo(error) });
+      const failure = reconcileReadFailure(error);
+      presence.push({
+        playlistId: link.playlistId,
+        error: failure,
+        nextStep: reconcileNextStep(failure.type, "playlist"),
+      });
     }
   }
 
   if (verificationUnknown) {
+    if (!unknownMarkerStatus(prior)) {
+      writeMarker(library, track.id, {
+        state: "unknown",
+        playlistId: prior?.playlistId ?? links[0]?.playlistId ?? null,
+        videoId: prior?.videoId ?? sources[0]?.sourceId ?? null,
+        ...(prior?.state ? { lastKnownState: prior.state } : {}),
+      });
+    }
     return {
       trackId: track.id,
       track,
       resolvedFrom: null,
       sources: sourceReports,
       presence,
-      sync: {
-        ...prior,
-        state: UNKNOWN_STATES.has(prior?.state) ? prior.state : "unknown",
-        updatedAt: new Date().toISOString(),
-      },
+      sync: readMarker(library, track.id),
+      nextStep: reconcileNextStep("unverified"),
     };
   }
 
-  const anyPresent = presence.some((entry) => entry.present === true);
+  // A private/deleted playlist placeholder can still contain the exact ID,
+  // but it is not a playable copy of that source.
+  const availableIds = new Set(sourceReports
+    .filter((report) => report.status === "ok")
+    .map((report) => report.sourceId));
+  const playablePresence = presence.find((entry) => entry.present === true
+    && availableIds.has(entry.videoId));
   const allUnavailable = sources.length > 0 && sourceReports.every((report) => report.status === "unavailable");
-  const state = anyPresent
+  const state = playablePresence
     ? "synced"
     : allUnavailable
       ? "unavailable"
       : "local_only";
   const marker = {
     state,
-    playlistId: presence.find((entry) => entry.present)?.playlistId
+    playlistId: playablePresence?.playlistId
       ?? prior?.playlistId
       ?? links[0]?.playlistId
       ?? null,
-    videoId: prior?.videoId ?? sources[0]?.sourceId ?? null,
+    videoId: playablePresence?.videoId ?? prior?.videoId ?? sources[0]?.sourceId ?? null,
   };
   writeMarker(library, track.id, marker);
 

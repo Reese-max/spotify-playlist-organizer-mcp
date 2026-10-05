@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 import { fetchWithDeadline, ProviderRequestError, waitForRetry } from "../src/http.js";
 import { YouTubeClient } from "../src/youtube.js";
 
@@ -87,6 +88,38 @@ test("bounds a hanging provider response body", async () => {
     client.searchVideos("focus"),
     (error) => error instanceof ProviderRequestError && error.code === "TIMEOUT",
   );
+});
+
+test("repeated bounded requests release the caller abort listener", async () => {
+  // A leaked listener per request would trip MaxListenersExceededWarning on
+  // the shared caller signal once ten requests pile up.
+  const controller = new AbortController();
+  let warnings = 0;
+  const onWarning = (warning) => {
+    if (warning.name === "MaxListenersExceededWarning") warnings += 1;
+  };
+  process.on("warning", onWarning);
+  try {
+    for (let index = 0; index < 30; index += 1) {
+      await assert.rejects(
+        fetchWithDeadline(
+          async () => new Promise(() => {}),
+          "https://provider.test/hanging",
+          {},
+          { signal: controller.signal, timeoutMs: 5 },
+        ),
+        (error) => error instanceof ProviderRequestError && error.code === "TIMEOUT",
+      );
+    }
+    // Give the process a few turns to deliver a queued MaxListenersExceededWarning.
+    for (let index = 0; index < 3; index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(warnings, 0);
+  } finally {
+    process.off("warning", onWarning);
+  }
 });
 
 test("waitForRetry resolves immediately without a delay", async () => {

@@ -64,13 +64,23 @@ async function startYouTubeStub() {
     videoReads: new Map(),
     playlists: new Map(),
     items: new Map(),
-    counters: { createPlaylist: 0, addItem: 0, deleteItem: 0, search: 0, getVideo: 0, getItems: 0 },
+    counters: {
+      createPlaylist: 0,
+      addItem: 0,
+      deleteItem: 0,
+      search: 0,
+      getVideo: 0,
+      getItems: 0,
+      searchHang: 0,
+      abortedRequests: 0,
+    },
     nextPlaylistId: 1,
     nextItemId: 1,
     failNextAddItem: false,
     failSearchQuota: false,
     failSearchForbidden: false,
     delayAddMs: 0,
+    hangSearch: false,
     rejectAddItem: null,
     hangNext: new Set(),
   };
@@ -81,6 +91,9 @@ async function startYouTubeStub() {
       const url = new URL(req.url, "http://stub");
       const pathname = url.pathname;
       const sendJson = (code, data) => {
+        // The client may have already given up (deadline/cancel) — a lost
+        // response is part of the fixture, not a stub failure.
+        if (res.destroyed || res.writableEnded) return;
         res.writeHead(code, { "content-type": "application/json" });
         res.end(JSON.stringify(data));
       };
@@ -100,6 +113,14 @@ async function startYouTubeStub() {
       }
       if (req.method === "GET" && pathname === "/search") {
         state.counters.search += 1;
+        if (state.hangSearch) {
+          state.counters.searchHang += 1;
+          // Never respond; a client abort shows up as a premature close.
+          res.on("close", () => {
+            if (!res.writableEnded) state.counters.abortedRequests += 1;
+          });
+          return;
+        }
         if (state.failSearchQuota) {
           return sendJson(403, {
             error: {
@@ -189,6 +210,7 @@ async function startYouTubeStub() {
       }
       return sendJson(404, { error: { message: "stub: no route " + req.method + " " + pathname } });
     } catch (error) {
+      if (res.destroyed || res.writableEnded) return;
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "stub internal: " + error.message } }));
     }
@@ -271,6 +293,14 @@ class McpStdioClient {
 
   notify(method, params) {
     this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+  }
+
+  // Fire-and-forget request — used for calls we expect to be cancelled; a
+  // cancelled request is answered with silence, not a wire response.
+  send(method, params) {
+    const id = this.nextId++;
+    this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    return id;
   }
 
   async initialize() {
@@ -683,6 +713,75 @@ test("E2E: batch import retries a transient item through stdio after restart", {
   } finally {
     if (first) await stopServer(first.child);
     if (second) await stopServer(second.child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function pollUntil(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+}
+
+test("E2E: provider calls are deadline-bounded and stdio cancellation aborts the transport", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo("vidBound01A", "E2E Bounded Song");
+  const { child, client } = await startClient(directory, stub, { PROVIDER_TIMEOUT_MS: "1500" });
+
+  try {
+    // A write whose response is lost to the deadline is ambiguous — it must
+    // be reported, never blindly retried.
+    stub.delayAddMs = 3_000;
+    const write = await client.callTool("youtube_save_track", {
+      input: "https://www.youtube.com/watch?v=vidBound01A",
+      playlist: "E2E Bounded List",
+      mode: "apply",
+    });
+    assert.equal(write.parsed.action, "reconciliation_required");
+    assert.equal(write.parsed.writeState, "UNKNOWN_AFTER_WRITE");
+    assert.equal(write.parsed.error.code, "TIMEOUT");
+    assert.equal(stub.counters.addItem, 1, "ambiguous write must not be retried");
+    stub.delayAddMs = 0;
+
+    // A stalled read resolves as a typed TIMEOUT within the bound.
+    stub.hangSearch = true;
+    const readStarted = Date.now();
+    const timedOut = await client.callTool("youtube_search_videos", { query: "E2E Bounded" });
+    assert.ok(Date.now() - readStarted < 8_000, "stalled read was not bounded");
+    assert.equal(timedOut.result.isError, true);
+    assert.equal(timedOut.parsed.code, "TIMEOUT");
+
+    // MCP cancellation aborts the in-flight provider request well before
+    // the deadline would fire.
+    const hangId = client.send("tools/call", {
+      name: "youtube_search_videos",
+      arguments: { query: "E2E Bounded cancel" },
+    });
+    assert.ok(
+      await pollUntil(() => stub.counters.searchHang >= 2),
+      "second stalled read never reached the stub",
+    );
+    const abortedBefore = stub.counters.abortedRequests;
+    client.notify("notifications/cancelled", { requestId: hangId, reason: "e2e-cancel" });
+    // The provider deadline is 1500ms; observing the socket abort inside
+    // 1000ms proves cancellation, not the deadline, tore the request down.
+    assert.ok(
+      await pollUntil(() => stub.counters.abortedRequests > abortedBefore, 1_000),
+      "cancelled provider request was not aborted at the transport",
+    );
+
+    // The server stays responsive after a cancelled request.
+    const status = await client.callTool("library_status", {});
+    assert.ok(status.result);
+
+    assertNoSecrets(client.stdoutText, client.stderrText, write.text, timedOut.text);
+  } finally {
+    await stopServer(child);
     await stub.close();
     await rm(directory, { recursive: true, force: true });
   }

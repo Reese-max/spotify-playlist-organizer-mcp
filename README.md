@@ -129,7 +129,7 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 ### 收藏 UI（`GET /`）
 
-`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
+`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge（含 playlist 內 canonical 重複的「different upload」標示）、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt——YouTube step 回 `skipped_canonical_duplicate` 時改顯示「Same song already in playlist」（同一首歌的其他上傳已在 playlist，library 改為連結既有 source），失敗步驟列出各自 error message；`UNKNOWN_AFTER_WRITE`/`PARTIAL_PLAYLIST_CREATED` 提供一鍵 `POST /api/reconcile` read-back 與安全 nextStep。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
 
 ## 批次匯入
 
@@ -237,6 +237,15 @@ PROVIDER_TIMEOUT_MS=15000
 PROVIDER_MAX_READ_RETRIES=1
 ```
 
+### Provider 請求界線（timeout／取消）
+
+所有對 YouTube、Spotify、OAuth token 與 YouTube oEmbed 的 HTTP 請求都經過同一層 deadline/取消包裝（`src/http.js`）：
+
+- 每個請求與其回應 body 讀取都有有限 deadline：預設 15000ms，`PROVIDER_TIMEOUT_MS` 可調（1–120000ms 之間收敛）。
+- MCP `notifications/cancelled` 會把進行中的 provider 請求 abort；HTTP facade 在 client 斷線時同樣傳遞取消。caller 取消回 `CALLER_CANCELLED`，與 `TIMEOUT`、`NETWORK_ERROR`、`HTTP_429`、`HTTP_5XX`、`AUTH_REFRESH_FAILED` 分開分類。
+- GET 讀取遇到 429/5xx 依 Retry-After／指數退避做有限次重試（`PROVIDER_MAX_READ_RETRIES`，0–2）；寫入永不自動重試——timeout、取消或網路錯誤視為 ambiguous，回 `UNKNOWN_AFTER_WRITE`／`reconciliation_required`，由 read-back 對帳（見「YouTube ↔ 音樂庫同步」）。
+- timeout／cancel／error 輸出不含 access token、refresh token、client secret 或 authorization code；計時器與 abort listener 在請求結束後一律釋放。
+
 首次授權請執行：
 
 ```powershell
@@ -342,7 +351,17 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 - **CRAP 目前只做報表不做閘**：`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看基線再定閘值。
 - Baseline（2026-09，spotify.js 不計）：行 ~85% / 分支 ~78% / 函數 ~93%；`src/core.js` mutation score 46.6%（268 mutants）。
 
-GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
+### GitHub Actions 驗證
+
+`.github/workflows/ci.yml` 會在每次 push 與 pull request 以 Ubuntu、Node.js 24 執行：
+
+1. `npm ci`
+2. `npm run lint`
+3. `npm run test:coverage`
+
+`npm run test:coverage` 使用與 `npm test` 相同的 `node --test` 完整回歸套件，因此會包含 `test/mcp-smoke.test.js`；coverage 閘門另外要求行 ≥ 80%、分支 ≥ 75%、函數 ≥ 88%。Job 設有 5 分鐘上限，權限只有 `contents: read`，不提供 YouTube／Spotify OAuth 或 API key；測試使用 stub，不會修改真實播放清單，也不應在輸出中出現 secrets。
+
+每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及 Windows、macOS 或其他 Node 版本，仍需另外驗證。Issue #5 的實際 run 證據（含隔離負向測試失敗→復原）見 [`.github/quality-audits/2026-10-01-ci-regression-validation.md`](.github/quality-audits/2026-10-01-ci-regression-validation.md)。
 
 ## 官方文件
 

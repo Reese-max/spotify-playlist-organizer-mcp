@@ -1168,3 +1168,37 @@ test("import_status redacts provider text in a plan written before write-side re
   assert.equal(status.items[0].error.code, "TIMEOUT");
   assert.equal(status.syncError.playlistId, PL_SYNC);
 });
+
+test("legacy pasted credentials remain redacted through status and resumed apply", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const batchId = "LEGACYPASTED";
+  const legacy = {
+    batchId,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    playlistId: null,
+    items: [{
+      input: "https://example.com/track?access_token=ya29.legacyinputsentinel",
+      status: "unresolved",
+      error: { code: "HTTP_403", status: 403, message: "Bearer ya29.legacyerrorsentinel" },
+    }],
+  };
+  library.setSyncState(`import.${batchId}`, legacy);
+  const original = library.getSyncState(`import.${batchId}`);
+  await t.test("status redacts without rewriting", () => {
+    const status = importStatus(library, { batchId });
+    assert.doesNotMatch(JSON.stringify(status), /legacyinputsentinel|legacyerrorsentinel/);
+    assert.match(status.items[0].input, /\[REDACTED\]/);
+    assert.equal(status.items[0].error.code, "HTTP_403");
+    assert.equal(status.items[0].error.status, 403);
+    assert.equal(library.getSyncState(`import.${batchId}`), original,
+      "read-only status must not rewrite the legacy plan");
+  });
+  await t.test("resume redacts its receipt and newly persisted plan", async () => {
+    const applied = await importMusicBatch({ library, youtube }, { batchId, resume: true });
+    assert.equal(applied.results[0].status, "unresolved");
+    assert.doesNotMatch(JSON.stringify(applied), /legacyinputsentinel|legacyerrorsentinel/);
+    assert.doesNotMatch(library.getSyncState(`import.${batchId}`), /legacyinputsentinel|legacyerrorsentinel/);
+    assert.equal(youtube.getVideoCalls, 0);
+    assert.equal(youtube.addCalls.length, 0);
+  });
+});

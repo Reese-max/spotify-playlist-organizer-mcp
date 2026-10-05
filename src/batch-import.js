@@ -58,7 +58,16 @@ function loadPlan(library, batchId) {
   if (typeof raw !== "string" || !raw) return null;
   try {
     const plan = JSON.parse(raw);
-    return Array.isArray(plan?.items) ? plan : null;
+    if (!Array.isArray(plan?.items)) return null;
+    // Older plans may contain pasted credentials and provider error text.
+    // Sanitize the parsed copy before either read-only status or resumed apply;
+    // the latter also persists that sanitized copy on its normal flush path.
+    for (const item of plan.items) {
+      item.input = redactSecretishText(item.input);
+      if (item.error) item.error = publicError(item.error);
+    }
+    if (plan.syncError) plan.syncError = publicError(plan.syncError);
+    return plan;
   } catch {
     return null;
   }

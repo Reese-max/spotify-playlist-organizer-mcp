@@ -24,21 +24,37 @@ net.Socket.prototype.connect = forbid;
 globalThis.fetch = forbid;
 syncBuiltinESMExports();
 
-// GetConsoleMode observes the real shared ConPTY input buffer. The tiny child
-// inherits the console input handle; stdout is piped only for the mode number.
+// GetConsoleMode observes the real shared ConPTY input buffer. CONIN$ avoids
+// redirected standard handles in the tiny probe child; it never reads input.
 function consoleMode() {
   if (process.platform !== "win32") return null;
   const probe = spawnSync(process.env.SYNTHETIC_PYTHON, ["-c", [
-    "import ctypes",
+    "import ctypes,sys",
     "from ctypes import wintypes as w",
     "k=ctypes.WinDLL('kernel32',use_last_error=True)",
-    "k.GetStdHandle.argtypes=[w.DWORD];k.GetStdHandle.restype=w.HANDLE",
+    "def require(ok,stage):",
+    "    if not ok:",
+    "        print('CONSOLE_PROBE_ERROR '+stage+'='+str(ctypes.get_last_error()),file=sys.stderr)",
+    "        sys.exit(1)",
+    "k.CreateFileW.argtypes=[w.LPCWSTR,w.DWORD,w.DWORD,ctypes.c_void_p,w.DWORD,w.DWORD,w.HANDLE];k.CreateFileW.restype=w.HANDLE",
+    "k.AttachConsole.argtypes=[w.DWORD];k.AttachConsole.restype=w.BOOL",
+    "k.CloseHandle.argtypes=[w.HANDLE];k.CloseHandle.restype=w.BOOL",
     "k.GetConsoleMode.argtypes=[w.HANDLE,ctypes.POINTER(w.DWORD)]",
-    "h=k.GetStdHandle(w.DWORD(-10));m=w.DWORD()",
-    "assert k.GetConsoleMode(h,ctypes.byref(m)), 'native console mode unavailable'",
+    "h=k.CreateFileW('CONIN$',0x80000000,3,None,3,0,None)",
+    "if h==w.HANDLE(-1).value:",
+    "    require(ctypes.get_last_error() in (2,6),'open')",
+    "    require(k.AttachConsole(w.DWORD(-1)),'attach')",
+    "    h=k.CreateFileW('CONIN$',0x80000000,3,None,3,0,None)",
+    "require(h!=w.HANDLE(-1).value,'open')",
+    "m=w.DWORD()",
+    "require(k.GetConsoleMode(h,ctypes.byref(m)),'mode')",
+    "k.CloseHandle(h)",
     "print(m.value)",
   ].join("\n")], { stdio: ["inherit", "pipe", "pipe"], timeout: 2_000 });
-  assert.ok(probe.status === 0, "native console mode probe failed");
+  const diagnostic = probe.stderr?.toString().match(/CONSOLE_PROBE_ERROR [a-z]+=\d+/)?.[0] ?? "none";
+  assert.ok(probe.status === 0, "native console mode probe failed: status=" + probe.status
+    + ", error=" + (probe.error?.code ?? "none") + ", signal=" + (probe.signal ?? "none")
+    + ", stage=" + diagnostic);
   const value = Number(probe.stdout.toString().trim());
   assert.ok(Number.isInteger(value), "invalid native console mode");
   return value;
@@ -64,6 +80,8 @@ async function cookedEchoProbe(expectedEcho = "VISIBLE_RESTORE_CHECK") {
 
 async function main() {
   const isHost = mode.startsWith("host-");
+  console.log("FIXTURE_STARTED", JSON.stringify({ platform: process.platform, node: process.version,
+    stdinTTY: input.isTTY === true, stdoutTTY: output.isTTY === true }));
   assert.ok(isHost ? !input.isTTY && !output.isTTY : input.isTTY && output.isTTY,
     "fixture requires the actual requested terminal/pipe handles");
   input.pause();

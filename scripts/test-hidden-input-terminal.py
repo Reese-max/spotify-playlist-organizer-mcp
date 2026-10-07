@@ -52,6 +52,9 @@ class PosixTerminal:
         code = self.proc.wait(timeout=TIMEOUT)
         return code
 
+    def poll(self):
+        return self.proc.poll()
+
     def close(self):
         if self.proc.poll() is None:
             self.proc.kill()
@@ -115,6 +118,7 @@ class WindowsTerminal:
         self.attributes_initialized = False
         self.reader = None
         self.reader_error = None
+        self.cursor_queries = 0
         input_read, self.input_write, self.output_read, output_write = H(), H(), H(), H()
         try:
             self.check(k.CreatePipe(ctypes.byref(input_read), ctypes.byref(self.input_write), None, 0))
@@ -161,6 +165,12 @@ class WindowsTerminal:
             if not count.value:
                 return
             self.buffer.extend(block.raw[:count.value])
+            # A ConPTY/console client may query its cursor position. A terminal
+            # host must answer this protocol request, independently of input.
+            queries = self.buffer.count(b"\x1b[6n")
+            while self.cursor_queries < queries:
+                self.write(b"\x1b[1;1R")
+                self.cursor_queries += 1
         error = ctypes.get_last_error()
         if error not in (109, 232):  # broken pipe / no data during teardown
             self.reader_error = error
@@ -183,6 +193,12 @@ class WindowsTerminal:
         code = w.DWORD()
         self.check(self.k.GetExitCodeProcess(self.pi.process, ctypes.byref(code)))
         return code.value
+
+    def poll(self):
+        from ctypes import wintypes as w
+        code = w.DWORD()
+        self.check(self.k.GetExitCodeProcess(self.pi.process, ctypes.byref(code)))
+        return None if code.value == 259 else code.value  # STILL_ACTIVE
 
     def close(self):
         k = self.k
@@ -222,7 +238,17 @@ class WindowsTerminal:
 def wait_for(terminal, marker):
     deadline = time.monotonic() + TIMEOUT
     while marker not in visible(bytes(terminal.buffer)):
-        assert time.monotonic() < deadline, "native fixture did not reach " + marker.decode()
+        capture = visible(bytes(terminal.buffer))
+        failures = re.findall(rb"FAIL:[^\r\n]*", capture)
+        exit_code = terminal.poll()
+        if failures or time.monotonic() >= deadline or exit_code not in (None, 0):
+            # Error-only diagnostics never dump a transcript or typed value.
+            detail = failures[-1].decode(errors="replace") if failures else "no fixture error message"
+            raise AssertionError("native fixture did not reach " + marker.decode()
+                                 + "; exit=" + str(exit_code)
+                                 + "; output_bytes=" + str(len(terminal.buffer))
+                                 + "; fixture_started=" + str(b"FIXTURE_STARTED" in capture)
+                                 + "; " + detail)
         terminal.pump()
 
 

@@ -340,8 +340,12 @@ def run_terminal(mode, typed, expected, env):
     assert b"Open this URL" not in capture and b"FORBIDDEN" not in capture, "auth crossed its offline boundary"
     if mode != "echo-control":
         assert b"VISIBLE_RESTORE_CHECK" in visible(capture), "native cooked echo restoration was not observed"
+    metadata = re.findall(rb"RESULT (\{[^\r\n]*\})", visible(capture))
+    assert len(metadata) == 1, "native mode metadata missing"
+    modes = json.loads(metadata[0])
     print(json.dumps({"case": mode, "native_tty": True, "sentinel_output_occurrences": occurrences,
-                      "echo_detector_positive_control": mode == "echo-control", "restored": True}))
+                      "echo_detector_positive_control": mode == "echo-control", "restored": True,
+                      "console_modes": {key: modes[key] for key in ["beforeMode", "duringMode", "afterMode"]}}))
 
 
 def main():

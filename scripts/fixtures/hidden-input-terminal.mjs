@@ -86,6 +86,8 @@ async function main() {
     "fixture requires the actual requested terminal/pipe handles");
   input.pause();
   const beforeMode = isHost ? null : consoleMode();
+  let duringMode = null;
+  if (beforeMode !== null) assert.ok((beforeMode & 7) === 7, "native console did not start in cooked mode");
   const wasRaw = input.isRaw === true;
   const exitsBefore = process.listenerCount("exit");
   console.log("NATIVE", JSON.stringify({ platform: process.platform, node: process.version,
@@ -103,8 +105,8 @@ async function main() {
   } else {
     let outcome;
     const pending = readHiddenLine({ input, output, prompt: "HIDDEN_READY\n" });
-    const duringMode = consoleMode();
-    if (duringMode !== null) assert.ok((duringMode & 6) === 0, "native console echo/line mode stayed enabled");
+    duringMode = consoleMode();
+    if (duringMode !== null) assert.ok((duringMode & 7) === 0, "native console echo/line/processed mode stayed enabled");
     console.log("RAW_READY");
     try { outcome = await pending; } catch (error) { outcome = error.code; }
     assert.ok(outcome === expected, "hidden input outcome differs from synthetic expectation");
@@ -114,8 +116,13 @@ async function main() {
   assert.ok(input.isPaused(), "paused input was not restored");
   assert.ok(process.listenerCount("exit") === exitsBefore, "exit cleanup listener leaked");
   const afterMode = isHost ? null : consoleMode();
-  if (beforeMode !== null) assert.ok(afterMode === beforeMode, "native console mode was not restored");
-  console.log("RESULT", JSON.stringify({ mode, restored: true, afterMode }));
+  // Node/libuv's Windows NORMAL mode explicitly sets ECHO|LINE|PROCESSED
+  // (0x7), rather than preserving unrelated flags in the entire DWORD. Verify
+  // those native semantics and the same-console cooked echo below; record all
+  // mode values so canonicalization remains visible in acceptance evidence.
+  if (beforeMode !== null) assert.ok((afterMode & 7) === (beforeMode & 7),
+    "native console echo/line/processed mode was not restored: before=" + beforeMode + ", after=" + afterMode);
+  console.log("RESULT", JSON.stringify({ mode, restored: true, beforeMode, duringMode, afterMode }));
   if (!isHost && mode !== "echo-control") await cookedEchoProbe();
   clearTimeout(timeout);
   console.log("PASS");

@@ -262,6 +262,8 @@ npm run youtube:auth
 
 `.github/workflows/hidden-input-platforms.yml` 在相關 PR 變更時，於標準 `windows-latest`／`macos-latest` runner 以 Node 24 跑上述 focused harness；job 上限 3 分鐘、step 上限 2 分鐘、`contents: read`，不安裝 npm 依賴、不跑跨 OS 全套件、不用 larger runner、secret、artifact 或付費服務。驗收請保存 exact head SHA、Actions run URL 與輸出的 OS/architecture/Node/TTY；通過只涵蓋記錄到的 image/TTY 組合。
 
+Windows 的 Node/libuv `setRawMode(false)` 會將原生模式設為 processed/line/echo，並不逐位保存所有其他 console flags。harness 記錄完整 before/during/after mode 值，要求相關三個 flags 恢復，且在同一 console 實際讀取 cooked line、觀察 echo；不能將此結果當成所有 Win32 console flags 都原樣恢復的保證。
+
 「MCP host launch/capture」在此只涉及 **auth setup 腳本**被其他 host 啟動時的 stdin/stdout 契約；`src/server.js` 的 MCP stdio 路徑不啟動此腳本，也不互動索取 passphrase。harness 以真正 pipe handles 驗證 auth 無 passphrase 時 fail closed、有假環境 passphrase 時跳過 prompt，兩者都在 callback/network 前停止。這可離線驗證 repository 的 host 契約；不是某個未指名 MCP client 的 UI/錄影證據。若實際 host 另外提供 TTY 或錄影，需記錄它的版本、launch/TTY 類型並確認沒有 stdin/按鍵擷取；隱藏輸出無法阻止 host 自行記錄輸入。不需真實帳號來完成這些檢查。
 
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。

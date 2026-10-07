@@ -27,6 +27,65 @@ def visible(data):
     return VT.sub(b"", data)
 
 
+def windows_console_child(args):
+    """Bind only this private ConPTY child's real console handles to Node."""
+    from ctypes import wintypes as w
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p,
+                             w.DWORD, w.DWORD, w.HANDLE]
+    k.CreateFileW.restype = w.HANDLE
+    k.SetHandleInformation.argtypes = [w.HANDLE, w.DWORD, w.DWORD]
+    k.SetHandleInformation.restype = w.BOOL
+    k.SetStdHandle.argtypes = [w.DWORD, w.HANDLE]
+    k.SetStdHandle.restype = w.BOOL
+    k.WriteFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD,
+                           ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+    k.WriteFile.restype = w.BOOL
+    k.CloseHandle.argtypes = [w.HANDLE]
+    k.CloseHandle.restype = w.BOOL
+    owned = []
+    stage = "open"
+    child = None
+    try:
+        # Read/write access is required for native GetConsoleMode/TTY detection.
+        for name in ["CONIN$", "CONOUT$"]:
+            handle = k.CreateFileW(name, 0xC0000000, 3, None, 3, 0, None)
+            if handle == w.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            owned.append(handle)
+        stage = "inherit"
+        for handle in owned:
+            if not k.SetHandleInformation(handle, 1, 1):  # HANDLE_FLAG_INHERIT
+                raise ctypes.WinError(ctypes.get_last_error())
+        stage = "standard-handles"
+        for number, handle in [(-10, owned[0]), (-11, owned[1]), (-12, owned[1])]:
+            if not k.SetStdHandle(w.DWORD(number), handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        # Cached Python CRT descriptors can still reference the runner pipes.
+        # Supply native handles explicitly; keep Node attached to this console.
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags = subprocess.STARTF_USESTDHANDLES
+        startup.hStdInput, startup.hStdOutput, startup.hStdError = owned[0], owned[1], owned[1]
+        stage = "launch"
+        child = subprocess.Popen(args, cwd=ROOT, startupinfo=startup, close_fds=False)
+        stage = "wait"
+        return child.wait(timeout=20)
+    except Exception as error:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait(timeout=2)
+        # Never use cached stdout or dump commands, environment, or input.
+        if len(owned) == 2:
+            diagnostic = ("FAIL: native console bootstrap " + stage + " error="
+                          + str(getattr(error, "winerror", None)) + "\r\n").encode()
+            count = w.DWORD()
+            k.WriteFile(owned[1], diagnostic, len(diagnostic), ctypes.byref(count), None)
+        return 1
+    finally:
+        for handle in owned:
+            k.CloseHandle(handle)
+
+
 class PosixTerminal:
     def __init__(self, args, env):
         import pty
@@ -140,11 +199,15 @@ class WindowsTerminal:
             startup = StartupInfoEx()
             startup.info.cb = ctypes.sizeof(startup)
             startup.attributes = ctypes.cast(self.attributes, P)
-            command = ctypes.create_unicode_buffer(subprocess.list2cmdline(args))
+            # ConPTY association alone can leave inherited runner pipe handles
+            # in a child. Bind real console handles in a private native child.
+            console_args = [sys.executable, str(Path(__file__).resolve()),
+                            "--windows-console-child", *args]
+            command = ctypes.create_unicode_buffer(subprocess.list2cmdline(console_args))
             environment = ctypes.create_unicode_buffer("\0".join(
                 key + "=" + value for key, value in sorted(env.items(), key=lambda item: item[0].upper())) + "\0\0")
             # EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT.
-            self.check(k.CreateProcessW(args[0], command, None, None, False, 0x00080400,
+            self.check(k.CreateProcessW(console_args[0], command, None, None, False, 0x00080400,
                                          environment, str(ROOT), ctypes.byref(startup), ctypes.byref(self.pi)))
             for handle in [input_read, output_write]:
                 k.CloseHandle(handle)
@@ -324,4 +387,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--windows-console-child"]:
+        sys.exit(windows_console_child(sys.argv[2:]))
     main()

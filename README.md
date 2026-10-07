@@ -258,6 +258,12 @@ npm run youtube:auth
 
 未設定 `YOUTUBE_CREDENTIAL_PASSPHRASE` 且 stdin/stdout 為 TTY 時，`youtube:auth` 會以 raw mode 關閉終端機回顯後才讀取 passphrase——輸入不會出現在螢幕、一般終端輸出錄影或 PTY output capture 中。若 recorder 或 host 另行擷取 stdin／按鍵，仍可能記錄輸入；輸入 passphrase 時不要啟用這類 capture。若執行環境無法保證關閉回顯（非 TTY、不支援 raw mode 的 host），腳本會在啟動 OAuth callback 或任何網路請求之前 fail closed，要求改用環境變數提供 passphrase。中途取消（Ctrl+C）或終端送來損壞、不完整的位元組也會走同一條 fail-closed 路徑，不會把被截斷的輸入當成 passphrase 存進憑證檔。
 
+原生終端回歸可用 `python scripts/test-hidden-input-terminal.py`（macOS/Linux 用 `python3`）執行，不需 npm 套件、帳號或 OAuth：Windows 直接呼叫 Win32 `CreatePseudoConsole`，macOS/Linux 使用 POSIX `openpty`，不偽造 `isTTY`。先以開啟 echo 的原生終端確認 capture 偵測器能抓到假哨兵，再驗證隱藏輸入、Unicode/backspace、Enter、Ctrl+C/Ctrl+D、同一終端恢復 cooked echo，以及真實 auth entrypoint 的 pre-OAuth 失敗。子程序只取得隔離的假設定，禁止載入 `.env`、callback 或任何網路連線；不保存輸入或 transcript，只印平台/Node/TTY 與結果。ConPTY 會先轉譯輸入 UTF-8，因此 malformed-byte 拒絕另由 helper unit tests 驗證，不把 ConPTY 的轉碼當成 helper 收到原始位元組的證據。
+
+`.github/workflows/hidden-input-platforms.yml` 在相關 PR 變更時，於標準 `windows-latest`／`macos-latest` runner 以 Node 24 跑上述 focused harness；job 上限 3 分鐘、step 上限 2 分鐘、`contents: read`，不安裝 npm 依賴、不跑跨 OS 全套件、不用 larger runner、secret、artifact 或付費服務。驗收請保存 exact head SHA、Actions run URL 與輸出的 OS/architecture/Node/TTY；通過只涵蓋記錄到的 image/TTY 組合。
+
+「MCP host launch/capture」在此只涉及 **auth setup 腳本**被其他 host 啟動時的 stdin/stdout 契約；`src/server.js` 的 MCP stdio 路徑不啟動此腳本，也不互動索取 passphrase。harness 以真正 pipe handles 驗證 auth 無 passphrase 時 fail closed、有假環境 passphrase 時跳過 prompt，兩者都在 callback/network 前停止。這可離線驗證 repository 的 host 契約；不是某個未指名 MCP client 的 UI/錄影證據。若實際 host 另外提供 TTY 或錄影，需記錄它的版本、launch/TTY 類型並確認沒有 stdin/按鍵擷取；隱藏輸出無法阻止 host 自行記錄輸入。不需真實帳號來完成這些檢查。
+
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
 
 ## 使用範例

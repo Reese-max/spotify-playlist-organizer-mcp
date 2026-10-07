@@ -2,6 +2,7 @@ import { trackSummary } from "./core.js";
 import {
   awaitWithDeadline,
   fetchWithDeadline,
+  maxReadRetriesFromEnv,
   retryDelayMs,
   timeoutFromEnv,
   waitForRetry,
@@ -50,47 +51,57 @@ export class SpotifyClient {
     this.env = env;
     this.fetch = fetchImpl;
     this.clientToken = null;
+    this.refreshingClientToken = null;
     this.refreshingUserToken = null;
     this.timeoutMs = timeoutFromEnv(this.env);
-    this.maxReadRetries = Math.min(Math.max(Number(this.env.PROVIDER_MAX_READ_RETRIES) || 1, 0), 2);
+    this.maxReadRetries = maxReadRetriesFromEnv(this.env);
   }
 
   async getClientToken({ signal } = {}) {
     if (this.env.SPOTIFY_ACCESS_TOKEN?.trim()) return this.env.SPOTIFY_ACCESS_TOKEN.trim();
     if (this.clientToken && this.clientToken.expiresAt > Date.now()) return this.clientToken.value;
+    if (this.refreshingClientToken) return this.refreshingClientToken;
 
-    const clientId = required(this.env, "SPOTIFY_CLIENT_ID");
-    const clientSecret = required(this.env, "SPOTIFY_CLIENT_SECRET");
-    const response = await fetchWithDeadline(this.fetch, TOKEN_URL, {
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + Buffer.from(clientId + ":" + clientSecret).toString("base64"),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ grant_type: "client_credentials" }),
-    }, {
-      signal,
-      timeoutMs: this.timeoutMs,
-      operation: "Spotify client token request",
-    });
-    const data = await readResponse(response, {
-      signal,
-      timeoutMs: this.timeoutMs,
-      operation: "Spotify client token response",
-    });
-    if (!response.ok) {
-      throw new SpotifyApiError(
-        response.status,
-        "Spotify client token request failed.",
-        data,
-        response.status === 429 ? "HTTP_429" : response.status >= 500 ? "HTTP_5XX" : null,
-      );
+    this.refreshingClientToken = (async () => {
+      const clientId = required(this.env, "SPOTIFY_CLIENT_ID");
+      const clientSecret = required(this.env, "SPOTIFY_CLIENT_SECRET");
+      const response = await fetchWithDeadline(this.fetch, TOKEN_URL, {
+        method: "POST",
+        headers: {
+          Authorization: "Basic " + Buffer.from(clientId + ":" + clientSecret).toString("base64"),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ grant_type: "client_credentials" }),
+      }, {
+        signal,
+        timeoutMs: this.timeoutMs,
+        operation: "Spotify client token request",
+      });
+      const data = await readResponse(response, {
+        signal,
+        timeoutMs: this.timeoutMs,
+        operation: "Spotify client token response",
+      });
+      if (!response.ok) {
+        throw new SpotifyApiError(
+          response.status,
+          "Spotify client token request failed.",
+          data,
+          response.status === 429 ? "HTTP_429" : response.status >= 500 ? "HTTP_5XX" : null,
+        );
+      }
+      this.clientToken = {
+        value: data.access_token,
+        expiresAt: Date.now() + Math.max(0, Number(data.expires_in ?? 3600) - 60) * 1000,
+      };
+      return this.clientToken.value;
+    })();
+
+    try {
+      return await this.refreshingClientToken;
+    } finally {
+      this.refreshingClientToken = null;
     }
-    this.clientToken = {
-      value: data.access_token,
-      expiresAt: Date.now() + Math.max(0, Number(data.expires_in ?? 3600) - 60) * 1000,
-    };
-    return this.clientToken.value;
   }
 
   async refreshUserToken({ signal } = {}) {
@@ -203,10 +214,13 @@ export class SpotifyClient {
       }
 
       if (!response.ok) {
-        const detail = typeof data === "object" && data?.error?.message ? data.error.message : response.statusText;
+        // Never echo provider-supplied text: error bodies may reflect
+        // request details carrying secrets. The raw body stays on
+        // error.body for local debugging; tool output only carries this
+        // fixed message plus the typed code/status.
         throw new SpotifyApiError(
           response.status,
-          "Spotify API request failed: " + detail,
+          "Spotify API request failed for " + method + " " + path + " with status " + response.status + ".",
           data,
           response.status === 429 ? "HTTP_429" : response.status >= 500 ? "HTTP_5XX" : null,
         );

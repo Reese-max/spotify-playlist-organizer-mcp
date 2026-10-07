@@ -268,6 +268,16 @@ Windows 的 Node/libuv `setRawMode(false)` 會將原生模式設為 processed/li
 
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
 
+## Provider 逾時、取消與重試
+
+所有 YouTube、Spotify、OAuth token 與 YouTube oEmbed HTTP 呼叫都經過 `src/http.js` 的共用 deadline 層：每個 request 與 response body 讀取都有有限期限，不會有永遠等不到的 provider 呼叫。
+
+- `PROVIDER_TIMEOUT_MS`（預設 `15000`，範圍 1–120000）：單次 request／body 讀取的期限；`PROVIDER_MAX_READ_RETRIES`（預設 `1`，範圍 0–2）：冪等讀取（GET）在 429／5xx 時的額外重試次數，`0` 表示只試一次。
+- MCP／HTTP 呼叫端的取消會經 `AbortSignal` 傳遞到底層 `fetch`，正在進行的 provider request 會被中止；`CALLER_CANCELLED`（呼叫端取消）與 `TIMEOUT`（provider 逾時）、`NETWORK_ERROR`（連線失敗）、`HTTP_429`／`HTTP_5XX`、`AUTH_REFRESH_FAILED` 是各自獨立的錯誤碼。
+- 429／5xx 只對冪等讀取做有限重試，遵守 provider 的 `Retry-After` 並採指數 backoff；寫入（POST／PUT／DELETE）逾時或失敗永不自動重試——回傳 `UNKNOWN_AFTER_WRITE`，請依 receipt 的 exact ID 讀回確認後再決定下一步（見「使用範例」）。
+- OAuth token 兌換／刷新使用同一 deadline 原語；併發的 token 請求會去重為單一底層呼叫。
+- timeout／cancel／錯誤訊息不含 access token、refresh token、client secret 或授權碼（provider 回傳的原始文字不會直接放入工具輸出，raw body 只保留在 error 物件供本機除錯）；每次呼叫結束都會釋放 timer 與 abort listener，重複逾時不會累積資源。
+
 ## 使用範例
 
 先取得候選，不會寫入帳號：

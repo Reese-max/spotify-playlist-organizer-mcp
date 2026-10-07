@@ -280,12 +280,79 @@ test("a stream already flowing stays flowing after entry", { timeout: 20_000 }, 
   assert.equal(input.isPaused(), false, "input was paused even though the caller resumed it");
 });
 
-test("stray continuation, C1, and impossible lead bytes are dropped", { timeout: 20_000 }, async () => {
+test("valid Unicode byte-order marks remain part of the typed passphrase", { timeout: 20_000 }, async () => {
   const input = new FakeTtyInput();
   const output = new FakeTtyOutput();
   const pending = readHiddenLine({ input, output });
-  input.feed(Buffer.from([0x61, 0x80, 0x9f, 0xc0, 0xc1, 0xf5, 0xff, 0x62, 0x0d]));
-  assert.equal(await pending, "ab");
+  const typed = "\uFEFFfake\uFEFFphrase";
+  input.feed(typed + "\r");
+  assert.equal(await pending, typed);
+  assert.equal(output.text.includes(typed), false);
+});
+
+test("stray or impossible UTF-8 bytes fail closed without altering the passphrase", { timeout: 20_000 }, async () => {
+  for (const bytes of [[0x80], [0x9f], [0xc0], [0xc1], [0xf5], [0xff], [0xc3, 0xff, 0xa9]]) {
+    const input = new FakeTtyInput();
+    const output = new FakeTtyOutput();
+    const pending = readHiddenLine({ input, output });
+    input.feed(Buffer.from([0x61, ...bytes, 0x62, 0x0d]));
+    await assert.rejects(pending, (error) => error.code === "HIDDEN_INPUT_INVALID");
+    assert.equal(input.isRaw, false);
+    assert.equal(output.text, "\n");
+  }
+});
+
+test("already-ended terminal streams fail closed before switching raw mode", { timeout: 20_000 }, async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  input.destroy();
+  await once(input, "close");
+  await assert.rejects(
+    readHiddenLine({ input, output }),
+    (error) => error.code === "HIDDEN_INPUT_UNAVAILABLE",
+  );
+  assert.deepEqual(input.rawCalls, []);
+  assert.equal(output.text, "");
+
+  const liveInput = new FakeTtyInput();
+  const closedOutput = new FakeTtyOutput();
+  closedOutput.destroy();
+  await once(closedOutput, "close");
+  await assert.rejects(
+    readHiddenLine({ input: liveInput, output: closedOutput }),
+    (error) => error.code === "HIDDEN_INPUT_UNAVAILABLE",
+  );
+  assert.deepEqual(liveInput.rawCalls, []);
+});
+
+test("output closing mid-entry fails closed and restores input state", { timeout: 20_000 }, async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  input.pause();
+  const pending = readHiddenLine({ input, output });
+  output.destroy();
+  await assert.rejects(pending, (error) => error.code === "HIDDEN_INPUT_UNAVAILABLE");
+  assert.equal(input.isRaw, false);
+  assert.equal(input.isPaused(), true);
+  assert.equal(input.listenerCount("data"), 0);
+});
+
+test("a failing input resume restores terminal state and detaches listeners", { timeout: 20_000 }, async () => {
+  for (const paused of [false, true]) {
+    const input = new FakeTtyInput();
+    const output = new FakeTtyOutput();
+    if (paused) input.pause();
+    input.resume = () => { throw new Error("synthetic resume failure"); };
+    const exitsBefore = process.listenerCount("exit");
+    await assert.rejects(
+      readHiddenLine({ input, output }),
+      (error) => error.code === "HIDDEN_INPUT_UNAVAILABLE",
+    );
+    assert.equal(input.isRaw, false);
+    assert.equal(input.isPaused(), paused);
+    for (const event of ["data", "end", "close"]) assert.equal(input.listenerCount(event), 0);
+    assert.equal(process.listenerCount("exit"), exitsBefore);
+  }
 });
 
 function hasLinuxScriptPty() {
@@ -314,7 +381,10 @@ test("PTY: the interactive passphrase prompt produces a zero-echo transcript", {
   try {
     await waitFor(() => transcript.includes("passphrase"));
     child.stdin.write(SENTINEL + "\r");
-    await exited;
+    const [code] = await exited;
+    assert.equal(code, 1);
+    assert.match(transcript, /GOOGLE_CLIENT_ID is required/);
+    assert.equal(transcript.includes("Open this URL"), false);
     assert.match(transcript, /passphrase/i);
     assert.equal(
       transcript.includes(SENTINEL),

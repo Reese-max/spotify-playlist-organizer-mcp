@@ -23,7 +23,7 @@ export class HiddenInputError extends Error {
 // uncaught exception (and crash the auth flow) once our listener is gone.
 function swallowLateError() {}
 
-const strictDecoder = new TextDecoder("utf-8", { fatal: true });
+const strictDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 // Decoding bytes that are not valid UTF-8 with the default replacement
 // behaviour would silently store a different passphrase than the one typed,
@@ -77,7 +77,9 @@ function incompleteTailStart(bytes) {
 // removes one code point, Ctrl+C/Ctrl+D aborts, and a stream end, error, or
 // close fails closed instead of hanging. Resolves on Enter.
 export function readHiddenLine({ input, output, prompt = "" } = {}) {
-  if (!canDisableEcho(input, output)) {
+  if (!canDisableEcho(input, output)
+    || input.destroyed || input.readableEnded || input.readable === false
+    || output.destroyed || output.writableEnded || output.writable === false) {
     return Promise.reject(new HiddenInputError(
       "HIDDEN_INPUT_UNAVAILABLE",
       "This terminal cannot guarantee hidden input; typed secrets would be echoed.",
@@ -128,6 +130,7 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
     // 0 = normal, 1 = saw ESC, 2 = inside CSI (until final byte), 3 = inside SS3.
     let escape = 0;
     let invalidCause = null;
+    let settled = false;
 
     const detach = () => {
       input.off("data", onData);
@@ -135,6 +138,7 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
       input.off("error", onStreamEnd);
       input.off("close", onStreamEnd);
       output.off("error", onStreamEnd);
+      output.off("close", onStreamEnd);
       // A stream that errors after this read settled must not take the
       // process down with it.
       if (input.listenerCount("error") === 0) input.on("error", swallowLateError);
@@ -142,6 +146,8 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
     };
 
     const finish = (error) => {
+      if (settled) return;
+      settled = true;
       detach();
       process.off("exit", restoreOnExit);
       restoreInput();
@@ -215,7 +221,7 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
           // ASCII and real UTF-8 lead bytes start a character; continuation
           // bytes only count while a lead byte is still open. Stray
           // continuation/C1 bytes and impossible leads (0xC0-0xC1, 0xF5+)
-          // are dropped instead of becoming invisible passphrase garbage.
+          // fail closed instead of silently altering the typed passphrase.
           const starter = byte < 0x80 || (byte >= 0xc2 && byte <= 0xf4);
           const continuation = byte >= 0x80 && byte <= 0xbf;
           if (starter || (continuation && pending.length > 0)) {
@@ -233,6 +239,9 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
               captured += text;
               pending = pending.subarray(complete);
             }
+          } else {
+            done = "invalid";
+            break;
           }
         }
         // Other C0 control bytes (tab, etc.) are ignored.
@@ -251,6 +260,7 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
     try {
       input.setRawMode(true);
     } catch (cause) {
+      restoreInput();
       reject(new HiddenInputError(
         "HIDDEN_INPUT_UNAVAILABLE",
         "This terminal cannot guarantee hidden input; typed secrets would be echoed.",
@@ -260,17 +270,20 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
     }
     // Registered before the prompt write so the terminal is restored even if
     // writing the prompt fails or the process dies mid-entry.
-    process.once("exit", restoreOnExit);
-    // Listeners attach before the prompt so an already-flowing input cannot
-    // drop keystrokes typed between the prompt write and the attach.
-    input.on("data", onData);
-    input.once("end", onStreamEnd);
-    input.once("error", onStreamEnd);
-    input.once("close", onStreamEnd);
-    output.once("error", onStreamEnd);
     try {
+      process.once("exit", restoreOnExit);
+      // Listeners attach before the prompt so an already-flowing input cannot
+      // drop keystrokes typed between the prompt write and the attach.
+      input.on("data", onData);
+      input.once("end", onStreamEnd);
+      input.once("error", onStreamEnd);
+      input.once("close", onStreamEnd);
+      output.once("error", onStreamEnd);
+      output.once("close", onStreamEnd);
       output.write(prompt);
+      if (!settled) input.resume();
     } catch (cause) {
+      settled = true;
       detach();
       process.off("exit", restoreOnExit);
       restoreInput();
@@ -281,6 +294,5 @@ export function readHiddenLine({ input, output, prompt = "" } = {}) {
       ));
       return;
     }
-    input.resume();
   });
 }

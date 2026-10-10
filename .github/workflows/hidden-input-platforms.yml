@@ -1,0 +1,42 @@
+name: Native hidden input
+
+on:
+  pull_request:
+    paths:
+      - src/hidden-input.js
+      - scripts/youtube-auth.js
+      - scripts/fixtures/hidden-input-terminal.mjs
+      - scripts/test-hidden-input-terminal.py
+      - .github/workflows/hidden-input-platforms.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-hidden-input-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  native-terminal:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python: python
+          - os: macos-latest
+            python: python3
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Synthetic native terminal and pipe host acceptance
+        shell: bash
+        timeout-minutes: 2
+        run: ${{ matrix.python }} scripts/test-hidden-input-terminal.py

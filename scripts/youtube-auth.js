@@ -1,8 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
-import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { Writable } from "node:stream";
 import {
   CredentialStore,
   credentialsFromTokenResponse,
@@ -10,6 +8,7 @@ import {
   scopeCovers,
 } from "../src/credentials.js";
 import { loadEnvFile } from "../src/env.js";
+import { canDisableEcho, readHiddenLine } from "../src/hidden-input.js";
 import { awaitWithDeadline, fetchWithDeadline, timeoutFromEnv } from "../src/http.js";
 import { redactSecrets } from "../src/redact.js";
 
@@ -35,22 +34,31 @@ function finish(server, message, exitCode) {
 
 async function ensurePassphrase() {
   if (process.env.YOUTUBE_CREDENTIAL_PASSPHRASE) return;
-  if (!input.isTTY || !output.isTTY) {
+  if (!canDisableEcho(input, output)) {
     throw new Error(
       "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the local shell before running npm run youtube:auth.",
     );
   }
-  const muted = new Writable({ write(chunk, encoding, callback) { callback(); } });
-  const readline = createInterface({ input, output: muted, terminal: true });
+  let passphrase;
   try {
-    output.write("Credential passphrase (stored locally, never printed): ");
-    const passphrase = await readline.question("");
-    output.write("\n");
-    if (!passphrase) throw new Error("A non-empty credential passphrase is required.");
-    process.env.YOUTUBE_CREDENTIAL_PASSPHRASE = passphrase;
-  } finally {
-    readline.close();
+    passphrase = await readHiddenLine({
+      input,
+      output,
+      prompt: "Credential passphrase (stored locally, never printed): ",
+    });
+  } catch (error) {
+    if (error?.code === "HIDDEN_INPUT_UNAVAILABLE"
+      || error?.code === "HIDDEN_INPUT_CANCELLED"
+      || error?.code === "HIDDEN_INPUT_INVALID") {
+      throw new Error(
+        "YOUTUBE_CREDENTIAL_PASSPHRASE is required. Set it in the local shell before running npm run youtube:auth.",
+        { cause: error },
+      );
+    }
+    throw error;
   }
+  if (!passphrase?.trim()) throw new Error("A non-empty credential passphrase is required.");
+  process.env.YOUTUBE_CREDENTIAL_PASSPHRASE = passphrase;
 }
 
 function parseTokenResponse(text) {

@@ -268,7 +268,9 @@ function viewConfirm() {
       <div class="sub" style="margin-top:12px">
         Playlist: ${esc(yt.playlist?.name ?? "—")}
         ${yt.playlistAction ? `<span class="badge b-info">${esc(yt.playlistAction.replaceAll("_", " "))}</span>` : ""}
-        ${dup.youtubePlaylistItem ? `<span class="badge b-warn">already in playlist</span>` : ""}
+        ${dup.youtubePlaylistItem
+          ? `<span class="badge b-warn">${dup.youtubePlaylistItemKind === "canonical_track" ? "same song in playlist (different upload)" : "already in playlist"}</span>`
+          : ""}
       </div>
       ${receipt.nextStep ? `<div class="next">${esc(receipt.nextStep)}</div>` : ""}
       <div class="row">
@@ -309,11 +311,19 @@ function viewResult() {
     reconciliation_required: { cls: "b-bad", label: "Write outcome unknown", body: "The provider may or may not have applied the write. Do not retry blindly." },
     failed: { cls: "b-bad", label: "Failed", body: "Nothing was saved." },
   };
-  const v = variants[action] ?? { cls: "b-warn", label: esc(action), body: "" };
+  // The YouTube step reports skipped_canonical_duplicate while the top-level
+  // action stays "saved"/"skipped_duplicate" — surface the real outcome so the
+  // user does not think a second copy was added to the playlist.
+  const v = r.youtube?.action === "skipped_canonical_duplicate"
+      && (action === "saved" || action === "skipped_duplicate")
+    ? { cls: "b-info", label: "Same song already in playlist", body: "Another upload of this song is already in the target playlist — nothing was duplicated." }
+    : variants[action] ?? { cls: "b-warn", label: esc(action), body: "" };
   const steps = [
-    ["Library", r.library?.writeState],
-    ["YouTube", r.youtube?.writeState],
-  ].map(([name, s]) => s ? `<div class="sub">${name}: <span class="mono">${esc(s)}</span></div>` : "").join("");
+    ["Library", r.library],
+    ["YouTube", r.youtube],
+  ].map(([name, step]) => step?.writeState
+    ? `<div class="sub">${name}: <span class="mono">${esc(step.writeState)}</span>${step.error?.message ? ` — ${esc(step.error.message)}` : ""}</div>`
+    : "").join("");
 
   app.innerHTML = `
     <div class="card">

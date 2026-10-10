@@ -253,6 +253,7 @@ export function createServer(library) {
             ...(await client.searchTracks(query, { limit: 5, market, signal: extra?.signal })),
           });
         } catch (error) {
+          if (error?.code === "CALLER_CANCELLED") throw error;
           results.push({ input, error: error instanceof Error ? error.message : String(error) });
         }
       }
@@ -992,7 +993,7 @@ export function createServer(library) {
   server.registerTool(
     "import_music_batch",
     {
-      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch or retry transient provider failures). Only resolved items are written; per-item results distinguish retryable from unavailable, and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly.",
+      description: "Apply an import plan — pass the same inputs as preview_import or a batchId (with resume:true to continue a cancelled batch or retry transient provider failures). Only resolved items are written; per-item results distinguish retryable from unavailable, and re-runs are idempotent. YouTube playlist writes happen only when syncPlaylist is passed explicitly. Receipts are bounded at 500 entries; page the full per-item record through import_status.",
       inputSchema: z.object({
         items: z.array(z.string().min(1)).max(2000).optional(),
         playlist: z.string().min(1).optional(),
@@ -1009,9 +1010,11 @@ export function createServer(library) {
   server.registerTool(
     "import_status",
     {
-      description: "Read-only progress of a stored import batch: total counts plus done/pending item tallies.",
+      description: "Read-only progress of a stored import batch: total counts, done/pending tallies, and a bounded page of per-item detail (status/result/sync outcome/error). Use offset+limit to page through large batches; nextOffset continues the window. This is the reconciliation point when an apply response was lost to timeout or cancellation.",
       inputSchema: z.object({
         batchId: z.string().min(1),
+        offset: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(500).optional(),
       }),
     },
     safeTool((args) => importStatus(library, args)),

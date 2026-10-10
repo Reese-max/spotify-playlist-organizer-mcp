@@ -129,15 +129,23 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 ### 收藏 UI（`GET /`）
 
-`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt，`UNKNOWN_AFTER_WRITE` 提供一鍵 `POST /api/reconcile` read-back。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
+`public/index.html` 是一個免建置、行動裝置寬度（480px）的單頁收藏介面，由 `GET /` 直接送出（靜態 shell 不需 session；所有 `/api/*` 呼叫仍要 Bearer token）。流程：貼上歌名或 YouTube/YouTube Music 連結 → `POST /session`（貼 bootstrap token）→ preview；free text 回 `selection_required` 時列出候選、必須明確選 `videoId`（絕不自動選第一個）；confirm 畫面顯示分類 chips、duplicate badge（含 playlist 內 canonical 重複的「different upload」標示）、目標 playlist 與 `playlistAction`；apply 後顯示 `saved`/`skipped_duplicate`/`partial_failure`/`reconciliation_required` receipt——YouTube step 回 `skipped_canonical_duplicate` 時改顯示「Same song already in playlist」（同一首歌的其他上傳已在 playlist，library 改為連結既有 source），失敗步驟列出各自 error message；`UNKNOWN_AFTER_WRITE`/`PARTIAL_PLAYLIST_CREATED` 提供一鍵 `POST /api/reconcile` read-back 與安全 nextStep。首頁列出 recent（`/api/library/recent`）與 needs-attention（`/api/library/unsynced`，含 reason badge 與 reconcile 按鈕）。前端不重複實作 canonicalization/dedup/sync——全部走 facade；回應與 bundle 皆不含 provider 憑證。
 
 ## 批次匯入
 
 `src/batch-import.js` 把既有 YouTube / YouTube Music 收藏一次帶進音樂庫，不必逐首 `save_music`。管線：parse → resolve → canonicalize → dedupe → preview plan → apply → 可選 YouTube 同步。
 
-- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`retryable`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`）。精確 ID 的 provider 暫時錯誤標為 `retryable`；僅確認不存在、私人或刪除的影片標為 `unavailable`。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
-- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷或暫時失敗的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`retryable`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。
-- `import_status`：查已存批次的 `counts`＋`done`/`pending`。
+- `preview_import`：接受 `items`（混合 URL／video ID／每行純文字歌名）與／或 `playlist`（精確 ID 或 URL）。回傳 `batchId` ＋ `counts`（`total`/`new`/`exactDuplicate`/`canonicalDuplicate`/`unresolved`/`retryable`/`unavailable`）＋逐項解析狀態（`resolvedBy`: `url`/`id`/`search`/`playlist`，失敗項附 `error`）。精確 ID 的 provider 暫時錯誤標為 `retryable`；僅確認不存在、私人或刪除的影片標為 `unavailable`。不寫曲目、不碰 provider；plan 存進 `import.<batchId>` sync_state 供 apply 使用。單筆超過 500 項時 `items` 截斷並標 `truncated`。
+- `import_music_batch`：傳同樣輸入（重新解析）或 `batchId`＋`resume:true`（接續中斷或暫時失敗的批次）。只寫入已解析項目；逐項回 `imported`/`exact_duplicate`/`canonical_duplicate`/`review`（低信心身份留待確認）/`unresolved`/`retryable`/`unavailable`/`failed`，單項失敗不回滾其他項；同批重跑全部報 `exact_duplicate`，是冪等的。預設**只寫本機 Library**——要同步到某個 YouTube playlist 必須每次呼叫明確傳 `syncPlaylist`（精確 ID/URL），已在 playlist 內的不重複加。`results` 與 `sync.results` 皆以 500 筆為上限，超過時標 `resultsTruncated`/`resultsTotal`；完整逐項紀錄（含逐項 sync 結果）存於 plan，用 `import_status` 分頁取回。
+- `import_status`：查已存批次的 `counts`＋`done`/`pending`，並以 `offset`/`limit`（預設 100、上限 500）回傳有界的逐項 `status`/`result`/`syncResult`/`error` 視窗，`itemsTruncated`/`nextOffset` 標示續頁。apply 回應因逾時或中斷遺失時，這裡是逐項對帳點。`syncResult` 有四個值：`added`（provider 已確認加入）、`already_present`（這次同步時該影片已在目標 playlist，未發出 append）、`failed`（確定失敗，可直接重試）、`unknown_after_write`（**寫入結果不明**——重試前必須先用 exact video ID 核對 playlist，否則會重複加入）。
+
+計數口徑：`sync.results`／`sync.failed`／`sync.unknown` 是**每次實際 append 嘗試**（同一 `videoId` 只算一次，批內重複列不重複加），`import_status.items` 則是**逐 plan 列**（重複列鏡射同一 `videoId` 的結果）。所以一個 videoId 失敗會讓 `import_status` 看到兩列 `syncResult:"failed"` 而 `sync.failed` 仍是 1——兩者都對，只是分母不同。`already_present` 不算 append 嘗試，所以只出現在 `import_status`。
+
+安全：batch import 落進 plan（sync_state）的 provider 錯誤訊息與**呼叫端貼上的 `items` 文字**，以及 **MCP tool 丟出的 `error`／`nextStep` 與 HTTP facade 的錯誤 `message`**，都會先過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`GOCSPX-…`、含前綴的 OAuth 指派如 `invalid_client_id=`、JSON 引號形如 `"client_secret":"…"`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。因此 `preview_import`／`import_status` 回傳的 `input` 會與你貼的原文不同——那是刻意的。讀取端同樣會 redact，所以舊版本寫入、當時未經處理的 plan 也不會在 `import_status` 回吐憑證。這組較寬鬆的樣式（OAuth 指派與 `GOCSPX-…`）**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。`save_music`／`library_sync`／`library_query` 各自在**成功回應**內嵌的 `errorInfo` 尚未接上這層 redact，不受本保證涵蓋。
+
+同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**並自帶 `playlistId`（此欄位只有本版之後寫入的 plan 才有，早期 plan 沒有）：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗（連同它所屬的目標 playlist）仍是最後已知狀態。apply 回應的 `sync.error` 是同一份內容（`playlistId`/`code`/`message`/`status`）：preflight 失敗時它取代了舊版塞在 `results` 裡的 `sync_failed` 項目，所以**光看 `results` 會看不到這筆失敗**，要改看 `sync.error`。`import_status` 的逐項視窗另含 `syncPlaylistId`，指出該列最後一次同步寫進哪個 playlist。
+
+`import_music_batch` 回應裡的 `counts` 是用 `countBy(plan.items)` 重述 plan 的**解析狀態**（`new`/`exactDuplicate`/… ，preview 那一套），不是這次 apply 的**結果**分佈；逐項結果看 `results`，逐項 sync 結果看 `import_status`。已匯入的項目仍會留在 `counts.new`，因為它解析時就是 `new`。
 
 取消／逾時／暫時 provider 錯誤：apply 每 25 項 chunk flush 一次 plan；未完成項目保持 pending，回 `remaining` ＋ `batchId`，之後用 `resume:true` 安全續作。caller abort 另回 `action:"cancelled"`。
 
@@ -229,6 +237,15 @@ PROVIDER_TIMEOUT_MS=15000
 PROVIDER_MAX_READ_RETRIES=1
 ```
 
+### Provider 請求界線（timeout／取消）
+
+所有對 YouTube、Spotify、OAuth token 與 YouTube oEmbed 的 HTTP 請求都經過同一層 deadline/取消包裝（`src/http.js`）：
+
+- 每個請求與其回應 body 讀取都有有限 deadline：預設 15000ms，`PROVIDER_TIMEOUT_MS` 可調（1–120000ms 之間收敛）。
+- MCP `notifications/cancelled` 會把進行中的 provider 請求 abort；HTTP facade 在 client 斷線時同樣傳遞取消。caller 取消回 `CALLER_CANCELLED`，與 `TIMEOUT`、`NETWORK_ERROR`、`HTTP_429`、`HTTP_5XX`、`AUTH_REFRESH_FAILED` 分開分類。
+- GET 讀取遇到 429/5xx 依 Retry-After／指數退避做有限次重試（`PROVIDER_MAX_READ_RETRIES`，0–2）；寫入永不自動重試——timeout、取消或網路錯誤視為 ambiguous，回 `UNKNOWN_AFTER_WRITE`／`reconciliation_required`，由 read-back 對帳（見「YouTube ↔ 音樂庫同步」）。
+- timeout／cancel／error 輸出不含 access token、refresh token、client secret 或 authorization code；計時器與 abort listener 在請求結束後一律釋放。
+
 首次授權請執行：
 
 ```powershell
@@ -238,6 +255,16 @@ npm run youtube:auth
 `youtube:auth`、MCP stdio server 與 HTTP facade 啟動時都會自動載入專案根目錄的 `.env`（Node 原生 `process.loadEnvFile`）——已存在的環境變數優先，`.env` 只補缺少的 key；缺少 `.env` 不算錯誤。
 
 這個流程會使用 OAuth state 與 PKCE，開啟瀏覽器完成 Google 授權，並把 token 寫入本機 AES-256-GCM 加密檔。終端機只會顯示檔案位置與完成狀態，不會顯示 access token 或 refresh token。執行 MCP Server 時，仍須讓它取得同一個 `YOUTUBE_CREDENTIAL_PASSPHRASE`；不要把 passphrase、`.env` 或憑證檔提交到 Git。
+
+未設定 `YOUTUBE_CREDENTIAL_PASSPHRASE` 且 stdin/stdout 為 TTY 時，`youtube:auth` 會以 raw mode 關閉終端機回顯後才讀取 passphrase——輸入不會出現在螢幕、一般終端輸出錄影或 PTY output capture 中。若 recorder 或 host 另行擷取 stdin／按鍵，仍可能記錄輸入；輸入 passphrase 時不要啟用這類 capture。若執行環境無法保證關閉回顯（非 TTY、不支援 raw mode 的 host），腳本會在啟動 OAuth callback 或任何網路請求之前 fail closed，要求改用環境變數提供 passphrase。中途取消（Ctrl+C）或終端送來損壞、不完整的位元組也會走同一條 fail-closed 路徑，不會把被截斷的輸入當成 passphrase 存進憑證檔。
+
+原生終端回歸可用 `python scripts/test-hidden-input-terminal.py`（macOS/Linux 用 `python3`）執行，不需 npm 套件、帳號或 OAuth：Windows 直接呼叫 Win32 `CreatePseudoConsole`，macOS/Linux 使用 POSIX `openpty`，不偽造 `isTTY`。先以開啟 echo 的原生終端確認 capture 偵測器能抓到假哨兵，再驗證隱藏輸入、Unicode/backspace、Enter、Ctrl+C/Ctrl+D、同一終端恢復 cooked echo，以及真實 auth entrypoint 的 pre-OAuth 失敗。子程序只取得隔離的假設定，禁止載入 `.env`、callback 或任何網路連線；不保存輸入或 transcript，只印平台/Node/TTY 與結果。ConPTY 會先轉譯輸入 UTF-8，因此 malformed-byte 拒絕另由 helper unit tests 驗證，不把 ConPTY 的轉碼當成 helper 收到原始位元組的證據。
+
+`.github/workflows/hidden-input-platforms.yml` 在相關 PR 變更時，於標準 `windows-latest`／`macos-latest` runner 以 Node 24 跑上述 focused harness；job 上限 3 分鐘、step 上限 2 分鐘、`contents: read`，不安裝 npm 依賴、不跑跨 OS 全套件、不用 larger runner、secret、artifact 或付費服務。驗收請保存 exact head SHA、Actions run URL 與輸出的 OS/architecture/Node/TTY；通過只涵蓋記錄到的 image/TTY 組合。
+
+Windows 的 Node/libuv `setRawMode(false)` 會將原生模式設為 processed/line/echo，並不逐位保存所有其他 console flags。harness 記錄完整 before/during/after mode 值，要求相關三個 flags 恢復，且在同一 console 實際讀取 cooked line、觀察 echo；不能將此結果當成所有 Win32 console flags 都原樣恢復的保證。
+
+「MCP host launch/capture」在此只涉及 **auth setup 腳本**被其他 host 啟動時的 stdin/stdout 契約；`src/server.js` 的 MCP stdio 路徑不啟動此腳本，也不互動索取 passphrase。harness 以真正 pipe handles 驗證 auth 無 passphrase 時 fail closed、有假環境 passphrase 時跳過 prompt，兩者都在 callback/network 前停止。這可離線驗證 repository 的 host 契約；不是某個未指名 MCP client 的 UI/錄影證據。若實際 host 另外提供 TTY 或錄影，需記錄它的版本、launch/TTY 類型並確認沒有 stdin/按鍵擷取；隱藏輸出無法阻止 host 自行記錄輸入。不需真實帳號來完成這些檢查。
 
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 只可作為明確的本機 fallback，不建議在一般部署中使用，也不得提交到 repository；使用 fallback 時 `youtube_auth_status` 會回報 `warning: "INSECURE_ENVIRONMENT_FALLBACK"`。環境變數中的 token 必須與本機加密憑證檔內的同一個 OAuth grant 相符，且該檔記錄的 scope 必須包含 YouTube scope，否則狀態會是 `UNKNOWN`，工具會 fail closed。若原本只用 `.env` 裡的 token，請移除 `YOUTUBE_ACCESS_TOKEN`／`YOUTUBE_REFRESH_TOKEN`，設定本機 passphrase，重新執行 `npm run youtube:auth` 建立可驗證 scope 的加密憑證；不要把舊 token 複製進憑證檔或終端輸出。
 
@@ -338,7 +365,17 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 - **CRAP 目前只做報表不做閘**：`saveMusic`（comp 99）與 `importRows`（comp 79）即使高覆蓋也因複雜度上榜——先看基線再定閘值。
 - Baseline（2026-09，spotify.js 不計）：行 ~85% / 分支 ~78% / 函數 ~93%；`src/core.js` mutation score 46.6%（268 mutants）。
 
-GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
+### GitHub Actions 驗證
+
+`.github/workflows/ci.yml` 會在每次 push 與 pull request 以 Ubuntu、Node.js 24 執行：
+
+1. `npm ci`
+2. `npm run lint`
+3. `npm run test:coverage`
+
+`npm run test:coverage` 使用與 `npm test` 相同的 `node --test` 完整回歸套件，因此會包含 `test/mcp-smoke.test.js`；coverage 閘門另外要求行 ≥ 80%、分支 ≥ 75%、函數 ≥ 88%。Job 設有 5 分鐘上限，權限只有 `contents: read`，不提供 YouTube／Spotify OAuth 或 API key；測試使用 stub，不會修改真實播放清單，也不應在輸出中出現 secrets。
+
+每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及 Windows、macOS 或其他 Node 版本，仍需另外驗證。Issue #5 的實際 run 證據（含隔離負向測試失敗→復原）見 [`.github/quality-audits/2026-10-01-ci-regression-validation.md`](.github/quality-audits/2026-10-01-ci-regression-validation.md)。
 
 ## 官方文件
 

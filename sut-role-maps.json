@@ -1,0 +1,1151 @@
+{
+  "repository": "Reese-max/spotify-playlist-organizer-mcp",
+  "roles": {
+    "baseline": {
+      "tree": "2b994e0886b8c2597ff56ace516c77035090d6c6",
+      "rows": [
+        {
+          "path": ".env.example",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "d71b36c5c8a9c9dfaf0eda06a47a91cffd75d308",
+          "size": 1205,
+          "sha256": "44905123aa8b38728a97dc65e7a55c9513d70790b85b89914b4c81e751e4a33a"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-14-0834Z-50-persona-audit-round-1.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "df97d763c208cef415f44f79e35c029c9c504de8",
+          "size": 21272,
+          "sha256": "c9c698e2254d8252697b2f824ecc8b1e9759f07d007ee4fe4e8c3b56061f3dab"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-14-1610-product-board-audit.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5fde5017feb0dded0388e83e3f2249a310040861",
+          "size": 33260,
+          "sha256": "31600dc0c26f3a5bf2aec74f4b915db888481c91c24d8cf24498ba502bc16b8b"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-15T0512Z-product-board-audit.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3a76fc0e8e05f90b39f248d5232e586449165281",
+          "size": 22625,
+          "sha256": "76edadf6b01afe1ab63b488066378b707f5af55af765809eb91ce9261acf7102"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-18T0207Z-50-persona-audit-round-2.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "4bf8272f6f6127cc05a32a71378f8d089e995c2d",
+          "size": 23267,
+          "sha256": "1a9a608b8676ffd23673094516feea8572491d864f99a1eaab972492514d59a5"
+        },
+        {
+          "path": ".github/quality-audits/2026-10-01-ci-regression-validation.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "bea40aa3495e742e11b4f0203c60ce59c38a2e33",
+          "size": 2832,
+          "sha256": "f9581ed8a1ae07e92a4aae716f56cc51d10ad79608d5ddda6a7cafc64c5933c1"
+        },
+        {
+          "path": ".github/quality-audits/issue-2/selected-video-binding-focused.txt",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3579fe7cc325ac839fd8b1e663286d767c8434ee",
+          "size": 423,
+          "sha256": "e5e9bcc461803fe71853bae31b8993fcfbbcd99948a25ba2b9d77293ef19036d"
+        },
+        {
+          "path": ".github/quality-audits/issue-2/selected-video-binding-receipt.json",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "69c1f6b07027717521a5a62ede81de656721119f",
+          "size": 5369,
+          "sha256": "92091b3c3cdfc1b0eaf328d30291ec0b36557846f6d49dfe90a939c080c5edde"
+        },
+        {
+          "path": ".github/quality-audits/issue-2/selected-video-binding-research.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ac2521ebee938d1cc9189b3a082e51b07e81293b",
+          "size": 4392,
+          "sha256": "44d61cd076d48ffcc0f0708c99cd94993c3a7d44495cd203de2e591a2b0de023"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5cb774dc15e28d736b0787c953ea32cf873bc6a5",
+          "size": 514,
+          "sha256": "253c02e3794c31ec0a10606f42a82342cdb340e75ad8cd2f73ebd15438eaa7f5"
+        },
+        {
+          "path": ".github/workflows/hidden-input-platforms.yml",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "403c9fa6ca2f357218bf5b3d5b8c83ae7a7736e5",
+          "size": 1085,
+          "sha256": "2fc4138a813fa66b73b2361539ad06500ccf2212c076d2f0fd0200d79cc551f9"
+        },
+        {
+          "path": ".gitignore",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "74867fef7c84007e6396827b8ea45e3d76ad2fb8",
+          "size": 215,
+          "sha256": "cf1d03be5423ebb81adc00c540356f0495560258f44ce478309c591ec0434776"
+        },
+        {
+          "path": "AGENTS.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "398954b271d8ff6e32255f021383205357e313a1",
+          "size": 4358,
+          "sha256": "2df63ccea72b783b06226d4c029c40c61b2982e3edc197eddcad2ab9b8114d80"
+        },
+        {
+          "path": "README.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "f038e2ef84f347efe3161929e0966b54c3eaca25",
+          "size": 39519,
+          "sha256": "3a7cf4f8a4c2d7f3d1c2b8dc9b0ff00d63258e74da1c966a530d24091357a298"
+        },
+        {
+          "path": "eslint.config.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "7461d74246d77fda8aba21f47fa9d7c0014d5963",
+          "size": 993,
+          "sha256": "e92c3bb15cf6fd5e63338164fa8a138f301e1cff3603d5f36e3927304e0552fe"
+        },
+        {
+          "path": "package-lock.json",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "e0457eb78c075b43122afd921ebbee8b777055b1",
+          "size": 116468,
+          "sha256": "9e0b8d6bd2885ae2d9ff7ad81bee82ab558dbbe1f17e614fcdef175e42bfef4d"
+        },
+        {
+          "path": "package.json",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5ccd08259ce47266ff3b6913cc959f4c6be567a7",
+          "size": 955,
+          "sha256": "855092b2ea703b9dcc424230e6ba3feffd8d9aa26363b615ce60fa656731b018"
+        },
+        {
+          "path": "public/index.html",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "abb84f480b66fe64a6000add9fb2fa29f16556ef",
+          "size": 18698,
+          "sha256": "35ca43e06c3cb4b70903c14f6a4777feca4879e7d03b0ff5e0011d021eb316f0"
+        },
+        {
+          "path": "scripts/crap.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "7c44cc2df63ef950669ed628546b4f7d957d9d97",
+          "size": 6766,
+          "sha256": "63972f7702bb4c5d60119d1cd03a4ce9d9ef0143a44153eb2951e81beb66a6bd"
+        },
+        {
+          "path": "scripts/fixtures/hidden-input-terminal.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "008a44d1a6a4eaf2f8f0641c5d9b5c78f574a2a3",
+          "size": 6679,
+          "sha256": "48017dcbc18294dcc22303c1bce8bb484365239528f7b923ce3080f37b2f8972"
+        },
+        {
+          "path": "scripts/test-hidden-input-terminal.py",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9f7902020b0eb7560abf44849444c8627add784c",
+          "size": 19321,
+          "sha256": "c54c98bcbb5b3826dd68f336e6637bc38e1e08924ea9ff195a993b446bcad6cf"
+        },
+        {
+          "path": "scripts/youtube-auth.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "1840df4d3da291b9d3f36673aead18588ca61c02",
+          "size": 8264,
+          "sha256": "bb52ddb5c0c76d5721f1b9bd26fc89a04fa86e2a479c9da094231bfb5c826bc5"
+        },
+        {
+          "path": "src/batch-import.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5e576acdc89f29176059d2cd611f13bb1e58c16c",
+          "size": 26603,
+          "sha256": "bbf7cfe7d25fa101bb0af416078347717f03bf1705539f816280603c48e6d914"
+        },
+        {
+          "path": "src/canonical.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "c4505b3877d2fa90e14203c9631c27cf90a6c128",
+          "size": 10539,
+          "sha256": "7ac147ffbe06ad14e4975dfb8acfbc25f432242e72402a4c94e5f8cb6d322cf8"
+        },
+        {
+          "path": "src/classify.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "497069dc64b089f677e9218d43cf1c3095f086db",
+          "size": 19402,
+          "sha256": "4f621b605ecd5ec53764426003a8b29703730074e22c0e769c929897e7b60ad7"
+        },
+        {
+          "path": "src/core.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "00ae2faa11add575bf49650f4eb76b3294f30b9f",
+          "size": 6805,
+          "sha256": "9231497b1983174edb7592fdf0cc2df1aa726e14696f98e856c21b930e74abdd"
+        },
+        {
+          "path": "src/credentials.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3ff6ca3e091c1f347efd9cd214e0163a67cd289d",
+          "size": 10243,
+          "sha256": "4a8e6530d683767d412a957634b7315ccf5b23f306942bd2c80a093ae4b6e600"
+        },
+        {
+          "path": "src/env.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9dbe3f31e8d2b410c8f75fa5e28612662e799479",
+          "size": 662,
+          "sha256": "6a8e6323ae661c1c19f8cdafd4d265e45b1870fecc037cb58ca65d1f0e6c98d0"
+        },
+        {
+          "path": "src/hidden-input.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "6fef790a46f018267f41c4fa96937cf7433d5825",
+          "size": 10288,
+          "sha256": "b16cac013fc296f956a82e21196ad9e17e9bb6e3480d67bcdb904c4009d575a6"
+        },
+        {
+          "path": "src/http-server.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "df6e2d8d8b4b599427853fbf912a0fa9c22b1ee1",
+          "size": 15330,
+          "sha256": "315c8e093ff7b3bdaf7ab72b17d834ea9d95a9f8bc437803d73188905089dd70"
+        },
+        {
+          "path": "src/http.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "c6bc82c07c2ea3d0999035a1b87a6f1b436a36f8",
+          "size": 6009,
+          "sha256": "fa3ef198cf9510050c6a14460f53560b342e0aabeaf26830e1843d3651173a96"
+        },
+        {
+          "path": "src/identity-admin.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "0a5c16c9948a9aa12598a7d92df193581ac61a1d",
+          "size": 8700,
+          "sha256": "c19fefd52729805b6a0d26f6a5c0adf18df829edf872d98ddbee44753e74edfb"
+        },
+        {
+          "path": "src/library-backup.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9f73b386ba4351393eed6e7271e616b12d370622",
+          "size": 6030,
+          "sha256": "7c8e754587788d1544cf248416aaf29353530c69080d76942b8eac5adf69ed7c"
+        },
+        {
+          "path": "src/library-query.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "82f4b445a3e4a652929b596eecac5b3c5ae31751",
+          "size": 16021,
+          "sha256": "2a0c3bd223c4c889f3f92f43b072220350bbc22c96ebb7a171e42fb9f7decb50"
+        },
+        {
+          "path": "src/library-sync.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "829faf4155b3fbb534d6d60860fff9c65b2b7800",
+          "size": 22975,
+          "sha256": "4382dba582e1e83f473fd1125c2635eac37c7b99791acac174be4b034f82e33d"
+        },
+        {
+          "path": "src/library.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "c31c2c3cb2e8738d5a4068178dbe241578457ffa",
+          "size": 81755,
+          "sha256": "386b3827227eab0e6b2950386be81021cd1999087b230371d0ad146099e19309"
+        },
+        {
+          "path": "src/playlist-admin.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "b2a053a6ee56c5f8ac6cb45de0360b14d9279019",
+          "size": 10190,
+          "sha256": "22993786cf94ebb1a7161927b645e46febb9aa2a66b38594309e753774129caf"
+        },
+        {
+          "path": "src/redact.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "162c0c20e76e6c88f320d7dc9800d8314c67c083",
+          "size": 2295,
+          "sha256": "597c0405d1fd787085fc235d8d803c93a94e796d1161612cd39930a4c779b96e"
+        },
+        {
+          "path": "src/save-music.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8e445a0615e2a6c3c55e5f9abecbce5866189390",
+          "size": 22741,
+          "sha256": "26efe5bd47d046be19af217578dfd985222d632370c05ee1bb8213c914955151"
+        },
+        {
+          "path": "src/server.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2bebe451a770da673a8cdd8c80307168ae877adf",
+          "size": 43935,
+          "sha256": "a3e66604e001e355919bc61b38850d0c206622696451ef84e976dbaf61b00d96"
+        },
+        {
+          "path": "src/spotify.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "e70bdd533057f89be566e75de8cf6bddfba48c6f",
+          "size": 10656,
+          "sha256": "d6cb9e5400d505a5053a784c408d606e93b91089c83a31a7554ab83c6a3485c1"
+        },
+        {
+          "path": "src/taxonomy.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "bed1a221fcbdb07c1a74c5c6420d9e9f26ea48a5",
+          "size": 9366,
+          "sha256": "2e33501ad7c111d2eade1526b0c967761ce7b25089c0e312bce4e36def001bbe"
+        },
+        {
+          "path": "src/version.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "f4145473500c9e19b0b75043dbcf221ae73b1f52",
+          "size": 114,
+          "sha256": "b25ae622972ac257598f3931d815a1e6538b26207e203415ea706bc48748337d"
+        },
+        {
+          "path": "src/youtube.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9dd869567caf464ba524b51cc2286d65e8eaa227",
+          "size": 29051,
+          "sha256": "2284eb0d596945985008272f4d515101e0ed9481b77f3c22451bf151af3b7b62"
+        },
+        {
+          "path": "stryker.config.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "d9e7f97edeedffd076ced1944292145bd58be117",
+          "size": 917,
+          "sha256": "651bb45b7484da9b94a18e6d4eba38f07225d02958ced9381a7eb71851818c9a"
+        },
+        {
+          "path": "test/batch-import.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5c1067d564f1cd5a706d774ff21e83382d56c8cd",
+          "size": 52310,
+          "sha256": "8d79c84e6b0f6063e7382d0207a801078ab5da63b7a8e3b33910b40dc3bd541c"
+        },
+        {
+          "path": "test/canonical.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "62c0be6b1b928f2033f55d30c1c593c5e8154a3f",
+          "size": 5567,
+          "sha256": "dc05137a7565e3e7e243bd7520f9d67ef8191c42b1127e48ffc8d5a3f2dfe18d"
+        },
+        {
+          "path": "test/ci-workflow.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9dc82be15ccf3c36ce1b150f12e5dd0931aa81d1",
+          "size": 3247,
+          "sha256": "12ba7a6c0d80e782c70b2b899a1abfc663892a6f90196e366dccd2c8bd8bef6b"
+        },
+        {
+          "path": "test/classify.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5fc242b8118364036f8572d636a27a369d9f2f51",
+          "size": 18344,
+          "sha256": "8519aadfcaf58a654425a04a1e7024a5a4b6fbf8f6e9e97dbdf14bd3ab2985bd"
+        },
+        {
+          "path": "test/core.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2d9770dbf70e2c1779bf29a3845a879404d20e1d",
+          "size": 2171,
+          "sha256": "91756d6def972d8917d54f7c619c2dccb9c1d4d52aac5eeff84aa4743883861e"
+        },
+        {
+          "path": "test/credentials.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9ffa2039ca0324828ed2118a9d0ddcbdb56ae15f",
+          "size": 1705,
+          "sha256": "4b3939d7fe5349ce418cb97a839c8eb33cf1ef687a15acfadd9db09c6d177524"
+        },
+        {
+          "path": "test/env.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2c6b902ee7376d34e54a95c9b04bd81713ab89c1",
+          "size": 2639,
+          "sha256": "f2091ed71c3e6447c5c918ef744470807c711a080d952d9f8d44b882132f5c30"
+        },
+        {
+          "path": "test/fixtures/fake-google-fetch.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2bbd68c1b0a1f1b52d99ea5e984dd3ba1ffce1b2",
+          "size": 2082,
+          "sha256": "43df5bda77cbd20d9362a98e47bf83cb57fb6f9351061e1f9b5bc0aa55ae3148"
+        },
+        {
+          "path": "test/http-server.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "514a01cad07f6d6948b7f71e4843a21af24deeb4",
+          "size": 16691,
+          "sha256": "0fbc010fb442792e3eb2b41346d42f39b83df83ee26391f7e2de08068be1e747"
+        },
+        {
+          "path": "test/http-ui.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "947d79cfdb69a6df7c7b5c732c24423556b0d544",
+          "size": 14929,
+          "sha256": "d9291d5c3eba33cc702eecfeda70878a0f54bddcd7a24249edfc0d62588ffcf1"
+        },
+        {
+          "path": "test/http.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2e43aeefa2bba58340f9982e09aee17f52c18e4d",
+          "size": 5005,
+          "sha256": "fea63050224a7dd56db12c23c64c3192256b035696f6ae8fef16ba8c62eb9853"
+        },
+        {
+          "path": "test/identity-admin.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "1572f393b9bf5ba4bf1263b8b9b412a5511d4632",
+          "size": 6854,
+          "sha256": "5b953fe45d286c51efd23575f6a41e6bab48b0fae7d429d7161ee7651051b3de"
+        },
+        {
+          "path": "test/library-backup.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8452497663756005c7b80b82c1c323f462541642",
+          "size": 12160,
+          "sha256": "23cecdfc2972e41c12c35627f01cc99ecf11cd1c7fccdb978d57840faf0318da"
+        },
+        {
+          "path": "test/library-query.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9b881da10d9dbedd6e9b658128beae11eee56418",
+          "size": 26332,
+          "sha256": "d2b078e15a47308dfc272a1685550ebf42ee5e0bc4ce7d7984f37dd36226d113"
+        },
+        {
+          "path": "test/library-sync.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3f7007fc23b15166bf63cefd331d00258b6fb79b",
+          "size": 24269,
+          "sha256": "8983cb074d785b207ee04ca00edfb403453abb2d9897675d918b04655bc99b2b"
+        },
+        {
+          "path": "test/library.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "adbfc3aa5b147a1bc8fa2f835986561e732aab0e",
+          "size": 38680,
+          "sha256": "823342247878d568ee12d9ec8256e10cd6a1fd95fcec69ebe4a5c7a542542053"
+        },
+        {
+          "path": "test/mcp-e2e.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "cf6be1029b7f9ef7d9c453fa22ff438271b84322",
+          "size": 52843,
+          "sha256": "13426ba4a6a4bddd0c4a176ac117c30db4f69b48861c228b0f3fc0b8f669b081"
+        },
+        {
+          "path": "test/mcp-smoke.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "7a8c5552bc6ee1c53b32a3aee29216c817c7c8d8",
+          "size": 2718,
+          "sha256": "dbb76f992833ed43a378bd328b4e8a5eab0612850a07f7b3e9840eec8087e4c9"
+        },
+        {
+          "path": "test/playlist-admin.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "712508f93db536ec412c2d523d8bc7a35911ef22",
+          "size": 9965,
+          "sha256": "15cf34e51345ccb04fb344bc5a3b85c8247ea3bf89f1a28d8c50b7fbde45397a"
+        },
+        {
+          "path": "test/pr56-main-preservation.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "eb6bf385090da666e2725bb97d6bc66d4c83f5ce",
+          "size": 7992,
+          "sha256": "0197a21f05805a5a10feccc2542aa87825787a6ee6bb76de6cb69dc56eaf8509"
+        },
+        {
+          "path": "test/save-music.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5dd4fa9926b994ea6577e7357c037bdaf2685281",
+          "size": 36437,
+          "sha256": "4b7b5ff62864b8792cbaec6b7d44d3caf282cac896379b177af938440b06e46b"
+        },
+        {
+          "path": "test/secret-redaction.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ec9bef127bbe61fc6fb6f891761f9b3247f33e68",
+          "size": 34745,
+          "sha256": "f35d2288d5444c8f06d743ebfd207dd0452d2563532d779d17c0503bc6e773ee"
+        },
+        {
+          "path": "test/server-cancel.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "888c2771403a0d07635244a3c7d94d17a8dd9ed2",
+          "size": 5651,
+          "sha256": "6c8e492bb597a9327cfdbf43db37cd5b95df6d518b19f2d8d6fc9c79bb5d898f"
+        },
+        {
+          "path": "test/taxonomy.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ba454099cedfc3b82eb1aaeea765b3fb6fcd5cae",
+          "size": 3696,
+          "sha256": "8bf8b2616d67c8ffdf7a816461e495a583486a736aa4b5f661ac44f9bae3bf45"
+        },
+        {
+          "path": "test/youtube-auth.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ae7fddfcfa5fe357dad2a406ec8e7ddea83fe11c",
+          "size": 19315,
+          "sha256": "725c93a57a6513a15a5cb4950a82440a7d372ec0fa3985d1f8f7bb3a325f3b9b"
+        },
+        {
+          "path": "test/youtube.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8eece1546dc6c20baa79abf994975674fe3af3ce",
+          "size": 16820,
+          "sha256": "e9f95995c4a0919c3261aa26610a8eb06da261da7d84f04d40433af369101249"
+        }
+      ]
+    },
+    "candidate": {
+      "tree": "bbdfbf3b64070a315cc8ed6f29f3de482a650b87",
+      "rows": [
+        {
+          "path": ".env.example",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "d71b36c5c8a9c9dfaf0eda06a47a91cffd75d308",
+          "size": 1205,
+          "sha256": "44905123aa8b38728a97dc65e7a55c9513d70790b85b89914b4c81e751e4a33a"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-14-0834Z-50-persona-audit-round-1.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "df97d763c208cef415f44f79e35c029c9c504de8",
+          "size": 21272,
+          "sha256": "c9c698e2254d8252697b2f824ecc8b1e9759f07d007ee4fe4e8c3b56061f3dab"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-14-1610-product-board-audit.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5fde5017feb0dded0388e83e3f2249a310040861",
+          "size": 33260,
+          "sha256": "31600dc0c26f3a5bf2aec74f4b915db888481c91c24d8cf24498ba502bc16b8b"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-15T0512Z-product-board-audit.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3a76fc0e8e05f90b39f248d5232e586449165281",
+          "size": 22625,
+          "sha256": "76edadf6b01afe1ab63b488066378b707f5af55af765809eb91ce9261acf7102"
+        },
+        {
+          "path": ".github/quality-audits/2026-09-18T0207Z-50-persona-audit-round-2.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "4bf8272f6f6127cc05a32a71378f8d089e995c2d",
+          "size": 23267,
+          "sha256": "1a9a608b8676ffd23673094516feea8572491d864f99a1eaab972492514d59a5"
+        },
+        {
+          "path": ".github/quality-audits/2026-10-01-ci-regression-validation.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "bea40aa3495e742e11b4f0203c60ce59c38a2e33",
+          "size": 2832,
+          "sha256": "f9581ed8a1ae07e92a4aae716f56cc51d10ad79608d5ddda6a7cafc64c5933c1"
+        },
+        {
+          "path": ".github/quality-audits/issue-2/selected-video-binding-focused.txt",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3579fe7cc325ac839fd8b1e663286d767c8434ee",
+          "size": 423,
+          "sha256": "e5e9bcc461803fe71853bae31b8993fcfbbcd99948a25ba2b9d77293ef19036d"
+        },
+        {
+          "path": ".github/quality-audits/issue-2/selected-video-binding-receipt.json",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "69c1f6b07027717521a5a62ede81de656721119f",
+          "size": 5369,
+          "sha256": "92091b3c3cdfc1b0eaf328d30291ec0b36557846f6d49dfe90a939c080c5edde"
+        },
+        {
+          "path": ".github/quality-audits/issue-2/selected-video-binding-research.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ac2521ebee938d1cc9189b3a082e51b07e81293b",
+          "size": 4392,
+          "sha256": "44d61cd076d48ffcc0f0708c99cd94993c3a7d44495cd203de2e591a2b0de023"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5cb774dc15e28d736b0787c953ea32cf873bc6a5",
+          "size": 514,
+          "sha256": "253c02e3794c31ec0a10606f42a82342cdb340e75ad8cd2f73ebd15438eaa7f5"
+        },
+        {
+          "path": ".github/workflows/hidden-input-platforms.yml",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "403c9fa6ca2f357218bf5b3d5b8c83ae7a7736e5",
+          "size": 1085,
+          "sha256": "2fc4138a813fa66b73b2361539ad06500ccf2212c076d2f0fd0200d79cc551f9"
+        },
+        {
+          "path": ".gitignore",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "74867fef7c84007e6396827b8ea45e3d76ad2fb8",
+          "size": 215,
+          "sha256": "cf1d03be5423ebb81adc00c540356f0495560258f44ce478309c591ec0434776"
+        },
+        {
+          "path": "AGENTS.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "398954b271d8ff6e32255f021383205357e313a1",
+          "size": 4358,
+          "sha256": "2df63ccea72b783b06226d4c029c40c61b2982e3edc197eddcad2ab9b8114d80"
+        },
+        {
+          "path": "README.md",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "f038e2ef84f347efe3161929e0966b54c3eaca25",
+          "size": 39519,
+          "sha256": "3a7cf4f8a4c2d7f3d1c2b8dc9b0ff00d63258e74da1c966a530d24091357a298"
+        },
+        {
+          "path": "eslint.config.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "7461d74246d77fda8aba21f47fa9d7c0014d5963",
+          "size": 993,
+          "sha256": "e92c3bb15cf6fd5e63338164fa8a138f301e1cff3603d5f36e3927304e0552fe"
+        },
+        {
+          "path": "package-lock.json",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "e0457eb78c075b43122afd921ebbee8b777055b1",
+          "size": 116468,
+          "sha256": "9e0b8d6bd2885ae2d9ff7ad81bee82ab558dbbe1f17e614fcdef175e42bfef4d"
+        },
+        {
+          "path": "package.json",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5ccd08259ce47266ff3b6913cc959f4c6be567a7",
+          "size": 955,
+          "sha256": "855092b2ea703b9dcc424230e6ba3feffd8d9aa26363b615ce60fa656731b018"
+        },
+        {
+          "path": "public/index.html",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "abb84f480b66fe64a6000add9fb2fa29f16556ef",
+          "size": 18698,
+          "sha256": "35ca43e06c3cb4b70903c14f6a4777feca4879e7d03b0ff5e0011d021eb316f0"
+        },
+        {
+          "path": "scripts/crap.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "7c44cc2df63ef950669ed628546b4f7d957d9d97",
+          "size": 6766,
+          "sha256": "63972f7702bb4c5d60119d1cd03a4ce9d9ef0143a44153eb2951e81beb66a6bd"
+        },
+        {
+          "path": "scripts/fixtures/hidden-input-terminal.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "008a44d1a6a4eaf2f8f0641c5d9b5c78f574a2a3",
+          "size": 6679,
+          "sha256": "48017dcbc18294dcc22303c1bce8bb484365239528f7b923ce3080f37b2f8972"
+        },
+        {
+          "path": "scripts/test-hidden-input-terminal.py",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9f7902020b0eb7560abf44849444c8627add784c",
+          "size": 19321,
+          "sha256": "c54c98bcbb5b3826dd68f336e6637bc38e1e08924ea9ff195a993b446bcad6cf"
+        },
+        {
+          "path": "scripts/youtube-auth.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "1840df4d3da291b9d3f36673aead18588ca61c02",
+          "size": 8264,
+          "sha256": "bb52ddb5c0c76d5721f1b9bd26fc89a04fa86e2a479c9da094231bfb5c826bc5"
+        },
+        {
+          "path": "src/batch-import.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5e576acdc89f29176059d2cd611f13bb1e58c16c",
+          "size": 26603,
+          "sha256": "bbf7cfe7d25fa101bb0af416078347717f03bf1705539f816280603c48e6d914"
+        },
+        {
+          "path": "src/canonical.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "c4505b3877d2fa90e14203c9631c27cf90a6c128",
+          "size": 10539,
+          "sha256": "7ac147ffbe06ad14e4975dfb8acfbc25f432242e72402a4c94e5f8cb6d322cf8"
+        },
+        {
+          "path": "src/classify.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "497069dc64b089f677e9218d43cf1c3095f086db",
+          "size": 19402,
+          "sha256": "4f621b605ecd5ec53764426003a8b29703730074e22c0e769c929897e7b60ad7"
+        },
+        {
+          "path": "src/core.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "00ae2faa11add575bf49650f4eb76b3294f30b9f",
+          "size": 6805,
+          "sha256": "9231497b1983174edb7592fdf0cc2df1aa726e14696f98e856c21b930e74abdd"
+        },
+        {
+          "path": "src/credentials.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3ff6ca3e091c1f347efd9cd214e0163a67cd289d",
+          "size": 10243,
+          "sha256": "4a8e6530d683767d412a957634b7315ccf5b23f306942bd2c80a093ae4b6e600"
+        },
+        {
+          "path": "src/env.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9dbe3f31e8d2b410c8f75fa5e28612662e799479",
+          "size": 662,
+          "sha256": "6a8e6323ae661c1c19f8cdafd4d265e45b1870fecc037cb58ca65d1f0e6c98d0"
+        },
+        {
+          "path": "src/hidden-input.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "6fef790a46f018267f41c4fa96937cf7433d5825",
+          "size": 10288,
+          "sha256": "b16cac013fc296f956a82e21196ad9e17e9bb6e3480d67bcdb904c4009d575a6"
+        },
+        {
+          "path": "src/http-server.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "df6e2d8d8b4b599427853fbf912a0fa9c22b1ee1",
+          "size": 15330,
+          "sha256": "315c8e093ff7b3bdaf7ab72b17d834ea9d95a9f8bc437803d73188905089dd70"
+        },
+        {
+          "path": "src/http.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "c6bc82c07c2ea3d0999035a1b87a6f1b436a36f8",
+          "size": 6009,
+          "sha256": "fa3ef198cf9510050c6a14460f53560b342e0aabeaf26830e1843d3651173a96"
+        },
+        {
+          "path": "src/identity-admin.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "0a5c16c9948a9aa12598a7d92df193581ac61a1d",
+          "size": 8700,
+          "sha256": "c19fefd52729805b6a0d26f6a5c0adf18df829edf872d98ddbee44753e74edfb"
+        },
+        {
+          "path": "src/library-backup.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9f73b386ba4351393eed6e7271e616b12d370622",
+          "size": 6030,
+          "sha256": "7c8e754587788d1544cf248416aaf29353530c69080d76942b8eac5adf69ed7c"
+        },
+        {
+          "path": "src/library-query.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "82f4b445a3e4a652929b596eecac5b3c5ae31751",
+          "size": 16021,
+          "sha256": "2a0c3bd223c4c889f3f92f43b072220350bbc22c96ebb7a171e42fb9f7decb50"
+        },
+        {
+          "path": "src/library-sync.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "829faf4155b3fbb534d6d60860fff9c65b2b7800",
+          "size": 22975,
+          "sha256": "4382dba582e1e83f473fd1125c2635eac37c7b99791acac174be4b034f82e33d"
+        },
+        {
+          "path": "src/library.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "c31c2c3cb2e8738d5a4068178dbe241578457ffa",
+          "size": 81755,
+          "sha256": "386b3827227eab0e6b2950386be81021cd1999087b230371d0ad146099e19309"
+        },
+        {
+          "path": "src/playlist-admin.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "b2a053a6ee56c5f8ac6cb45de0360b14d9279019",
+          "size": 10190,
+          "sha256": "22993786cf94ebb1a7161927b645e46febb9aa2a66b38594309e753774129caf"
+        },
+        {
+          "path": "src/redact.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "162c0c20e76e6c88f320d7dc9800d8314c67c083",
+          "size": 2295,
+          "sha256": "597c0405d1fd787085fc235d8d803c93a94e796d1161612cd39930a4c779b96e"
+        },
+        {
+          "path": "src/save-music.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8e445a0615e2a6c3c55e5f9abecbce5866189390",
+          "size": 22741,
+          "sha256": "26efe5bd47d046be19af217578dfd985222d632370c05ee1bb8213c914955151"
+        },
+        {
+          "path": "src/server.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2bebe451a770da673a8cdd8c80307168ae877adf",
+          "size": 43935,
+          "sha256": "a3e66604e001e355919bc61b38850d0c206622696451ef84e976dbaf61b00d96"
+        },
+        {
+          "path": "src/spotify.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "e70bdd533057f89be566e75de8cf6bddfba48c6f",
+          "size": 10656,
+          "sha256": "d6cb9e5400d505a5053a784c408d606e93b91089c83a31a7554ab83c6a3485c1"
+        },
+        {
+          "path": "src/taxonomy.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "bed1a221fcbdb07c1a74c5c6420d9e9f26ea48a5",
+          "size": 9366,
+          "sha256": "2e33501ad7c111d2eade1526b0c967761ce7b25089c0e312bce4e36def001bbe"
+        },
+        {
+          "path": "src/version.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "f4145473500c9e19b0b75043dbcf221ae73b1f52",
+          "size": 114,
+          "sha256": "b25ae622972ac257598f3931d815a1e6538b26207e203415ea706bc48748337d"
+        },
+        {
+          "path": "src/youtube.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8aeef9665a24903381f5b2ef46fe42e8c41dd1e1",
+          "size": 29104,
+          "sha256": "23ccefe3062c9d50e83d0ed7ce2c27da5cdc610d87f264f735996a8f1ed430f2"
+        },
+        {
+          "path": "stryker.config.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "d9e7f97edeedffd076ced1944292145bd58be117",
+          "size": 917,
+          "sha256": "651bb45b7484da9b94a18e6d4eba38f07225d02958ced9381a7eb71851818c9a"
+        },
+        {
+          "path": "test/batch-import.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5c1067d564f1cd5a706d774ff21e83382d56c8cd",
+          "size": 52310,
+          "sha256": "8d79c84e6b0f6063e7382d0207a801078ab5da63b7a8e3b33910b40dc3bd541c"
+        },
+        {
+          "path": "test/canonical.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "62c0be6b1b928f2033f55d30c1c593c5e8154a3f",
+          "size": 5567,
+          "sha256": "dc05137a7565e3e7e243bd7520f9d67ef8191c42b1127e48ffc8d5a3f2dfe18d"
+        },
+        {
+          "path": "test/ci-workflow.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9dc82be15ccf3c36ce1b150f12e5dd0931aa81d1",
+          "size": 3247,
+          "sha256": "12ba7a6c0d80e782c70b2b899a1abfc663892a6f90196e366dccd2c8bd8bef6b"
+        },
+        {
+          "path": "test/classify.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5fc242b8118364036f8572d636a27a369d9f2f51",
+          "size": 18344,
+          "sha256": "8519aadfcaf58a654425a04a1e7024a5a4b6fbf8f6e9e97dbdf14bd3ab2985bd"
+        },
+        {
+          "path": "test/core.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2d9770dbf70e2c1779bf29a3845a879404d20e1d",
+          "size": 2171,
+          "sha256": "91756d6def972d8917d54f7c619c2dccb9c1d4d52aac5eeff84aa4743883861e"
+        },
+        {
+          "path": "test/credentials.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9ffa2039ca0324828ed2118a9d0ddcbdb56ae15f",
+          "size": 1705,
+          "sha256": "4b3939d7fe5349ce418cb97a839c8eb33cf1ef687a15acfadd9db09c6d177524"
+        },
+        {
+          "path": "test/env.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2c6b902ee7376d34e54a95c9b04bd81713ab89c1",
+          "size": 2639,
+          "sha256": "f2091ed71c3e6447c5c918ef744470807c711a080d952d9f8d44b882132f5c30"
+        },
+        {
+          "path": "test/fixtures/fake-google-fetch.mjs",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2bbd68c1b0a1f1b52d99ea5e984dd3ba1ffce1b2",
+          "size": 2082,
+          "sha256": "43df5bda77cbd20d9362a98e47bf83cb57fb6f9351061e1f9b5bc0aa55ae3148"
+        },
+        {
+          "path": "test/http-server.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "514a01cad07f6d6948b7f71e4843a21af24deeb4",
+          "size": 16691,
+          "sha256": "0fbc010fb442792e3eb2b41346d42f39b83df83ee26391f7e2de08068be1e747"
+        },
+        {
+          "path": "test/http-ui.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "947d79cfdb69a6df7c7b5c732c24423556b0d544",
+          "size": 14929,
+          "sha256": "d9291d5c3eba33cc702eecfeda70878a0f54bddcd7a24249edfc0d62588ffcf1"
+        },
+        {
+          "path": "test/http.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "2e43aeefa2bba58340f9982e09aee17f52c18e4d",
+          "size": 5005,
+          "sha256": "fea63050224a7dd56db12c23c64c3192256b035696f6ae8fef16ba8c62eb9853"
+        },
+        {
+          "path": "test/identity-admin.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "1572f393b9bf5ba4bf1263b8b9b412a5511d4632",
+          "size": 6854,
+          "sha256": "5b953fe45d286c51efd23575f6a41e6bab48b0fae7d429d7161ee7651051b3de"
+        },
+        {
+          "path": "test/library-backup.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8452497663756005c7b80b82c1c323f462541642",
+          "size": 12160,
+          "sha256": "23cecdfc2972e41c12c35627f01cc99ecf11cd1c7fccdb978d57840faf0318da"
+        },
+        {
+          "path": "test/library-query.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "9b881da10d9dbedd6e9b658128beae11eee56418",
+          "size": 26332,
+          "sha256": "d2b078e15a47308dfc272a1685550ebf42ee5e0bc4ce7d7984f37dd36226d113"
+        },
+        {
+          "path": "test/library-sync.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "3f7007fc23b15166bf63cefd331d00258b6fb79b",
+          "size": 24269,
+          "sha256": "8983cb074d785b207ee04ca00edfb403453abb2d9897675d918b04655bc99b2b"
+        },
+        {
+          "path": "test/library.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "adbfc3aa5b147a1bc8fa2f835986561e732aab0e",
+          "size": 38680,
+          "sha256": "823342247878d568ee12d9ec8256e10cd6a1fd95fcec69ebe4a5c7a542542053"
+        },
+        {
+          "path": "test/mcp-e2e.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "cf6be1029b7f9ef7d9c453fa22ff438271b84322",
+          "size": 52843,
+          "sha256": "13426ba4a6a4bddd0c4a176ac117c30db4f69b48861c228b0f3fc0b8f669b081"
+        },
+        {
+          "path": "test/mcp-smoke.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "7a8c5552bc6ee1c53b32a3aee29216c817c7c8d8",
+          "size": 2718,
+          "sha256": "dbb76f992833ed43a378bd328b4e8a5eab0612850a07f7b3e9840eec8087e4c9"
+        },
+        {
+          "path": "test/playlist-admin.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "712508f93db536ec412c2d523d8bc7a35911ef22",
+          "size": 9965,
+          "sha256": "15cf34e51345ccb04fb344bc5a3b85c8247ea3bf89f1a28d8c50b7fbde45397a"
+        },
+        {
+          "path": "test/pr56-main-preservation.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "eb6bf385090da666e2725bb97d6bc66d4c83f5ce",
+          "size": 7992,
+          "sha256": "0197a21f05805a5a10feccc2542aa87825787a6ee6bb76de6cb69dc56eaf8509"
+        },
+        {
+          "path": "test/save-music.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "5dd4fa9926b994ea6577e7357c037bdaf2685281",
+          "size": 36437,
+          "sha256": "4b7b5ff62864b8792cbaec6b7d44d3caf282cac896379b177af938440b06e46b"
+        },
+        {
+          "path": "test/secret-redaction.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ec9bef127bbe61fc6fb6f891761f9b3247f33e68",
+          "size": 34745,
+          "sha256": "f35d2288d5444c8f06d743ebfd207dd0452d2563532d779d17c0503bc6e773ee"
+        },
+        {
+          "path": "test/server-cancel.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "888c2771403a0d07635244a3c7d94d17a8dd9ed2",
+          "size": 5651,
+          "sha256": "6c8e492bb597a9327cfdbf43db37cd5b95df6d518b19f2d8d6fc9c79bb5d898f"
+        },
+        {
+          "path": "test/taxonomy.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ba454099cedfc3b82eb1aaeea765b3fb6fcd5cae",
+          "size": 3696,
+          "sha256": "8bf8b2616d67c8ffdf7a816461e495a583486a736aa4b5f661ac44f9bae3bf45"
+        },
+        {
+          "path": "test/youtube-auth.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "ae7fddfcfa5fe357dad2a406ec8e7ddea83fe11c",
+          "size": 19315,
+          "sha256": "725c93a57a6513a15a5cb4950a82440a7d372ec0fa3985d1f8f7bb3a325f3b9b"
+        },
+        {
+          "path": "test/youtube.test.js",
+          "type": "blob",
+          "mode": "100644",
+          "sha": "8eece1546dc6c20baa79abf994975674fe3af3ce",
+          "size": 16820,
+          "sha256": "e9f95995c4a0919c3261aa26610a8eb06da261da7d84f04d40433af369101249"
+        }
+      ]
+    }
+  }
+}

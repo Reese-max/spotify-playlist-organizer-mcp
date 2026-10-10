@@ -1,0 +1,46 @@
+name: Owned exact-source plain npm test QA (HELD template)
+
+on:
+  push:
+    branches: [codex/qa/spotify3-candidate-controller-20261010]
+
+permissions:
+  contents: read
+
+jobs:
+  plain-npm-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      QA_SUT_COMMIT: 725f3c34b159d835b29d4fcb8bc6d692b0757cd4
+      QA_SUT_ROLE: candidate
+    steps:
+      - name: Check out separate QA controller carrier
+        uses: actions/checkout@v4
+        with:
+          path: controller
+          persist-credentials: false
+      - name: Check out immutable exact 71-file SUT
+        uses: actions/checkout@v4
+        with:
+          repository: Reese-max/spotify-playlist-organizer-mcp
+          ref: 725f3c34b159d835b29d4fcb8bc6d692b0757cd4
+          path: sut
+          persist-credentials: false
+      - name: Verify exact SUT source before install
+        run: python -I -B controller/verify_exact_sut_saved_map.py
+      - name: Set up original Node major
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sut/package-lock.json
+      - name: Ordinary locked dependency install
+        working-directory: sut
+        run: npm ci
+      - name: Original unfiltered plain npm test
+        working-directory: sut
+        run: npm test
+      - name: Verify exact SUT source after attempted commands
+        if: always()
+        run: python -I -B controller/verify_exact_sut_saved_map.py

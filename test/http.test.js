@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 import { fetchWithDeadline, ProviderRequestError, waitForRetry } from "../src/http.js";
+import { REQUIRED_YOUTUBE_SCOPE } from "../src/credentials.js";
 import { YouTubeClient } from "../src/youtube.js";
 
 function response(data, status = 200) {
@@ -67,6 +68,11 @@ test("retries a transient YouTube read once, but never retries a write", async (
       return { ...response({ error: { message: "temporary" } }, 503), headers: { get: () => "0" } };
     },
   );
+  writeClient.storedCredentials = {
+    accessToken: writeClient.env.YOUTUBE_ACCESS_TOKEN,
+    scope: REQUIRED_YOUTUBE_SCOPE,
+  };
+
   await assert.rejects(
     writeClient.addVideoToPlaylist("PL123456789", "dQw4w9WgXcQ"),
     (error) => error.code === "HTTP_5XX" && error.status === 503,

@@ -1,0 +1,11 @@
+✔ E2E: youtube_save_track binds candidate #2 across search reorder and rejects unbound apply (244.567515ms)
+✔ E2E: youtube_save_track unavailable selection has no search fallback or playlist effects (238.768239ms)
+✔ E2E: youtube_save_track exact URL keeps one-call apply without search (240.336601ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5771.918913

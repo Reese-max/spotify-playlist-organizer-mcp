@@ -21,7 +21,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadEnvFile } from "./env.js";
-import { LibraryError, openLibrary } from "./library.js";
+import { LibraryError, openLibrary, redactSecretishText } from "./library.js";
 import {
   getMusic,
   listMusic,
@@ -101,7 +101,9 @@ function sendJson(response, status, body, headers = {}) {
 }
 
 function sendError(response, status, code, message, headers = {}) {
-  sendJson(response, status, { error: { code, message } }, headers);
+  // Same chokepoint as the MCP errorResult path: a thrown provider error must
+  // not be able to carry a credential out through the facade either.
+  sendJson(response, status, { error: { code, message: redactSecretishText(message) } }, headers);
 }
 
 function readBody(request, limit) {

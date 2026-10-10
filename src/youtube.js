@@ -289,6 +289,7 @@ export class YouTubeClient {
         );
       }
       const credentials = credentialsFromTokenResponse(data, previous ?? { refreshToken });
+      this.assertStoredScopeSufficient(credentials);
       // Persist only when the token we used came from this store record —
       // an env-supplied refresh token must never overwrite a different
       // account's stored credential or seed a store that does not exist.
@@ -814,8 +815,8 @@ export class YouTubeClient {
     };
   }
 
-  async findPlaylistByName(name, { playlists } = {}) {
-    const available = playlists ?? (await this.listPlaylists()).playlists;
+  async findPlaylistByName(name, { playlists, signal } = {}) {
+    const available = playlists ?? (await this.listPlaylists({ signal })).playlists;
     return available.find((playlist) => normalizeName(playlist.name) === normalizeName(name)) ?? null;
   }
 }

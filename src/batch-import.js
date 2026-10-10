@@ -4,12 +4,14 @@
 // Every item gets its own result — one bad link never rolls back the batch,
 // and unresolved input is reported rather than silently dropped. Plans are
 // persisted under `import.<batchId>` sync_state keys so apply only touches
-// what preview resolved and cancelled batches can resume.
+// what preview resolved and cancelled batches can resume; MCP receipts stay
+// bounded (MAX_DETAIL_ITEMS) and import_status pages the stored plan, so a
+// response lost to timeout/cancel can still be reconciled per item.
 
 import crypto from "node:crypto";
 
 import { parseLink } from "./core.js";
-import { LibraryError } from "./library.js";
+import { LibraryError, redactSecretishText } from "./library.js";
 import {
   parseYouTubePlaylistReference,
   youtubeVideoUrl,
@@ -18,12 +20,15 @@ import {
 const IMPORT_PREFIX = "import.";
 const CHUNK_SIZE = 25;
 const MAX_DETAIL_ITEMS = 500;
+const STATUS_DEFAULT_LIMIT = 100;
 const UNAVAILABLE_TITLES = new Set(["deleted video", "private video"]);
 
 function errorInfo(error) {
   return {
     code: error?.code ?? "PROVIDER_ERROR",
-    message: error instanceof Error ? error.message : String(error),
+    // Provider error text is untrusted and is persisted on the plan and read
+    // back through import_status — strip credential-shaped substrings first.
+    message: redactSecretishText(error instanceof Error ? error.message : String(error)),
     ...(Number.isInteger(error?.status) ? { status: error.status } : {}),
   };
 }
@@ -53,7 +58,16 @@ function loadPlan(library, batchId) {
   if (typeof raw !== "string" || !raw) return null;
   try {
     const plan = JSON.parse(raw);
-    return Array.isArray(plan?.items) ? plan : null;
+    if (!Array.isArray(plan?.items)) return null;
+    // Older plans may contain pasted credentials and provider error text.
+    // Sanitize the parsed copy before either read-only status or resumed apply;
+    // the latter also persists that sanitized copy on its normal flush path.
+    for (const item of plan.items) {
+      item.input = redactSecretishText(item.input);
+      if (item.error) item.error = publicError(item.error);
+    }
+    if (plan.syncError) plan.syncError = publicError(plan.syncError);
+    return plan;
   } catch {
     return null;
   }
@@ -165,15 +179,20 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
   const items = [];
   const firstById = new Map();
   const push = (item) => {
-    const first = item.videoId ? firstById.get(item.videoId) : null;
+    // `input` is pasted free text persisted verbatim on the plan, so it is
+    // untrusted on the same footing as a provider error message. Redact once
+    // here, at the single construction point, so the stored plan, the preview,
+    // the apply receipt and import_status all agree.
+    const built = { ...item, input: redactSecretishText(item.input) };
+    const first = built.videoId ? firstById.get(built.videoId) : null;
     if (first) {
       const status = first.status === "unavailable" ? "unavailable"
         : first.status === "retryable" ? "retryable" : "exact_duplicate";
-      items.push({ ...item, status, inBatchDuplicate: true });
+      items.push({ ...built, status, inBatchDuplicate: true });
       return;
     }
-    if (item.videoId) firstById.set(item.videoId, item);
-    items.push(item);
+    if (built.videoId) firstById.set(built.videoId, built);
+    items.push(built);
   };
 
   for (const input of rawItems) {
@@ -207,7 +226,14 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
           resolvedBy,
         }));
       } catch (error) {
-        push({ input, videoId, resolvedBy, status: isConfirmedMissingError(error) ? "unavailable" : "retryable" });
+        const missing = isConfirmedMissingError(error);
+        push({
+          input,
+          videoId,
+          resolvedBy,
+          status: missing ? "unavailable" : "retryable",
+          ...(missing ? {} : { error: errorInfo(error) }),
+        });
       }
       continue;
     }
@@ -260,20 +286,40 @@ async function resolvePlan({ library, youtube }, args, { signal } = {}) {
   };
 }
 
+function publicError(error) {
+  if (!error || typeof error !== "object") return error;
+  return {
+    ...error,
+    // Plans written by a build without write-side redaction can still hold
+    // provider text in the clear, so the read path redacts too.
+    ...(typeof error.message === "string"
+      ? { message: redactSecretishText(error.message) }
+      : {}),
+  };
+}
+
+function publicItem(item) {
+  return {
+    input: item.input,
+    ...(item.videoId ? { videoId: item.videoId } : {}),
+    ...(item.title ? { title: item.title } : {}),
+    status: item.status,
+    ...(item.resolvedBy ? { resolvedBy: item.resolvedBy } : {}),
+    ...(item.trackId ? { trackId: item.trackId } : {}),
+    ...(item.sourcePlaylistId ? { sourcePlaylistId: item.sourcePlaylistId } : {}),
+    ...(item.needsReview ? { needsReview: true } : {}),
+    ...(item.inBatchDuplicate ? { inBatchDuplicate: true } : {}),
+    ...(item.result ? { result: item.result } : {}),
+    ...(item.syncResult ? { syncResult: item.syncResult } : {}),
+    ...(item.syncPlaylistId ? { syncPlaylistId: item.syncPlaylistId } : {}),
+    ...(item.error ? { error: publicError(item.error) } : {}),
+  };
+}
+
 function publicItems(plan) {
   const truncated = plan.items.length > MAX_DETAIL_ITEMS;
   const items = (truncated ? plan.items.slice(0, MAX_DETAIL_ITEMS) : plan.items)
-    .map(({ input, videoId, title, status, resolvedBy, trackId, needsReview, result, inBatchDuplicate }) => ({
-      input,
-      ...(videoId ? { videoId } : {}),
-      ...(title ? { title } : {}),
-      status,
-      ...(resolvedBy ? { resolvedBy } : {}),
-      ...(trackId ? { trackId } : {}),
-      ...(needsReview ? { needsReview: true } : {}),
-      ...(inBatchDuplicate ? { inBatchDuplicate: true } : {}),
-      ...(result ? { result } : {}),
-    }));
+    .map(publicItem);
   return { items, truncated };
 }
 
@@ -314,6 +360,15 @@ export function importStatus(library, args = {}) {
     throw new LibraryError("LIBRARY_INPUT_INVALID", `No import batch ${batchId} is stored.`);
   }
   const done = plan.items.filter((item) => item.result != null).length;
+  // Item detail is returned as a bounded page — a caller that lost the apply
+  // response (timeout/cancel) can reconcile per-item outcomes from here.
+  const offset = Math.max(0, Math.floor(Number(args.offset)) || 0);
+  const rawLimit = Number(args.limit);
+  const limit = Math.min(
+    Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : STATUS_DEFAULT_LIMIT, 1),
+    MAX_DETAIL_ITEMS,
+  );
+  const nextOffset = offset + limit < plan.items.length ? offset + limit : null;
   return {
     batchId,
     createdAt: plan.createdAt,
@@ -321,6 +376,11 @@ export function importStatus(library, args = {}) {
     counts: countBy(plan.items),
     done,
     pending: plan.items.length - done,
+    items: plan.items.slice(offset, offset + limit).map(publicItem),
+    itemsTotal: plan.items.length,
+    itemsTruncated: nextOffset !== null,
+    nextOffset,
+    ...(plan.syncError ? { syncError: publicError(plan.syncError) } : {}),
   };
 }
 
@@ -348,6 +408,11 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     }
     syncTarget = parsed.id;
   }
+  // The sync preflight error describes ONE apply attempt. A run that does not
+  // opt into sync performs no sync attempt, so drop a previous run's failure
+  // here instead of letting import_status report it as current. A run that DOES
+  // opt in keeps the old value until its own preflight actually resolves it.
+  if (!syncTarget) delete plan.syncError;
   storePlan(library, plan);
 
   const results = [];
@@ -470,14 +535,22 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
   // Optional YouTube sync: only when the caller explicitly passed
   // syncPlaylist. Existing playlist members are never re-added.
   const syncResults = [];
+  let syncPreflightError = null;
   if (syncTarget && !cancelled) {
     let existing;
     try {
       existing = new Set(
         (await youtube.getPlaylistItems(syncTarget, { signal })).map((entry) => entry.id),
       );
+      // This attempt reached the provider, so any earlier preflight failure is
+      // superseded by a real listing.
+      delete plan.syncError;
     } catch (error) {
-      results.push({ status: "sync_failed", error: errorInfo(error) });
+      // The listing failure is persisted on the plan, not just the receipt —
+      // a truncated results window must not lose the only copy of why. It names
+      // its target because a later cancelled run may retain it.
+      syncPreflightError = { playlistId: syncTarget, ...errorInfo(error) };
+      plan.syncError = syncPreflightError;
       existing = null;
     }
     if (existing) {
@@ -486,48 +559,110 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
           && ["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(item.result))
         .map((item) => item.videoId));
       const attempted = new Set();
+      let syncProcessed = 0;
       for (const item of plan.items) {
         if (signal?.aborted) { cancelled = true; break; }
-        if (!item.videoId || !syncable.has(item.videoId) || existing.has(item.videoId)
-          || attempted.has(item.videoId)) continue;
+        if (!item.videoId || !syncable.has(item.videoId)) continue;
+        if (existing.has(item.videoId)) {
+          // No add is attempted, but the row must still record THIS run's
+          // outcome. Otherwise an unknown_after_write (or a failure against a
+          // previous target) would stay on the plan forever and never clear.
+          if (item.syncResult !== "already_present" || item.syncPlaylistId !== syncTarget) {
+            item.syncResult = "already_present";
+            item.syncPlaylistId = syncTarget;
+          }
+          continue;
+        }
+        if (attempted.has(item.videoId)) continue;
         if (!["imported", "canonical_duplicate", "exact_duplicate", "review"].includes(item.result)) continue;
         attempted.add(item.videoId);
         try {
           await youtube.addVideoToPlaylist(syncTarget, item.videoId, { signal });
+          item.syncResult = "added";
+          item.syncPlaylistId = syncTarget;
           syncResults.push({ playlistId: syncTarget, videoId: item.videoId, trackId: item.trackId ?? null, status: "added" });
         } catch (error) {
           const unknown = addOutcomeUnknown(error);
+          item.syncResult = unknown ? "unknown_after_write" : "failed";
+          item.syncPlaylistId = syncTarget;
           syncResults.push({
             playlistId: syncTarget,
             videoId: item.videoId,
-            status: unknown ? "unknown_after_write" : "failed",
+            status: item.syncResult,
             ...(unknown ? { writeState: "UNKNOWN_AFTER_WRITE" } : {}),
             error: errorInfo(error),
           });
         }
+        syncProcessed += 1;
+        if (syncProcessed % CHUNK_SIZE === 0) flush();
+      }
+      // In-batch duplicate rows share the primary's videoId — mirror the
+      // outcome so every row reconciles identically through import_status. The
+      // mirror is a refresh, not a fill: re-syncing the batch to another
+      // playlist must not leave one row reporting the previous target.
+      const syncByVideo = new Map();
+      for (const item of plan.items) {
+        // Only the primary row is a mirror source. A duplicate row still
+        // carrying a previous run's syncResult must not shadow the primary.
+        if (!item.inBatchDuplicate && item.videoId && item.syncResult) {
+          syncByVideo.set(item.videoId, item);
+        }
+      }
+      let mirrored = 0;
+      for (const item of plan.items) {
+        const primary = item.inBatchDuplicate && item.videoId ? syncByVideo.get(item.videoId) : null;
+        if (!primary) continue;
+        if (item.syncResult === primary.syncResult && item.syncPlaylistId === primary.syncPlaylistId) continue;
+        item.syncResult = primary.syncResult;
+        item.syncPlaylistId = primary.syncPlaylistId;
+        // Flush on the same cadence as the add loop: a crash mid-batch must not
+        // leave primaries corrected while their duplicates still hold stale
+        // values from an earlier run.
+        mirrored += 1;
+        if (mirrored % CHUNK_SIZE === 0) flush();
       }
     }
+    // Per-item sync outcomes live on the stored plan so a lost response can
+    // still be reconciled through import_status.
+    flush();
   }
 
   const remaining = plan.items.filter((item) => item.result == null).length;
   const syncFailed = syncResults.filter((entry) => entry.status === "failed").length;
   const syncUnknown = syncResults.filter((entry) => entry.status === "unknown_after_write");
-  const failed = results.filter((entry) => ["failed", "sync_failed", "retryable"].includes(entry.status)).length
-    + syncFailed;
+  const failed = results.filter((entry) => ["failed", "retryable"].includes(entry.status)).length
+    + syncFailed + (syncPreflightError ? 1 : 0);
   let action = "imported";
   if (failed) action = "partial_failure";
   if (cancelled) action = "cancelled";
   if (syncUnknown.length) action = "UNKNOWN_AFTER_WRITE";
 
+  // Receipts are bounded — a large batch pages the rest through import_status.
+  const resultsTruncated = results.length > MAX_DETAIL_ITEMS;
+  const syncTruncated = syncResults.length > MAX_DETAIL_ITEMS;
+
   let nextStep;
   if (syncUnknown.length) {
-    nextStep = `Verify exact video IDs ${syncUnknown.map((entry) => entry.videoId).join(", ")} in playlist ${syncTarget} before retrying any additions; the provider write may have succeeded. Local imports remain saved.`;
+    // The prose receipt is part of the same bounded response as results and
+    // sync.results — never name an unbounded list of video IDs in it.
+    const named = syncUnknown.slice(0, MAX_DETAIL_ITEMS);
+    const extra = syncUnknown.length - named.length;
+    nextStep = `Verify exact video IDs ${named.map((entry) => entry.videoId).join(", ")}`
+      + `${extra > 0 ? ` and ${extra} more` : ""}`
+      + ` in playlist ${syncTarget} before retrying any additions; the provider write may have succeeded.`
+      + " Local imports remain saved.";
   } else if (cancelled) {
     nextStep = `Re-run import_music_batch with batchId "${plan.batchId}" and resume:true to continue from item ${plan.items.length - remaining + 1}.`;
   } else if (failed) {
-    nextStep = syncFailed || results.some((entry) => entry.status === "sync_failed")
-      ? "Inspect sync.results and verify playlist membership by exact video ID before retrying failed additions; local imports remain saved."
-      : `Inspect each failed or retryable item in results; re-run import_music_batch with batchId "${plan.batchId}" and resume:true after the provider recovers.`;
+    nextStep = syncPreflightError
+      ? `Sync target ${syncTarget} could not be listed (${syncPreflightError.code}); no additions were attempted. Verify the playlist, then re-run import_music_batch with batchId "${plan.batchId}" and syncPlaylist to retry.`
+      : syncFailed
+        ? "Inspect sync.results and verify playlist membership by exact video ID before retrying failed additions; local imports remain saved."
+        : `Inspect each failed or retryable item in results; re-run import_music_batch with batchId "${plan.batchId}" and resume:true after the provider recovers.`;
+  }
+  if (resultsTruncated || syncTruncated) {
+    const hint = `Receipt truncated at ${MAX_DETAIL_ITEMS} entries; page import_status with batchId "${plan.batchId}" and offset/limit for the full per-item record.`;
+    nextStep = nextStep ? `${nextStep} ${hint}` : hint;
   }
 
   return {
@@ -535,9 +670,19 @@ export async function importMusicBatch({ library, youtube }, args = {}, { signal
     action,
     batchId: plan.batchId,
     counts: countBy(plan.items),
-    results,
+    results: resultsTruncated ? results.slice(0, MAX_DETAIL_ITEMS) : results,
+    ...(resultsTruncated ? { resultsTruncated: true, resultsTotal: results.length } : {}),
     remaining,
-    ...(syncTarget ? { sync: { playlistId: syncTarget, results: syncResults, failed: syncFailed, unknown: syncUnknown.length } } : {}),
+    ...(syncTarget ? {
+      sync: {
+        playlistId: syncTarget,
+        results: syncTruncated ? syncResults.slice(0, MAX_DETAIL_ITEMS) : syncResults,
+        ...(syncTruncated ? { resultsTruncated: true, resultsTotal: syncResults.length } : {}),
+        failed: syncFailed,
+        unknown: syncUnknown.length,
+        ...(syncPreflightError ? { error: syncPreflightError } : {}),
+      },
+    } : {}),
     ...(nextStep ? { nextStep } : {}),
   };
 }

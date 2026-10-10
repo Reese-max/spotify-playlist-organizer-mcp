@@ -546,3 +546,659 @@ test("a status-less preflight rejection is a definite sync failure", async (t) =
   assert.equal(result.sync.unknown, 0);
   assert.equal(result.sync.results[0].status, "failed");
 });
+
+test("import_status pages stored item detail in bounded windows", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_BIG = "PL_IMPORT_BIG001";
+  const entries = [];
+  for (let i = 0; i < 60; i += 1) {
+    entries.push({ id: `BIGITEM${String(i).padStart(4, "0")}`, name: `Big Song ${i}` });
+  }
+  youtube.playlists.set(PL_BIG, { id: PL_BIG, name: "Big Source" });
+  youtube.items.set(PL_BIG, entries);
+
+  const preview = await previewImport({ library, youtube }, { playlist: PL_BIG });
+  assert.equal(preview.counts.total, 60);
+  assert.equal(preview.truncated, false); // under the per-call detail cap
+
+  const first = importStatus(library, { batchId: preview.batchId, limit: 25 });
+  assert.equal(first.itemsTotal, 60);
+  assert.equal(first.items.length, 25);
+  assert.equal(first.itemsTruncated, true);
+  assert.equal(first.nextOffset, 25);
+  assert.equal(first.items[0].input, `${PL_BIG}:${entries[0].id}`);
+
+  const last = importStatus(library, { batchId: preview.batchId, offset: 50, limit: 25 });
+  assert.equal(last.items.length, 10);
+  assert.equal(last.itemsTruncated, false);
+  assert.equal(last.nextOffset, null);
+  assert.equal(last.items[0].input, `${PL_BIG}:${entries[50].id}`);
+
+  // An offset past the end is an empty final page, not an error.
+  const pastEnd = importStatus(library, { batchId: preview.batchId, offset: 500 });
+  assert.equal(pastEnd.items.length, 0);
+  assert.equal(pastEnd.itemsTruncated, false);
+  assert.equal(pastEnd.nextOffset, null);
+
+  // The default call returns the first bounded page, preserving plan order.
+  const head = importStatus(library, { batchId: preview.batchId });
+  assert.equal(head.items.length, 60);
+  assert.equal(head.itemsTruncated, false);
+});
+
+test("unresolved and retryable items carry their provider error into the stored receipt", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Flaky Song" });
+  youtube.searchVideos = async () => {
+    throw Object.assign(new Error("quota exhausted"), { code: "HTTP_429", status: 429 });
+  };
+  youtube.getVideo = async () => {
+    throw Object.assign(new Error("provider timed out"), { code: "TIMEOUT" });
+  };
+
+  const preview = await previewImport(
+    { library, youtube },
+    { items: [VID_NEW1, "unresolvable song title"] },
+  );
+  const byInput = new Map(preview.items.map((item) => [item.input, item]));
+  assert.equal(byInput.get(VID_NEW1).status, "retryable");
+  assert.equal(byInput.get(VID_NEW1).error.code, "TIMEOUT");
+  assert.equal(byInput.get("unresolvable song title").status, "unresolved");
+  assert.equal(byInput.get("unresolvable song title").error.status, 429);
+
+  // The same detail is readable after the call ends — a timed-out apply
+  // leaves the caller with nothing but the stored plan to reconcile from.
+  const status = importStatus(library, { batchId: preview.batchId });
+  const stored = new Map(status.items.map((item) => [item.input, item]));
+  assert.equal(stored.get(VID_NEW1).error.code, "TIMEOUT");
+  assert.equal(stored.get("unresolvable song title").error.status, 429);
+});
+
+test("an oversized apply receipt is bounded; import_status pages the full record", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_HUGE = "PL_IMPORT_HUGE01";
+  const entries = [];
+  for (let i = 0; i < 510; i += 1) {
+    entries.push({ id: `HUGE_${String(i).padStart(5, "0")}`, name: "Deleted video" });
+  }
+  youtube.playlists.set(PL_HUGE, { id: PL_HUGE, name: "Huge Source" });
+  youtube.items.set(PL_HUGE, entries);
+
+  const applied = await importMusicBatch({ library, youtube }, { playlist: PL_HUGE });
+  assert.equal(applied.counts.total, 510);
+  assert.equal(applied.results.length, 500);
+  assert.equal(applied.resultsTruncated, true);
+  assert.equal(applied.resultsTotal, 510);
+  assert.match(applied.nextStep, /import_status/);
+
+  const tail = importStatus(library, { batchId: applied.batchId, offset: 500, limit: 25 });
+  assert.equal(tail.items.length, 10);
+  assert.equal(tail.items[0].result, "unavailable");
+});
+
+test("per-item sync outcomes persist on the plan and page through import_status", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Synced Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const applied = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.results[0].status, "added");
+
+  // A later caller reconciling a lost response sees the per-item outcome.
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.equal(status.items[0].result, "imported");
+  assert.equal(status.items[0].syncResult, "added");
+  assert.equal(status.items[0].syncPlaylistId, PL_SYNC);
+});
+
+test("a truncated receipt still surfaces a sync preflight failure via sync.error and import_status", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_HUGE = "PL_IMPORT_HUGE01";
+  const entries = [];
+  for (let i = 0; i < 510; i += 1) {
+    entries.push({ id: `HUGE_${String(i).padStart(5, "0")}`, name: "Deleted video" });
+  }
+  youtube.playlists.set(PL_HUGE, { id: PL_HUGE, name: "Huge Source" });
+  youtube.items.set(PL_HUGE, entries);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  youtube.getPlaylistItems = async (id) => {
+    if (id === PL_SYNC) {
+      throw Object.assign(new Error("sync target listing timed out"), { code: "TIMEOUT", status: 503 });
+    }
+    return originalGetItems(id);
+  };
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { playlist: PL_HUGE, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.action, "partial_failure");
+  assert.equal(applied.resultsTruncated, true);
+  assert.equal(applied.results.length, 500);
+  // The preflight failure detail survives receipt truncation.
+  assert.equal(applied.sync.error.status, 503);
+  assert.match(applied.nextStep, /could not be listed|no additions were attempted/i);
+
+  const status = importStatus(library, { batchId: applied.batchId });
+  assert.equal(status.syncError.status, 503);
+});
+
+test("sync receipts are bounded; per-item outcomes and duplicate mirrors page through import_status", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_BIGSYNC = "PL_BIG_SYNC_0001";
+  const entries = [];
+  for (let i = 0; i < 501; i += 1) {
+    const id = `SYNCME_${String(i).padStart(4, "0")}`;
+    entries.push({ id, name: `Sync Song ${i}` });
+    youtube.videos.set(id, { id, name: `Sync Song ${i}`, channel: "Chan" });
+  }
+  youtube.playlists.set(PL_BIGSYNC, { id: PL_BIGSYNC, name: "Big Sync Source" });
+  youtube.items.set(PL_BIGSYNC, entries);
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { playlist: PL_BIGSYNC, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.results.length, 500);
+  assert.equal(applied.sync.resultsTruncated, true);
+  assert.equal(applied.sync.resultsTotal, 501);
+  assert.equal(applied.sync.failed, 0);
+
+  const tail = importStatus(library, { batchId: applied.batchId, offset: 500, limit: 25 });
+  assert.equal(tail.items.length, 1);
+  assert.equal(tail.items[0].result, "imported");
+  assert.equal(tail.items[0].syncResult, "added");
+  assert.equal(tail.items[0].syncPlaylistId, PL_SYNC);
+});
+
+test("in-batch duplicate rows mirror the primary item's sync outcome", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Dup Sync Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { items: [VID_NEW1, VID_NEW1], syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(applied.results.map((entry) => entry.status), ["imported", "exact_duplicate"]);
+  assert.equal(youtube.addCalls.length, 1); // one playlist add per videoId
+
+  const status = importStatus(library, { batchId: applied.batchId });
+  assert.deepEqual(
+    status.items.map((item) => item.syncResult),
+    ["added", "added"],
+  );
+});
+
+test("credential-shaped provider error text is redacted before it is stored or reported", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Flaky Song" });
+  youtube.searchVideos = async () => {
+    throw Object.assign(
+      new Error("quota rejected for Bearer ya29.a0AfH6SMBnotarealsecret"),
+      { code: "HTTP_401", status: 401 },
+    );
+  };
+  youtube.getVideo = async () => {
+    throw Object.assign(
+      new Error("bad request with key AIzaSyD0123456789abcdefghijklmnop"),
+      { code: "HTTP_400", status: 400 },
+    );
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, "some song"] });
+  const byInput = new Map(preview.items.map((item) => [item.input, item]));
+  // VID_NEW1 resolves by exact id (getVideo), "some song" falls back to search.
+  assert.equal(byInput.get(VID_NEW1).status, "retryable");
+  assert.match(byInput.get(VID_NEW1).error.message, /\[REDACTED\]/);
+  assert.doesNotMatch(byInput.get(VID_NEW1).error.message, /AIzaSyD/);
+  assert.equal(byInput.get("some song").status, "unresolved");
+  assert.match(byInput.get("some song").error.message, /\[REDACTED\]/);
+  assert.doesNotMatch(byInput.get("some song").error.message, /ya29\./);
+  // Redaction must not destroy the triage fields.
+  assert.equal(byInput.get(VID_NEW1).error.code, "HTTP_400");
+  assert.equal(byInput.get(VID_NEW1).error.status, 400);
+  assert.equal(byInput.get("some song").error.code, "HTTP_401");
+
+  // The persisted plan is a Database row — nothing credential-shaped may land
+  // in it, or in the reconciliation page read back out of it.
+  const stored = library.getSyncState(`import.${preview.batchId}`);
+  assert.doesNotMatch(stored, /ya29\./);
+  assert.doesNotMatch(stored, /AIzaSyD/);
+  assert.match(stored, /\[REDACTED\]/);
+
+  const storedStatus = importStatus(library, { batchId: preview.batchId });
+  assert.doesNotMatch(JSON.stringify(storedStatus.items), /ya29\.|AIzaSyD/);
+});
+
+test("a stale sync preflight error does not resurface after a local-only re-apply", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Preflight Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  let listingFails = true;
+  youtube.getPlaylistItems = async (id) => {
+    if (id === PL_SYNC && listingFails) {
+      throw Object.assign(new Error("sync target listing timed out"), { code: "TIMEOUT", status: 503 });
+    }
+    return originalGetItems(id);
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const first = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(first.action, "partial_failure");
+  assert.equal(importStatus(library, { batchId: preview.batchId }).syncError.status, 503);
+
+  // A later apply that does not opt into sync performs no sync attempt, so the
+  // previous attempt's preflight failure must not be reported as this run's.
+  listingFails = false;
+  const second = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(second.sync, undefined);
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.equal(status.syncError, undefined);
+});
+
+test("re-syncing to a second playlist refreshes every duplicate row's sync target", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_SECOND = "PL_IMPORT_SECOND";
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Resync Song" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.playlists.set(PL_SECOND, { id: PL_SECOND, name: "Second Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.items.set(PL_SECOND, []);
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1, VID_NEW1] });
+  const first = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.deepEqual(
+    first.sync.results.map((entry) => entry.playlistId),
+    [PL_SYNC],
+  );
+
+  // Same batch, a different explicit sync target: every row for this videoId
+  // must report the current target, never a mix of the two.
+  const second = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SECOND },
+  );
+  assert.equal(second.sync.playlistId, PL_SECOND);
+
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.deepEqual(
+    status.items.map((item) => item.syncResult),
+    ["added", "added"],
+  );
+  assert.deepEqual(
+    status.items.map((item) => item.syncPlaylistId),
+    [PL_SECOND, PL_SECOND],
+  );
+  // The first target really was written before the re-sync.
+  assert.deepEqual(youtube.addCalls, [`${PL_SYNC}:${VID_NEW1}`, `${PL_SECOND}:${VID_NEW1}`]);
+});
+
+test("an UNKNOWN_AFTER_WRITE receipt names a bounded set of video IDs", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_MANY = "PL_IMPORT_MANY01";
+  const entries = [];
+  for (let i = 0; i < 520; i += 1) {
+    const id = `UNK_${String(i).padStart(4, "0")}`;
+    entries.push({ id, name: `Unknown Song ${i}` });
+    youtube.videos.set(id, { id, name: `Unknown Song ${i}`, channel: "Chan" });
+  }
+  youtube.playlists.set(PL_MANY, { id: PL_MANY, name: "Many Source" });
+  youtube.items.set(PL_MANY, entries);
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("add timed out"), { code: "TIMEOUT", status: 503 });
+  };
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { playlist: PL_MANY, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.action, "UNKNOWN_AFTER_WRITE");
+  assert.equal(applied.sync.results.length, 500);
+  assert.equal(applied.sync.resultsTruncated, true);
+  // The prose receipt must stay bounded too — it is part of the same response.
+  const named = applied.nextStep.match(/UNK_\d{4}/g) ?? [];
+  assert.ok(named.length <= 500, `nextStep named ${named.length} video IDs`);
+  assert.match(applied.nextStep, /and 20 more|import_status/);
+  assert.ok(applied.nextStep.length < 12000, `nextStep is ${applied.nextStep.length} chars`);
+});
+
+test("a cancelled apply that opted into sync keeps the previous preflight failure", async (t) => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  t.after(async () => {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const controller = new AbortController();
+  const youtube = new StubYouTube({ abortAfter: 1, controller });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  // Three pending items: the abort fires during the second read-back, so the
+  // third is what trips the loop's cancellation check.
+  const pending = ["V_PEND00001", "V_PEND00002", "V_PEND00003"].map((videoId) => ({
+    input: videoId,
+    videoId,
+    title: "Pending Song",
+    status: "new",
+  }));
+  for (const item of pending) {
+    youtube.videos.set(item.videoId, { id: item.videoId, name: item.title, channel: "Chan" });
+  }
+  library.setSyncState("import.SEEDEDBATCH", {
+    batchId: "SEEDEDBATCH",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    playlistId: null,
+    syncPlaylistId: null,
+    syncError: { code: "TIMEOUT", message: "sync target listing timed out", status: 503 },
+    items: pending,
+  });
+
+  const applied = await importMusicBatch(
+    { library, youtube },
+    { batchId: "SEEDEDBATCH", syncPlaylist: PL_SYNC },
+    { signal: controller.signal },
+  );
+  assert.equal(applied.action, "cancelled");
+  // No sync was attempted, so the last known sync failure is still the truth.
+  assert.deepEqual(applied.sync.results, []);
+  assert.equal(importStatus(library, { batchId: "SEEDEDBATCH" }).syncError.status, 503);
+});
+
+test("OAuth credential shapes echoed by a provider are redacted from stored errors", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Echoing Song" });
+  youtube.getVideo = async () => {
+    throw Object.assign(
+      new Error("request rejected: access_token=ya29.notrealbutsecretvalue expired"),
+      { code: "HTTP_403", status: 403 },
+    );
+  };
+
+  const applied = await importMusicBatch({ library, youtube }, { items: [VID_NEW1] });
+  assert.equal(applied.results[0].status, "retryable");
+  assert.match(applied.results[0].error.message, /\[REDACTED\]/);
+  assert.doesNotMatch(applied.results[0].error.message, /access_token=/);
+  assert.doesNotMatch(
+    library.getSyncState(`import.${applied.batchId}`),
+    /access_token=/,
+  );
+});
+
+test("a sync row already present in the target records already_present instead of a stale outcome", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Unknown Then Present" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.addVideoToPlaylist = async () => {
+    throw Object.assign(new Error("add timed out"), { code: "TIMEOUT", status: 503 });
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const first = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(first.action, "UNKNOWN_AFTER_WRITE");
+  assert.equal(importStatus(library, { batchId: preview.batchId }).items[0].syncResult, "unknown_after_write");
+
+  // The caller verifies the video really did land, then re-syncs. The plan must
+  // clear the uncertain state instead of reporting it forever.
+  youtube.addVideoToPlaylist = async (playlistId, videoId) => {
+    youtube.addCalls.push(`${playlistId}:${videoId}`);
+    return { added: true };
+  };
+  youtube.items.set(PL_SYNC, [{ id: VID_NEW1, name: "Unknown Then Present" }]);
+  const second = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(second.action, "imported");
+  assert.deepEqual(second.sync.results, []);
+  const status = importStatus(library, { batchId: preview.batchId });
+  assert.equal(status.items[0].syncResult, "already_present");
+  assert.equal(status.items[0].syncPlaylistId, PL_SYNC);
+});
+
+test("in-batch duplicate rows mirror an already_present outcome", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Present Dup" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, [{ id: VID_NEW1, name: "Present Dup" }]);
+
+  const applied = await importMusicBatch(
+    { library, youtube }, { items: [VID_NEW1, VID_NEW1], syncPlaylist: PL_SYNC },
+  );
+  assert.equal(youtube.addCalls.length, 0);
+  const status = importStatus(library, { batchId: applied.batchId });
+  assert.deepEqual(
+    status.items.map((item) => item.syncResult),
+    ["already_present", "already_present"],
+  );
+});
+
+test("an innocuous OAuth-looking query parameter does not drop the import plan from a backup", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const plain = "https://example.com/track?client_id=12345";
+
+  const preview = await previewImport({ library, youtube }, { items: [plain] });
+  const exported = library.exportRows();
+  const keys = exported.syncState.map((row) => row.key);
+  assert.ok(
+    keys.includes(`import.${preview.batchId}`),
+    `import plan missing from backup; keys=${JSON.stringify(keys)}`,
+  );
+  assert.equal(exported.skippedSecrets, 0);
+});
+
+test("prefixed OAuth assignment shapes are redacted from provider error text", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Prefixed Echo" });
+  youtube.getVideo = async () => {
+    throw Object.assign(
+      new Error("rejected: invalid_client_id=abc123def and SID=xyz987"),
+      { code: "HTTP_403", status: 403 },
+    );
+  };
+
+  const applied = await importMusicBatch({ library, youtube }, { items: [VID_NEW1] });
+  const { message } = applied.results[0].error;
+  assert.doesNotMatch(message, /invalid_client_id=/);
+  assert.doesNotMatch(message, /SID=xyz987/);
+  assert.match(message, /\[REDACTED\]/);
+});
+
+test("import_status clamps an explicit limit of 0 to the documented minimum", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_PAGE = "PL_IMPORT_PAGE01";
+  const entries = [];
+  for (let i = 0; i < 10; i += 1) {
+    entries.push({ id: `PAGE_${String(i).padStart(4, "0")}`, name: `Page Song ${i}` });
+  }
+  youtube.playlists.set(PL_PAGE, { id: PL_PAGE, name: "Page Source" });
+  youtube.items.set(PL_PAGE, entries);
+
+  const preview = await previewImport({ library, youtube }, { playlist: PL_PAGE });
+  const status = importStatus(library, { batchId: preview.batchId, limit: 0 });
+  assert.equal(status.items.length, 1); // clamped to the documented minimum
+  assert.equal(status.itemsTotal, 10);
+  assert.equal(importStatus(library, { batchId: preview.batchId, limit: "abc" }).items.length, 10);
+});
+
+test("duplicate-row mirror corrections are persisted incrementally, not only at the end", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_MIRROR = "PL_MIRROR_FLUSH";
+  const COUNT = 30; // more than CHUNK_SIZE so the mirror loop crosses a boundary
+  const entries = [];
+  for (let i = 0; i < COUNT; i += 1) {
+    entries.push({ id: `MIRROR_${String(i).padStart(4, "0")}`, name: `Mirror Song ${i}` });
+    youtube.videos.set(`MIRROR_${String(i).padStart(4, "0")}`, {
+      id: `MIRROR_${String(i).padStart(4, "0")}`,
+      name: `Mirror Song ${i}`,
+      channel: "Chan",
+    });
+  }
+  youtube.playlists.set(PL_MIRROR, { id: PL_MIRROR, name: "Mirror Source" });
+  youtube.items.set(PL_MIRROR, entries);
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.items.set(PL_SYNC, []);
+
+  // Snapshot every write so a mid-mirror crash can be simulated: the plan must
+  // already be consistent before the final flush.
+  const snapshots = [];
+  const realSetSyncState = library.setSyncState.bind(library);
+  library.setSyncState = (key, value) => {
+    if (typeof key === "string" && key.startsWith("import.")) {
+      snapshots.push(JSON.parse(JSON.stringify(value)));
+    }
+    return realSetSyncState(key, value);
+  };
+
+  const inputs = entries.flatMap((entry) => [entry.id, entry.id]);
+  const applied = await importMusicBatch(
+    { library, youtube }, { items: inputs, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.results.length, COUNT);
+
+  // Only the mirror pass writes duplicate rows, so a snapshot showing corrected
+// duplicates proves the mirror phase flushed incrementally rather than the
+// whole correction landing in the final flush.
+const mirroredDuplicates = (plan) => plan.items.filter(
+    (item) => item.inBatchDuplicate && item.syncResult === "added" && item.syncPlaylistId === PL_SYNC,
+  ).length;
+  const counts = snapshots.map(mirroredDuplicates);
+  const beforeFinal = counts.slice(0, -1);
+  assert.ok(beforeFinal.length > 0, "expected an intermediate plan snapshot");
+  assert.ok(
+    Math.max(...beforeFinal) > 0,
+    `no pre-final snapshot carried mirror corrections; counts=${JSON.stringify(counts)}`,
+  );
+  assert.equal(counts[counts.length - 1], COUNT);
+});
+
+test("a persisted sync preflight failure names the playlist it belongs to", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const PL_OTHER = "PL_IMPORT_OTHER1";
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Named Target" });
+  youtube.playlists.set(PL_SYNC, { id: PL_SYNC, name: "Sync Target" });
+  youtube.playlists.set(PL_OTHER, { id: PL_OTHER, name: "Other Target" });
+  youtube.items.set(PL_SYNC, []);
+  youtube.items.set(PL_OTHER, []);
+  const originalGetItems = youtube.getPlaylistItems.bind(youtube);
+  youtube.getPlaylistItems = async (id) => {
+    if (id === PL_SYNC) {
+      throw Object.assign(new Error("sync target listing timed out"), { code: "TIMEOUT", status: 503 });
+    }
+    return originalGetItems(id);
+  };
+
+  const preview = await previewImport({ library, youtube }, { items: [VID_NEW1] });
+  const applied = await importMusicBatch(
+    { library, youtube }, { batchId: preview.batchId, syncPlaylist: PL_SYNC },
+  );
+  assert.equal(applied.sync.error.playlistId, PL_SYNC);
+  // The stored error is retained across a later cancelled run, so it must say
+  // which target it is about.
+  assert.equal(importStatus(library, { batchId: preview.batchId }).syncError.playlistId, PL_SYNC);
+});
+
+test("a pasted credential in the import input is redacted from the stored plan", async (t) => {
+  const { library, youtube } = await fixture(t);
+  youtube.videos.set(VID_NEW1, { id: VID_NEW1, name: "Fine Song" });
+  // `input` is pasted free text persisted verbatim on the plan. It must not be
+  // the one untrusted field that reaches the database unredacted.
+  const pasted = "https://example.com/track?access_token=ya29.leakedbypastevalue";
+
+  const preview = await previewImport({ library, youtube }, { items: [pasted, VID_NEW1] });
+  assert.equal(preview.counts.total, 2);
+  assert.doesNotMatch(preview.items[0].input, /ya29\./);
+  assert.match(preview.items[0].input, /\[REDACTED\]/);
+
+  const stored = library.getSyncState(`import.${preview.batchId}`);
+  assert.doesNotMatch(stored, /leakedbypastevalue/);
+  // Redaction keeps the row exportable — the exporter's drop rule stays strict.
+  const keys = library.exportRows().syncState.map((row) => row.key);
+  assert.ok(keys.includes(`import.${preview.batchId}`));
+
+  const applied = await importMusicBatch({ library, youtube }, { batchId: preview.batchId });
+  assert.equal(applied.results[0].status, "unresolved");
+  assert.doesNotMatch(applied.results[0].input, /ya29\./);
+  assert.equal(applied.results[1].status, "imported");
+  assert.doesNotMatch(JSON.stringify(importStatus(library, { batchId: applied.batchId })), /ya29\./);
+});
+
+test("import_status redacts provider text in a plan written before write-side redaction", async (t) => {
+  const { directory, filePath } = await tempLibrary();
+  const library = openLibrary(filePath);
+  t.after(async () => {
+    library.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  // A plan persisted by an older build, with the credential in the clear.
+  library.setSyncState("import.LEGACYPLAN", {
+    batchId: "LEGACYPLAN",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    playlistId: null,
+    items: [{
+      input: "V_LEGACY001",
+      videoId: "V_LEGACY001",
+      title: "Legacy Song",
+      status: "retryable",
+      result: "retryable",
+      error: { code: "TIMEOUT", message: "quota rejected for Bearer ya29.oldleakedleaked" },
+    }],
+    syncError: { playlistId: PL_SYNC, code: "TIMEOUT", message: "listing failed: SID=oldsecretvalue" },
+  });
+
+  const status = importStatus(library, { batchId: "LEGACYPLAN" });
+  const serialized = JSON.stringify(status);
+  assert.doesNotMatch(serialized, /ya29\.|oldsecretvalue/);
+  assert.match(serialized, /\[REDACTED\]/);
+  // Non-secret fields still come through untouched.
+  assert.equal(status.items[0].error.code, "TIMEOUT");
+  assert.equal(status.syncError.playlistId, PL_SYNC);
+});
+
+test("legacy pasted credentials remain redacted through status and resumed apply", async (t) => {
+  const { library, youtube } = await fixture(t);
+  const batchId = "LEGACYPASTED";
+  const legacy = {
+    batchId,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    playlistId: null,
+    items: [{
+      input: "https://example.com/track?access_token=ya29.legacyinputsentinel",
+      status: "unresolved",
+      error: { code: "HTTP_403", status: 403, message: "Bearer ya29.legacyerrorsentinel" },
+    }],
+  };
+  library.setSyncState(`import.${batchId}`, legacy);
+  const original = library.getSyncState(`import.${batchId}`);
+  await t.test("status redacts without rewriting", () => {
+    const status = importStatus(library, { batchId });
+    assert.doesNotMatch(JSON.stringify(status), /legacyinputsentinel|legacyerrorsentinel/);
+    assert.match(status.items[0].input, /\[REDACTED\]/);
+    assert.equal(status.items[0].error.code, "HTTP_403");
+    assert.equal(status.items[0].error.status, 403);
+    assert.equal(library.getSyncState(`import.${batchId}`), original,
+      "read-only status must not rewrite the legacy plan");
+  });
+  await t.test("resume redacts its receipt and newly persisted plan", async () => {
+    const applied = await importMusicBatch({ library, youtube }, { batchId, resume: true });
+    assert.equal(applied.results[0].status, "unresolved");
+    assert.doesNotMatch(JSON.stringify(applied), /legacyinputsentinel|legacyerrorsentinel/);
+    assert.doesNotMatch(library.getSyncState(`import.${batchId}`), /legacyinputsentinel|legacyerrorsentinel/);
+    assert.equal(youtube.getVideoCalls, 0);
+    assert.equal(youtube.addCalls.length, 0);
+  });
+});

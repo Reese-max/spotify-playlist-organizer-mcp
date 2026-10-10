@@ -814,8 +814,8 @@ export class YouTubeClient {
     };
   }
 
-  async findPlaylistByName(name, { playlists } = {}) {
-    const available = playlists ?? (await this.listPlaylists()).playlists;
+  async findPlaylistByName(name, { playlists, signal } = {}) {
+    const available = playlists ?? (await this.listPlaylists({ signal })).playlists;
     return available.find((playlist) => normalizeName(playlist.name) === normalizeName(name)) ?? null;
   }
 }

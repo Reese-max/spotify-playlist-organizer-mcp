@@ -37,6 +37,7 @@ import { reconcileTrack, syncStatus, syncYoutube } from "./library-sync.js";
 import { importMusicBatch, importStatus, previewImport } from "./batch-import.js";
 import { exportLibrary, restoreLibrary } from "./library-backup.js";
 import { APP_VERSION } from "./version.js";
+import { assertSpotifyToolExposureAllowed } from "./provider-data-policy.js";
 import {
   listIdentityReviews,
   mergeMusicTracks,
@@ -85,6 +86,23 @@ function safeTool(handler) {
       : { ...extra, signal: extra.mcpReq.signal };
     try {
       return jsonResult(await handler(args, forwarded));
+    } catch (error) {
+      return errorResult(error);
+    }
+  };
+}
+
+function safeSpotifyTool(toolName, handler) {
+  return async (args, extra) => {
+    // Preserve the SDK's per-request cancellation signal just as safeTool does.
+    const forwarded = extra?.signal || !extra?.mcpReq?.signal
+      ? extra
+      : { ...extra, signal: extra.mcpReq.signal };
+    try {
+      assertSpotifyToolExposureAllowed(toolName);
+      const result = await handler(args, forwarded);
+      assertSpotifyToolExposureAllowed(toolName);
+      return jsonResult(result);
     } catch (error) {
       return errorResult(error);
     }
@@ -212,7 +230,7 @@ export function createServer(library) {
         market: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(({ query, limit, market }, extra) => (
+    safeSpotifyTool("spotify_search_tracks", ({ query, limit, market }, extra) => (
       client.searchTracks(query, { limit, market, signal: extra?.signal })
     )),
   );
@@ -228,7 +246,7 @@ export function createServer(library) {
         market: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(async ({ input, artist, limit, market }, extra) => {
+    safeSpotifyTool("spotify_identify_track", async ({ input, artist, limit, market }, extra) => {
       const source = parseLink(input);
       if (source.kind === "spotify-track") {
         return { source, match: await client.getTrack(source.id, market, { signal: extra?.signal }) };
@@ -261,7 +279,7 @@ export function createServer(library) {
         market: z.string().regex(/^[A-Za-z]{2}$/).optional(),
       }),
     },
-    safeTool(async ({ links, market }, extra) => {
+    safeSpotifyTool("spotify_resolve_links", async ({ links, market }, extra) => {
       const results = [];
       for (const input of links) {
         try {
@@ -305,7 +323,7 @@ export function createServer(library) {
       description: "Find repeated tracks in a Spotify playlist without changing it.",
       inputSchema: z.object({ playlist: z.string().min(1) }),
     },
-    safeTool(async ({ playlist }, extra) => {
+    safeSpotifyTool("spotify_check_playlist_duplicates", async ({ playlist }, extra) => {
       const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       return {
         playlist: {
@@ -327,7 +345,7 @@ export function createServer(library) {
         rules: z.record(z.string(), z.array(z.string())).optional(),
       }),
     },
-    safeTool(async ({ playlist, rules }, extra) => {
+    safeSpotifyTool("spotify_classify_playlist", async ({ playlist, rules }, extra) => {
       const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       return {
@@ -354,7 +372,7 @@ export function createServer(library) {
         prefix: z.string().max(40).default(""),
       }),
     },
-    safeTool(async ({ playlist, mode, rules, public: isPublic, prefix }, extra) => {
+    safeSpotifyTool("spotify_organize_playlist", async ({ playlist, mode, rules, public: isPublic, prefix }, extra) => {
       const loaded = await loadPlaylist(client, playlist, { signal: extra?.signal });
       const classification = classifyItems(loaded.items, rules ?? DEFAULT_RULES);
       const plan = Object.entries(classification.categories)

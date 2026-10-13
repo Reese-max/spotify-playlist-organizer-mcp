@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "manifest_version": "1.1.0",
+  "reviewed_on": "2026-09-30",
+  "policy_checked_at": "2026-09-30",
+  "policy_effective_date": "2025-05-15",
+  "decision_status": "UNRESOLVED",
+  "provider": "Spotify",
+  "model_visibility": "UNKNOWN",
+  "default_action": "BLOCK",
+  "policy_interpretation": "Spotify policy text is recorded below. Whether a particular MCP client sends returned fields into an AI model is unresolved and is not represented as approved.",
+  "sources": {
+    "spotify_policy": {
+      "url": "https://developer.spotify.com/policy",
+      "effective_date": "2025-05-15",
+      "sections": ["III.13", "III.14"]
+    },
+    "spotify_developer_terms": {
+      "url": "https://developer.spotify.com/terms",
+      "version": 10,
+      "effective_date": "2025-05-15",
+      "sections": ["II.8", "IV.2.1", "IV.3.1", "IV.3.2"]
+    },
+    "spotify_search_api": {
+      "url": "https://developer.spotify.com/documentation/web-api/reference/search",
+      "purpose": "Spotify API response field reference"
+    },
+    "spotify_get_track_api": {
+      "url": "https://developer.spotify.com/documentation/web-api/reference/get-track",
+      "purpose": "Spotify API response field reference"
+    },
+    "spotify_get_playlist_api": {
+      "url": "https://developer.spotify.com/documentation/web-api/reference/get-playlist",
+      "purpose": "Spotify API response field reference"
+    },
+    "mcp_tools_spec": {
+      "url": "https://modelcontextprotocol.io/specification/2026-07-28/server/tools",
+      "purpose": "Protocol context only; it does not resolve client-specific model visibility"
+    }
+  },
+  "fields": {
+    "request.query": {
+      "classification": "USER_SUPPLIED",
+      "source": "MCP caller input",
+      "output_paths": ["spotify_search_tracks.query"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED",
+      "source_type": "USER_SUPPLIED",
+      "purpose": "Search Spotify using caller-provided text.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "request.source": {
+      "classification": "USER_SUPPLIED",
+      "source": "MCP caller input",
+      "output_paths": ["spotify_identify_track.source", "spotify_resolve_links.results[].input", "spotify_resolve_links.results[].source"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED",
+      "source_type": "USER_SUPPLIED",
+      "purpose": "Identify or resolve a caller-provided link or text reference.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.search.total": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Search API response total",
+      "output_paths": ["spotify_search_tracks.total", "spotify_identify_track.total", "spotify_resolve_links.results[].total"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Report the number of Spotify catalog search matches.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.search.query": {
+      "classification": "DERIVED_FROM_CALLER_INPUT_OR_LINK_METADATA",
+      "source": "Query echoed by Spotify search helper; may be caller text or YouTube oEmbed title and author",
+      "output_paths": ["spotify_identify_track.query", "spotify_resolve_links.results[].query"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED",
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["USER_SUPPLIED", "YOUTUBE_PUBLIC"],
+      "purpose": "Record the normalized query used for a Spotify lookup.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.id": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response id",
+      "output_paths": ["*.tracks[].id", "*.match.id", "spotify_classify_playlist.categories.*[].id", "spotify_check_playlist_duplicates.duplicates[][].id", "spotify_classify_playlist.assignments[].id"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Identify a Spotify track candidate.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.name": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response name",
+      "output_paths": ["*.tracks[].name", "*.match.name", "spotify_classify_playlist.categories.*[].name", "spotify_check_playlist_duplicates.duplicates[][].name", "spotify_classify_playlist.assignments[].name"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Display a Spotify track candidate.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.artists": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response artists[].name",
+      "output_paths": ["*.tracks[].artists", "*.match.artists", "spotify_classify_playlist.categories.*[].artists", "spotify_check_playlist_duplicates.duplicates[][].artists", "spotify_classify_playlist.assignments[].artists"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Display the Spotify track artist attribution.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.album": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response album.name",
+      "output_paths": ["*.tracks[].album", "*.match.album", "spotify_classify_playlist.categories.*[].album", "spotify_check_playlist_duplicates.duplicates[][].album", "spotify_classify_playlist.assignments[].album"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Display the Spotify track album attribution.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.uri": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response uri",
+      "output_paths": ["*.tracks[].uri", "*.match.uri", "spotify_classify_playlist.categories.*[].uri", "spotify_check_playlist_duplicates.duplicates[][].uri", "spotify_classify_playlist.assignments[].uri"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Address a Spotify track for playlist operations.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.url": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response external_urls.spotify",
+      "output_paths": ["*.tracks[].url", "*.match.url", "spotify_classify_playlist.categories.*[].url", "spotify_check_playlist_duplicates.duplicates[][].url", "spotify_classify_playlist.assignments[].url"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Provide a track URL for user navigation.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.is_local": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Track API response is_local",
+      "output_paths": ["*.tracks[].isLocal", "*.match.isLocal", "spotify_check_playlist_duplicates.duplicates[][].isLocal", "spotify_classify_playlist.categories.*[].isLocal", "spotify_classify_playlist.assignments[].isLocal"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Report the Spotify API local-track flag.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.platform": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local track summary constant for Spotify results",
+      "output_paths": ["*.tracks[].platform", "*.match.platform", "spotify_check_playlist_duplicates.duplicates[][].platform", "spotify_classify_playlist.categories.*[].platform", "spotify_classify_playlist.assignments[].platform"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Label the provider for a normalized track summary.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.channel": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Optional channel property emitted by the shared track summary; not part of the documented Spotify Track response",
+      "output_paths": ["*.tracks[].channel", "*.match.channel", "spotify_check_playlist_duplicates.duplicates[][].channel", "spotify_classify_playlist.categories.*[].channel", "spotify_classify_playlist.assignments[].channel"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Carry an optional channel value from the shared track summary.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.position": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Playlist item order from Spotify response",
+      "output_paths": ["*.tracks[].position", "*.match.position", "spotify_check_playlist_duplicates.duplicates[][].position", "spotify_classify_playlist.categories.*[].position", "spotify_classify_playlist.assignments[].position"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Preserve the item order from the source playlist.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.playlist.id": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify playlist ID returned for an existing or newly created derived playlist. Source-playlist IDs parsed from caller input are classified separately.",
+      "output_paths": ["spotify_organize_playlist.results[].playlist.id"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Address an existing or newly created derived playlist.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.playlist.name": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify Playlist API response name or a local generated-name fallback for a derived playlist.",
+      "output_paths": ["spotify_check_playlist_duplicates.playlist.name", "spotify_classify_playlist.playlist.name", "spotify_organize_playlist.playlist.name", "spotify_organize_playlist.sourcePlaylist.name", "spotify_organize_playlist.results[].playlist.name"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Display the source or derived playlist name.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.playlist.url": {
+      "classification": "SPOTIFY_CONTENT",
+      "source": "Spotify API external_urls.spotify or a locally constructed Spotify URL based on a caller-supplied playlist reference.",
+      "output_paths": ["spotify_check_playlist_duplicates.playlist.url", "spotify_classify_playlist.playlist.url", "spotify_organize_playlist.playlist.url", "spotify_organize_playlist.sourcePlaylist.url", "spotify_organize_playlist.results[].playlist.url"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Provide a source or derived playlist URL for user navigation.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.duplicates": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local duplicate grouping from Spotify playlist items",
+      "output_paths": ["spotify_check_playlist_duplicates.totalItems", "spotify_check_playlist_duplicates.duplicateGroups", "spotify_check_playlist_duplicates.duplicateItemCount", "spotify_check_playlist_duplicates.hasDuplicates", "spotify_check_playlist_duplicates.duplicates"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Show repeated tracks and counts in a playlist.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.classification": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local category assignment from Spotify track title, artist, and album fields",
+      "output_paths": ["spotify_classify_playlist.totalItems", "spotify_classify_playlist.counts", "spotify_classify_playlist.categories", "spotify_classify_playlist.assignments", "spotify_organize_playlist.plan"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Preview deterministic categories derived from playlist metadata.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "youtube.link_metadata": {
+      "classification": "YOUTUBE_PUBLIC_METADATA",
+      "source": "YouTube oEmbed metadata for a caller-provided YouTube URL",
+      "output_paths": ["spotify_identify_track.youtube", "spotify_resolve_links.results[].youtube"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "OUT_OF_SCOPE_FOR_SPOTIFY_POLICY",
+      "source_type": "YOUTUBE_PUBLIC",
+      "purpose": "Build a Spotify search query from caller-supplied YouTube link metadata.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.organization_receipt": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local plan plus Spotify playlist identities returned after explicit apply",
+      "output_paths": ["spotify_organize_playlist.mode", "spotify_organize_playlist.plan[].category", "spotify_organize_playlist.plan[].count", "spotify_organize_playlist.plan[].name", "spotify_organize_playlist.plan[].trackCount", "spotify_organize_playlist.sourcePlaylist", "spotify_organize_playlist.results[].category", "spotify_organize_playlist.results[].trackCount", "spotify_organize_playlist.results[].playlist", "spotify_organize_playlist.note"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["USER_SUPPLIED", "SPOTIFY_PLATFORM"],
+      "purpose": "Report the outcome of an explicitly applied playlist organization.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.provider_error": {
+      "classification": "SPOTIFY_API_ERROR_DETAIL",
+      "source": "Spotify API error response; may include provider-supplied text",
+      "output_paths": ["Spotify tool error payloads"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "SPOTIFY_PLATFORM",
+      "purpose": "Report a safe failure from a Spotify provider operation.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "request.playlist_reference": {
+      "classification": "USER_SUPPLIED",
+      "source": "Opaque playlist ID parsed from the caller-provided Spotify playlist URL, URI, or ID; the server echoes the parsed reference.",
+      "output_paths": ["spotify_check_playlist_duplicates.playlist.id", "spotify_classify_playlist.playlist.id", "spotify_organize_playlist.playlist.id", "spotify_organize_playlist.sourcePlaylist.id"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "NOT_ASSESSED",
+      "source_type": "USER_SUPPLIED",
+      "purpose": "Address the playlist ID parsed from caller-provided input.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.track.unavailable": {
+      "classification": "DERIVED_FROM_SPOTIFY_CONTENT",
+      "source": "Local track summary flag for a missing or unavailable playlist item returned by Spotify.",
+      "output_paths": ["spotify_check_playlist_duplicates.duplicates[][].unavailable", "spotify_classify_playlist.categories.*[].unavailable", "spotify_classify_playlist.assignments[].unavailable"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Flag a missing or unavailable playlist item.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    },
+    "spotify.resolve.error": {
+      "classification": "LOCAL_OR_SPOTIFY_PROVIDER_ERROR",
+      "source": "Per-link parse/lookup error returned inline by spotify_resolve_links; a Spotify API failure may contribute provider-controlled text.",
+      "output_paths": ["spotify_resolve_links.results[].error"],
+      "model_visibility": "UNKNOWN",
+      "policy_status": "UNKNOWN",
+      "policy_sources": ["spotify_policy", "spotify_developer_terms"],
+      "source_type": "LOCAL_DERIVED",
+      "derived_from": ["SPOTIFY_PLATFORM"],
+      "purpose": "Report why a single input link could not be resolved.",
+      "retention": "Held only for the tool request and response by this application; no local persistence. MCP-client retention is host-dependent and unverified."
+    }
+  },
+  "tools": {
+    "spotify_search_tracks": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["request.query", "spotify.search.total", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.is_local", "spotify.track.platform", "spotify.track.position", "spotify.track.channel", "spotify.provider_error"]
+    },
+    "spotify_identify_track": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["request.source", "youtube.link_metadata", "spotify.search.query", "spotify.search.total", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.is_local", "spotify.track.platform", "spotify.track.position", "spotify.track.channel", "spotify.provider_error"]
+    },
+    "spotify_resolve_links": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["request.source", "youtube.link_metadata", "spotify.search.query", "spotify.search.total", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.is_local", "spotify.track.platform", "spotify.track.position", "spotify.track.channel", "spotify.provider_error", "spotify.resolve.error"]
+    },
+    "spotify_check_playlist_duplicates": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["spotify.playlist.id", "spotify.playlist.name", "spotify.playlist.url", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.position", "spotify.track.channel", "spotify.duplicates", "spotify.provider_error", "request.playlist_reference", "spotify.track.unavailable"]
+    },
+    "spotify_classify_playlist": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["spotify.playlist.id", "spotify.playlist.name", "spotify.playlist.url", "spotify.track.id", "spotify.track.name", "spotify.track.artists", "spotify.track.album", "spotify.track.uri", "spotify.track.url", "spotify.track.position", "spotify.track.channel", "spotify.classification", "spotify.provider_error", "request.playlist_reference", "spotify.track.unavailable"]
+    },
+    "spotify_organize_playlist": {
+      "model_visibility": "UNKNOWN",
+      "output_fields": ["spotify.playlist.id", "spotify.playlist.name", "spotify.playlist.url", "spotify.classification", "spotify.organization_receipt", "spotify.provider_error", "request.playlist_reference"]
+    }
+  }
+}

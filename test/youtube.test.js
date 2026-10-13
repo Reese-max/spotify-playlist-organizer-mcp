@@ -134,7 +134,8 @@ function env(overrides = {}) {
 }
 
 function clientWithScopedEnvironmentAccess(environment, fetch) {
-  const client = new YouTubeClient(environment, fetch);
+  const isolatedEnvironment = env(environment);
+  const client = new YouTubeClient(isolatedEnvironment, fetch);
   const accessToken = environment.YOUTUBE_ACCESS_TOKEN?.trim();
   if (accessToken && !environment.YOUTUBE_REFRESH_TOKEN?.trim()) {
     client.storedCredentials = credentialsFromTokenResponse({

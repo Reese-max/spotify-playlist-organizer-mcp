@@ -237,7 +237,26 @@ export class YouTubeClient {
     return stored;
   }
 
+  async assertCredentialStateUsable() {
+    const marker = await this.credentials.readStatusMarker();
+    if (marker?.status === "REVOKED") {
+      throw new ProviderRequestError(
+        "AUTH_REVOKED",
+        "The stored YouTube authorization was revoked. Run npm run youtube:auth to authorize again.",
+        { retryable: false },
+      );
+    }
+    if (marker?.status === "UNKNOWN") {
+      throw new ProviderRequestError(
+        "AUTH_CREDENTIAL_STATE_UNKNOWN",
+        "The stored YouTube authorization state is unknown. Run npm run youtube:auth to authorize again.",
+        { retryable: false },
+      );
+    }
+  }
+
   async refreshUserToken({ signal } = {}) {
+    await this.assertCredentialStateUsable();
     if (this.refreshingUserToken) return this.refreshingUserToken;
 
     // Assigned synchronously so a concurrent call observes the in-flight
@@ -281,6 +300,18 @@ export class YouTubeClient {
         operation: "YouTube OAuth token response",
       });
       if (!response.ok) {
+        if (data?.error === "invalid_grant") {
+          // Google uses invalid_grant for expired, revoked, or otherwise
+          // invalid refresh grants. Preserve the encrypted record for an
+          // explicit revoke/recovery, but mark its state unknown and require
+          // a fresh authorization before using it again.
+          await this.credentials.recordStatus("UNKNOWN", "AUTH_REFRESH_INVALID_GRANT");
+          throw new ProviderRequestError(
+            "AUTH_REFRESH_INVALID_GRANT",
+            "Google no longer accepts the YouTube refresh grant. Run npm run youtube:auth to authorize again.",
+            { retryable: false },
+          );
+        }
         throw new YouTubeApiError(
           response.status,
           "YouTube OAuth token refresh failed.",
@@ -313,6 +344,7 @@ export class YouTubeClient {
   }
 
   async getUserToken({ signal } = {}) {
+    await this.assertCredentialStateUsable();
     // A token minted by a refresh supersedes a stale env access token; the
     // operator-provided env value itself is never overwritten, so
     // credentialStatus keeps reporting the true credential source.

@@ -288,6 +288,39 @@ test("refreshUserToken error never leaks secrets", async () => {
   });
 });
 
+test("invalid_grant refresh records unknown status and blocks stale credential reuse", async () => {
+  await withTempStore({
+    GOOGLE_CLIENT_ID: "test-client-id",
+    GOOGLE_CLIENT_SECRET: SENTINEL_CLIENT_SECRET,
+    YOUTUBE_CREDENTIAL_PASSPHRASE: "test-passphrase",
+  }, async (env) => {
+    const mockFetch = createMockFetch([
+      { body: { error: "invalid_grant", error_description: "Refresh token is invalid." }, ok: false, status: 400 },
+    ]);
+    const client = new YouTubeClient(env, mockFetch);
+    await storeCredentials(client.credentials, { expires_in: 0 });
+
+    await assert.rejects(
+      client.refreshUserToken(),
+      (error) => error.code === "AUTH_REFRESH_INVALID_GRANT" && error.retryable === false,
+    );
+
+    const status = await client.credentialStatus();
+    assert.equal(status.status, "UNKNOWN");
+    assert.equal(status.reason, "AUTH_REFRESH_INVALID_GRANT");
+    assertNoSecretsInOutput(status, "invalid-grant credential status");
+
+    await assert.rejects(
+      client.getUserToken(),
+      (error) => error.code === "AUTH_CREDENTIAL_STATE_UNKNOWN" && error.retryable === false,
+    );
+    assert.equal(mockFetch.calls.length, 1, "an invalid grant must not be retried with the stale credential");
+
+    await storeCredentials(client.credentials);
+    assert.equal((await client.credentialStatus()).status, "READY", "fresh authorization clears the non-secret unknown marker");
+  });
+});
+
 test("MCP tool results never contain secrets", async () => {
   const mockFetch = createMockFetch([
     { body: { pageInfo: { totalResults: 0 }, items: [] } },

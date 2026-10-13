@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 import { fetchWithDeadline, ProviderRequestError, waitForRetry } from "../src/http.js";
@@ -62,7 +65,10 @@ test("retries a transient YouTube read once, but never retries a write", async (
 
   let writeCalls = 0;
   const writeClient = new YouTubeClient(
-    { YOUTUBE_ACCESS_TOKEN: "user-token" },
+    {
+      YOUTUBE_ACCESS_TOKEN: "user-token",
+      YOUTUBE_CREDENTIAL_FILE: path.join(os.tmpdir(), "spotify-http-test-" + randomUUID() + ".json"),
+    },
     async () => {
       writeCalls += 1;
       return { ...response({ error: { message: "temporary" } }, 503), headers: { get: () => "0" } };

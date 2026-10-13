@@ -270,7 +270,7 @@ Windows 的 Node/libuv `setRawMode(false)` 會將原生模式設為 processed/li
 
 若設定環境變數 `YOUTUBE_REFRESH_TOKEN`，只有在它與加密憑證檔中的 refresh token 完全相符、且該檔記錄了必要的 YouTube scope 時，才會允許它刷新或授權 YouTube API；沒有可驗證的本機授權紀錄時會回報 `AUTH_SCOPE_UNKNOWN` 並在發出 token refresh/API 請求前拒絕。Environment fallback 仍會在 status 顯示警告。
 
-`youtube_auth_status` 只回報狀態與非機密資訊（`READY | EXPIRED | REVOKED | MISSING | UNKNOWN`、授權 scopes、到期時間、頻道 fingerprint），不會輸出 token。成功撤銷後會在憑證檔旁保存只含狀態與時間的 `.status.json` 標記，讓重啟後仍顯示 `REVOKED`；完成新授權並保存憑證時會清除此標記。無法讀取原憑證、因此不能確認遠端撤銷時，status 會保留 `UNKNOWN` 和原因。若授權時未取得必要的 YouTube scope，憑證會被標記 `AUTH_SCOPE_INSUFFICIENT` 並拒絕使用（fail closed）：請重新執行 `npm run youtube:auth` 並核准 YouTube 權限。MCP 工具的成功與錯誤輸出都會經過 secret redaction，避免憑證外洩。
+`youtube_auth_status` 只回報狀態與非機密資訊（`READY | EXPIRED | REVOKED | MISSING | UNKNOWN`、授權 scopes、到期時間、頻道 fingerprint），不會輸出 token。成功撤銷後會在憑證檔旁保存只含狀態與時間的 `.status.json` 標記，讓重啟後仍顯示 `REVOKED`；完成新授權並保存憑證時會清除此標記。若 Google 在刷新時回傳 `invalid_grant`，系統會記錄 `UNKNOWN` / `AUTH_REFRESH_INVALID_GRANT` 並阻擋繼續使用舊 grant；由於 Google 以此錯誤表示授權已過期、撤銷或其他無效狀態，系統不會把它誤報成已確認的 `REVOKED`。請執行 `npm run youtube:auth` 重新授權。無法讀取原憑證、因此不能確認遠端撤銷時，status 會保留 `UNKNOWN` 和原因。若授權時未取得必要的 YouTube scope，憑證會被標記 `AUTH_SCOPE_INSUFFICIENT` 並拒絕使用（fail closed）：請重新執行 `npm run youtube:auth` 並核准 YouTube 權限。MCP 工具的成功與錯誤輸出都會經過 secret redaction，避免憑證外洩。
 
 ## 使用範例
 

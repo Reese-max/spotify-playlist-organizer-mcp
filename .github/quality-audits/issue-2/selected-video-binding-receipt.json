@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "issue": 2,
+  "decision": "NARROW",
+  "baseline_current_main": "47eed58f219ffba0beb11bf4844c7711e663e38d",
+  "prior_canonical_head": "44fddfd712a79c757eb295b5da905264d3239bcc",
+  "canonical_target": "feat/issue-9-library",
+  "source_worktree": "normal current-main merge; runtime unchanged; additive actual-handler regression cases",
+  "runtime_source_sha256": {
+    "src/server.js": "1d2f47b7c3fa0c9c29494742a16c6f1deef3d492ab1cc711cb7f3e855e3cf7a2",
+    "src/youtube.js": "f7839db2dfd9658efe76a74f782bc9e4f6690e454a82b8bf616fed7d8c9e4846",
+    "src/save-music.js": "26efe5bd47d046be19af217578dfd985222d632370c05ee1bb8213c914955151",
+    "test/mcp-e2e.test.js": "d3fa770c6d7e99594e8419a445677a96bc9a8c1f48047ad3e93179a0d0f42cdf"
+  },
+  "environment": {
+    "node": "v24.19.0",
+    "provider_transport": "HTTP loopback 127.0.0.1, injected synthetic credentials, no account/provider traffic",
+    "library": "temporary fixture SQLite per case"
+  },
+  "command": "node --test --test-name-pattern=\"youtube_save_track binds candidate|youtube_save_track unavailable selection|youtube_save_track exact URL\" test/mcp-e2e.test.js",
+  "verification": "PASS: all three named actual-stdio-handler tests; these actual outcome values are verified by exact assertions in the frozen test source, not live-provider observations.",
+  "cases": [
+    {
+      "case": "text preview, candidate #2, changed ranking and explicit videoId",
+      "expected": "Preview no writes; unbound apply selection_required before playlist lookup; exact selected ID survives ranking change with no search",
+      "actual_assertions_verified": {
+        "initial_candidates": [
+          "AAAAAAAAAAA",
+          "BBBBBBBBBBB"
+        ],
+        "reordered_candidates": [
+          "CCCCCCCCCCC",
+          "AAAAAAAAAAA"
+        ],
+        "unbound_action": "selection_required",
+        "unbound_playlist_lookup_delta": 0,
+        "selected_video": "BBBBBBBBBBB",
+        "selected_search_delta": 0,
+        "selected_get_video_delta": 1,
+        "inserted_video_ids": [
+          "BBBBBBBBBBB"
+        ]
+      }
+    },
+    {
+      "case": "selected exact ID unavailable after preview",
+      "expected": "Error; no fallback search, playlist lookup, creation or insertion",
+      "actual_assertions_verified": {
+        "error": "not found",
+        "get_video_delta": 1,
+        "search_delta": 0,
+        "playlist_lookup_delta": 0,
+        "created_playlists": 0,
+        "insertions": 0
+      }
+    },
+    {
+      "case": "exact URL one-call apply",
+      "expected": "Original ID, no search or mandatory preview",
+      "actual_assertions_verified": {
+        "action": "added",
+        "video_id": "AAAAAAAAAAA",
+        "searches": 0,
+        "get_video_calls": 1,
+        "inserted_video_ids": [
+          "AAAAAAAAAAA"
+        ]
+      }
+    }
+  ],
+  "other_preserved_contracts": [
+    "Actual preview performs zero provider writes",
+    "Exact-ID dedupe remains verified in the existing full suite",
+    "Receipt, stdout and stderr secret checks run in all three new cases",
+    "All current-main cancellation/quota/partial-write/read-back/duplicate tests retained"
+  ],
+  "options": [
+    {
+      "option": "Existing exact-ID capability plus guidance",
+      "result": "Sufficient when client forwards chosen candidate ID; precise links retain fast path",
+      "selected": true
+    },
+    {
+      "option": "Documentation alone while resending unbound free text",
+      "result": "Cannot encode selected identity; handler safely requests explicit selection rather than silently choosing refreshed first row",
+      "selected": false
+    },
+    {
+      "option": "Local selected-video parameter binding",
+      "result": "Already supported by videoId; no additional parameter or runtime behavior is required on current main",
+      "selected": true
+    }
+  ],
+  "new_persistence_required": false,
+  "unverified": [
+    "Real search quality",
+    "Human choice/error-rate or matching accuracy",
+    "Real provider availability/account/playlist writes",
+    "Any claim that another upload is the same music version"
+  ],
+  "full_validation": {
+    "npm_test": {
+      "passed": 280,
+      "failed": 0
+    },
+    "lint": "PASS",
+    "test_coverage": {
+      "status": "PASS",
+      "lines": 94.83,
+      "branches": 84.86,
+      "functions": 93.51
+    }
+  },
+  "acceptance_mapping": {
+    "1": "Actual stdio handler and production YouTube client executed against loopback for exact videoId/URL, text preview/reordered candidates, candidate2, unavailable selected video. Commands/source hashes/expected and asserted actual outcomes retained.",
+    "2": "Exact selection uses getVideo, never search; unavailable selection has zero fallback and playlist effects. Minimal client parameter is videoId or exact URL/ID.",
+    "3": "Existing exact-ID plus guidance and existing local videoId parameter satisfy the same contract. Unbound free text carries no chosen identity; extra persistent ledger not justified.",
+    "4": "NARROW current exact-ID/parameter path, formal regressions and guidance. No new runtime defect or incident severity is asserted; historic heuristic cannot establish P0-P3.",
+    "5": "Preview zero writes, exact-link quick apply, existing dedupe and no-secret checks retained. Research completion is not provider runtime/implementation approval."
+  }
+}

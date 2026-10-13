@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 import { fetchWithDeadline, ProviderRequestError, waitForRetry } from "../src/http.js";
+import { REQUIRED_YOUTUBE_SCOPE } from "../src/credentials.js";
 import { YouTubeClient } from "../src/youtube.js";
 
 function response(data, status = 200) {
@@ -61,12 +65,20 @@ test("retries a transient YouTube read once, but never retries a write", async (
 
   let writeCalls = 0;
   const writeClient = new YouTubeClient(
-    { YOUTUBE_ACCESS_TOKEN: "user-token" },
+    {
+      YOUTUBE_ACCESS_TOKEN: "user-token",
+      YOUTUBE_CREDENTIAL_FILE: path.join(os.tmpdir(), "spotify-http-test-" + randomUUID() + ".json"),
+    },
     async () => {
       writeCalls += 1;
       return { ...response({ error: { message: "temporary" } }, 503), headers: { get: () => "0" } };
     },
   );
+  writeClient.storedCredentials = {
+    accessToken: writeClient.env.YOUTUBE_ACCESS_TOKEN,
+    scope: REQUIRED_YOUTUBE_SCOPE,
+  };
+
   await assert.rejects(
     writeClient.addVideoToPlaylist("PL123456789", "dQw4w9WgXcQ"),
     (error) => error.code === "HTTP_5XX" && error.status === 503,

@@ -7,6 +7,11 @@ import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import {
+  CredentialStore,
+  credentialsFromTokenResponse,
+  REQUIRED_YOUTUBE_SCOPE,
+} from "../src/credentials.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -70,6 +75,7 @@ async function startYouTubeStub() {
       deleteItem: 0,
       search: 0,
       getVideo: 0,
+      getPlaylist: 0,
       getItems: 0,
       searchHang: 0,
       abortedRequests: 0,
@@ -142,6 +148,7 @@ async function startYouTubeStub() {
         return sendJson(200, { items, pageInfo: { totalResults: items.length } });
       }
       if (req.method === "GET" && pathname === "/playlists") {
+        state.counters.getPlaylist += 1;
         const id = url.searchParams.get("id");
         if (state.failPlaylistListWithSecret) {
           return sendJson(403, {
@@ -234,26 +241,34 @@ async function startYouTubeStub() {
   return state;
 }
 
-function spawnMcpServer(directory, apiBase, extraEnv = {}) {
+async function spawnMcpServer(directory, apiBase, extraEnv = {}) {
+  const environment = {
+    PATH: process.env.PATH ?? "",
+    SYSTEMROOT: process.env.SYSTEMROOT ?? process.env.SystemRoot ?? "",
+    SystemRoot: process.env.SystemRoot ?? "",
+    USERPROFILE: process.env.USERPROFILE ?? "",
+    HOME: process.env.HOME ?? "",
+    APPDATA: process.env.APPDATA ?? "",
+    MUSIC_LIBRARY_FILE: join(directory, "library.sqlite"),
+    YOUTUBE_API_BASE: apiBase,
+    YOUTUBE_API_KEY: "e2e-test-api-key",
+    YOUTUBE_ACCESS_TOKEN: SECRET_ACCESS_TOKEN,
+    GOOGLE_CLIENT_ID: "e2e-client-id",
+    GOOGLE_CLIENT_SECRET: SECRET_CLIENT_SECRET,
+    YOUTUBE_CREDENTIAL_FILE: join(directory, "youtube-credentials.json"),
+    YOUTUBE_CREDENTIAL_PASSPHRASE: SECRET_PASSPHRASE,
+    ...extraEnv,
+  };
+  const credentials = new CredentialStore(environment);
+  await credentials.save(credentialsFromTokenResponse({
+    access_token: environment.YOUTUBE_ACCESS_TOKEN,
+    scope: REQUIRED_YOUTUBE_SCOPE,
+    expires_in: 3600,
+  }));
+
   const child = spawn(process.execPath, [join("src", "server.js")], {
     cwd: root,
-    env: {
-      PATH: process.env.PATH ?? "",
-      SYSTEMROOT: process.env.SYSTEMROOT ?? process.env.SystemRoot ?? "",
-      SystemRoot: process.env.SystemRoot ?? "",
-      USERPROFILE: process.env.USERPROFILE ?? "",
-      HOME: process.env.HOME ?? "",
-      APPDATA: process.env.APPDATA ?? "",
-      MUSIC_LIBRARY_FILE: join(directory, "library.sqlite"),
-      YOUTUBE_API_BASE: apiBase,
-      YOUTUBE_API_KEY: "e2e-test-api-key",
-      YOUTUBE_ACCESS_TOKEN: SECRET_ACCESS_TOKEN,
-      GOOGLE_CLIENT_ID: "e2e-client-id",
-      GOOGLE_CLIENT_SECRET: SECRET_CLIENT_SECRET,
-      YOUTUBE_CREDENTIAL_FILE: join(directory, "no-credentials.json"),
-      YOUTUBE_CREDENTIAL_PASSPHRASE: SECRET_PASSPHRASE,
-      ...extraEnv,
-    },
+    env: environment,
     stdio: ["pipe", "pipe", "pipe"],
   });
   return child;
@@ -360,7 +375,7 @@ async function stopServer(child) {
 }
 
 async function startClient(directory, stub, extraEnv = {}) {
-  const child = spawnMcpServer(directory, stub.url, extraEnv);
+  const child = await spawnMcpServer(directory, stub.url, extraEnv);
   const client = new McpStdioClient(child);
   try {
     await client.initialize();
@@ -1144,6 +1159,110 @@ test("E2E: a credential echoed by the provider is redacted from a thrown tool er
     assertNoSecrets(preview.text);
   } finally {
     await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track binds candidate #2 across search reorder and rejects unbound apply", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-selected-video-"));
+  const stub = await startYouTubeStub();
+  const firstId = "AAAAAAAAAAA", selectedId = "BBBBBBBBBBB", replacementId = "CCCCCCCCCCC";
+  stub.addVideo(firstId, "Candidate One");
+  stub.addVideo(selectedId, "Candidate Two");
+  stub.addVideo(replacementId, "Later candidate");
+  let child, client;
+  try {
+    ({ child, client } = await startClient(directory, stub));
+    const args = { input: "candidate song", playlist: "Selected Candidate Test" };
+    const preview = await client.callTool("youtube_save_track", { ...args, mode: "preview" });
+    assert.equal(preview.parsed.video.id, firstId);
+    assert.deepEqual(preview.parsed.candidates.map((video) => video.id), [firstId, selectedId]);
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+
+    // Reorder the actual search response so the selected row drops out of
+    // refreshed candidates. Apply must still use that exact displayed identity.
+    const selected = preview.parsed.candidates[1].id;
+    const first = stub.videos.get(firstId);
+    const second = stub.videos.get(selectedId);
+    stub.videos.delete(firstId);
+    stub.videos.delete(selectedId);
+    stub.videos.set(firstId, first);
+    stub.videos.set(selectedId, second);
+    const beforeGuard = { ...stub.counters };
+    const unbound = await client.callTool("youtube_save_track", { ...args, mode: "apply" });
+    assert.equal(unbound.parsed.action, "selection_required");
+    assert.deepEqual(unbound.parsed.candidates.map((video) => video.id), [replacementId, firstId]);
+    assert.equal(stub.counters.getPlaylist, beforeGuard.getPlaylist, "unbound apply reached playlist lookup");
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+
+    const beforeSelected = { ...stub.counters };
+    const applied = await client.callTool("youtube_save_track", { ...args, videoId: selected, mode: "apply" });
+    assert.equal(applied.parsed.action, "added");
+    assert.equal(applied.parsed.video.id, selectedId);
+    assert.equal(applied.parsed.source.id, selectedId);
+    assert.equal(stub.counters.search, beforeSelected.search, "selected ID was resolved through search");
+    assert.equal(stub.counters.getVideo, beforeSelected.getVideo + 1);
+    assert.deepEqual([...stub.items.values()].map((item) => item.videoId), [selectedId]);
+    assertNoSecrets(client.stdoutText, client.stderrText, preview.text, unbound.text, applied.text);
+  } finally {
+    if (child) await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track unavailable selection has no search fallback or playlist effects", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-selected-missing-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo("AAAAAAAAAAA", "Available alternative");
+  stub.addVideo("BBBBBBBBBBB", "Selected original");
+  let child, client;
+  try {
+    ({ child, client } = await startClient(directory, stub));
+    const args = { input: "candidate song", playlist: "Missing Selection Test", videoId: "BBBBBBBBBBB" };
+    const preview = await client.callTool("youtube_save_track", { ...args, mode: "preview" });
+    assert.equal(preview.parsed.video.id, args.videoId);
+    stub.videos.delete(args.videoId);
+    const before = { ...stub.counters };
+    const applied = await client.callTool("youtube_save_track", { ...args, mode: "apply" });
+    assert.equal(applied.result.isError, true);
+    assert.match(applied.text, /not found/i);
+    assert.equal(stub.counters.getVideo, before.getVideo + 1);
+    assert.equal(stub.counters.search, before.search);
+    assert.equal(stub.counters.getPlaylist, before.getPlaylist);
+    assert.equal(stub.counters.createPlaylist, 0);
+    assert.equal(stub.counters.addItem, 0);
+    assert.equal(stub.items.size, 0);
+    assertNoSecrets(client.stdoutText, client.stderrText, preview.text, applied.text);
+  } finally {
+    if (child) await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: youtube_save_track exact URL keeps one-call apply without search", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-exact-url-"));
+  const stub = await startYouTubeStub();
+  stub.addVideo("BBBBBBBBBBB", "Search alternative");
+  stub.addVideo("AAAAAAAAAAA", "Exact URL song");
+  let child, client;
+  try {
+    ({ child, client } = await startClient(directory, stub));
+    const applied = await client.callTool("youtube_save_track", {
+      input: "https://www.youtube.com/watch?v=AAAAAAAAAAA", playlist: "Exact URL Test", mode: "apply",
+    });
+    assert.equal(applied.parsed.action, "added");
+    assert.equal(applied.parsed.video.id, "AAAAAAAAAAA");
+    assert.equal(stub.counters.search, 0);
+    assert.equal(stub.counters.getVideo, 1);
+    assert.deepEqual([...stub.items.values()].map((item) => item.videoId), ["AAAAAAAAAAA"]);
+    assertNoSecrets(client.stdoutText, client.stderrText, applied.text);
+  } finally {
+    if (child) await stopServer(child);
     await stub.close();
     await rm(directory, { recursive: true, force: true });
   }

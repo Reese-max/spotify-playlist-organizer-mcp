@@ -19,7 +19,7 @@ import {
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
-import { openLibrary, redactSecretishText } from "./library.js";
+import { openLibrary } from "./library.js";
 import { classifyMusic } from "./classify.js";
 import { saveMusic } from "./save-music.js";
 import {
@@ -51,45 +51,7 @@ import {
   removeFromPlaylist,
   renamePlaylistAdmin,
 } from "./playlist-admin.js";
-
-function jsonResult(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
-}
-
-function errorResult(error) {
-  const payload = {
-    // Provider errors embed provider-controlled text; a thrown error must not
-    // be able to carry a credential out through the MCP response.
-    error: redactSecretishText(error instanceof Error ? error.message : String(error)),
-  };
-  if (typeof error?.code === "string") payload.code = error.code;
-  if (Number.isInteger(error?.status)) payload.status = error.status;
-  if (typeof error?.retryable === "boolean") payload.retryable = error.retryable;
-  if (typeof error?.operation === "string") payload.operation = error.operation;
-  if (typeof error?.nextStep === "string") {
-    payload.nextStep = redactSecretishText(error.nextStep);
-  }
-  return {
-    isError: true,
-    content: [{ type: "text", text: JSON.stringify(payload) }],
-  };
-}
-
-function safeTool(handler) {
-  return async (args, extra) => {
-    // The SDK exposes per-request cancellation at ctx.mcpReq.signal (aborted
-    // by notifications/cancelled); handlers read the conventional
-    // extra.signal, so forward it when the transport doesn't flatten it.
-    const forwarded = extra?.signal || !extra?.mcpReq?.signal
-      ? extra
-      : { ...extra, signal: extra.mcpReq.signal };
-    try {
-      return jsonResult(await handler(args, forwarded));
-    } catch (error) {
-      return errorResult(error);
-    }
-  };
-}
+import { safeTool } from "./redact.js";
 
 async function loadPlaylist(client, playlist, { signal } = {}) {
   const id = parsePlaylistId(playlist);

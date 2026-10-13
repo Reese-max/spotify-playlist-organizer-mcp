@@ -18,6 +18,7 @@
 // non-zero on any FAIL; --strict also fails on NOT_CLEAN verdicts.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -31,6 +32,9 @@ import { reconcileTrack } from "../src/library-sync.js";
 import { saveMusic } from "../src/save-music.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROUND_ONE_REPORT = ".github/quality-audits/2026-09-14-0834Z-50-persona-audit-round-1.md";
+const ROUND_ONE_REPORT_BLOB_SHA = "df97d763c208cef415f44f79e35c029c9c504de8";
+const PORTFOLIO_PROTOCOL_BLOB_SHA = "6e3499d6ef5be7e123050e1526946f6a40f99263";
 const VIDEO_ID = "dQw4w9WgXcQ";
 const WATCH_URL = "https://www.youtube.com/watch?v=" + VIDEO_ID;
 const SENTINEL = "GATE-SENTINEL-9f3d";
@@ -48,6 +52,46 @@ function fail(message) {
 
 function assertCheck(condition, message) {
   if (!condition) fail(message);
+}
+
+function parseCanonicalScenarios(markdown) {
+  const bytes = Buffer.from(markdown, "utf8");
+  const blobSha = createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+  assertCheck(
+    blobSha === ROUND_ONE_REPORT_BLOB_SHA,
+    `fixed Round-1 persona source changed: expected ${ROUND_ONE_REPORT_BLOB_SHA}, got ${blobSha}`,
+  );
+
+  const rows = markdown
+    .split(/\r?\n/)
+    .filter((line) => /^\| [A-J]0[1-5] /.test(line));
+  assertCheck(rows.length === 50, `fixed Round-1 source must have 50 rows, got ${rows.length}`);
+
+  return rows.map((line) => {
+    const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+    assertCheck(cells.length === 8, "fixed Round-1 row must have eight columns");
+    const match = cells[0].match(/^([A-J]0[1-5]) (.+)$/);
+    assertCheck(match, `fixed Round-1 row has an invalid persona label: ${cells[0]}`);
+    return Object.freeze({
+      id: match[1],
+      persona: match[2],
+      goal: cells[1],
+      input: cells[2],
+      steps: cells[3],
+      expected: cells[4],
+      observation: cells[5],
+      evidence: cells[6],
+      finding: cells[7],
+    });
+  });
+}
+
+async function readCanonicalScenarios(root) {
+  const markdown = await readFile(path.join(root, ROUND_ONE_REPORT), "utf8");
+  return parseCanonicalScenarios(markdown);
 }
 
 // Race a promise against an external deadline whose timer is always cleared.
@@ -530,17 +574,17 @@ export const CHECKS = Object.freeze({
     }),
   },
 
-  // #8: the interactive passphrase prompt must not echo. The defect signature
-  // is a readline interface wired to the real stdout for the secret prompt.
+  // The interactive passphrase prompt must not echo. This is a regression
+  // probe; it has no tracker on the current default and must fail closed.
   credential_prompt_no_echo: {
-    issues: ["#8"],
+    issues: [],
     run: async ({ root }) => {
       const text = await readFile(path.join(root, "scripts", "youtube-auth.js"), "utf8");
       for (const match of text.matchAll(/createInterface\(\s*\{([^}]*)\}/gs)) {
         const args = match[1];
         const echoes = /\boutput\b(?!\s*:)/.test(args)
           || /\boutput\s*:\s*(?:output|stdout|process\.stdout)\b/.test(args);
-        assertCheck(!echoes, "passphrase readline is bound to real stdout — input echoes (#8)");
+        assertCheck(!echoes, "passphrase readline is bound to real stdout — input echoes");
       }
       return "secret prompt does not echo on TTY";
     },
@@ -821,6 +865,13 @@ export const PERSONA_MATRIX = Object.freeze([
 ]);
 
 export async function runPersonaGate({ root = REPO_ROOT } = {}) {
+  const scenarios = await readCanonicalScenarios(root);
+  assertCheck(
+    scenarios.length === PERSONA_MATRIX.length
+      && scenarios.every((scenario, index) => scenario.id === PERSONA_MATRIX[index].id),
+    "gate rows must match the fixed A01–J05 Round-1 scenario IDs in order",
+  );
+  const scenarioById = new Map(scenarios.map((scenario) => [scenario.id, scenario]));
   const needed = new Set(PERSONA_MATRIX.flatMap((p) => p.checks));
   const results = {};
   for (const checkId of needed) {
@@ -855,7 +906,9 @@ export async function runPersonaGate({ root = REPO_ROOT } = {}) {
           : "PASS";
     return {
       id: entry.id,
-      label: entry.label,
+      label: scenarioById.get(entry.id).persona,
+      scenario: scenarioById.get(entry.id),
+      probe: entry.label,
       status,
       issues: [...new Set(failed.flatMap((check) => check.issues))].sort(),
       runtime: [...entry.runtime],
@@ -874,6 +927,9 @@ export async function runPersonaGate({ root = REPO_ROOT } = {}) {
   return {
     gate: "fixed-50-persona-a01-j05",
     spec: "Reese-max/autodev-ng docs/portfolio-audit/2026-09-06-50-persona-audit.md",
+    specBlobSha: PORTFOLIO_PROTOCOL_BLOB_SHA,
+    scenarioSource: ROUND_ONE_REPORT,
+    scenarioSourceBlobSha: ROUND_ONE_REPORT_BLOB_SHA,
     generatedAt: new Date().toISOString(),
     personas,
     summary,

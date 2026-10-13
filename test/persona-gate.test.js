@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -12,6 +14,10 @@ import {
 } from "../scripts/persona-gate.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const ROUND_ONE_REPORT = ".github/quality-audits/2026-09-14-0834Z-50-persona-audit-round-1.md";
+const ROUND_ONE_REPORT_BLOB_SHA = "df97d763c208cef415f44f79e35c029c9c504de8";
+const PORTFOLIO_PROTOCOL_BLOB_SHA = "6e3499d6ef5be7e123050e1526946f6a40f99263";
+const PROBE_MAPPING_SHA256 = "d50240e7d9529d5817ab63a48dcfa6af7c18bf205c70047120235863d2a44b50";
 
 const EXPECTED_IDS = Object.freeze(
   ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
@@ -19,9 +25,8 @@ const EXPECTED_IDS = Object.freeze(
 );
 
 // Checks whose fixed expectation is verifiable in-process and must hold on the
-// current default branch. The one declared-open defect that is detectable
-// in-repo (#8, interactive passphrase echo) is exercised through the TRACKED
-// path below.
+// current default branch. A regression against a resolved finding must become
+// FAIL rather than being hidden behind a stale issue tracker.
 const REQUIRED_PASS_CHECKS = Object.freeze([
   "preview_is_default",
   "free_text_requires_selection",
@@ -49,12 +54,54 @@ function sink() {
   return { text: "", write(chunk) { this.text += chunk; } };
 }
 
-test("the gate matrix is exactly the fixed A01–J05 grid", () => {
+async function readCanonicalScenarios() {
+  const markdown = await readFile(resolve(root, ROUND_ONE_REPORT), "utf8");
+  const bytes = Buffer.from(markdown, "utf8");
+  const blobSha = createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+  assert.equal(blobSha, ROUND_ONE_REPORT_BLOB_SHA);
+
+  const rows = markdown
+    .split(/\r?\n/)
+    .filter((line) => /^\| [A-J]0[1-5] /.test(line));
+  assert.equal(rows.length, 50);
+  return rows.map((line) => {
+    const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+    assert.equal(cells.length, 8);
+    const match = cells[0].match(/^([A-J]0[1-5]) (.+)$/);
+    assert.ok(match);
+    return {
+      id: match[1],
+      persona: match[2],
+      goal: cells[1],
+      input: cells[2],
+      steps: cells[3],
+      expected: cells[4],
+      observation: cells[5],
+      evidence: cells[6],
+      finding: cells[7],
+    };
+  });
+}
+
+test("the gate matrix is exactly the fixed A01–J05 grid", async () => {
+  const scenarios = await readCanonicalScenarios();
   assert.equal(PERSONA_MATRIX.length, 50);
   assert.deepEqual(PERSONA_MATRIX.map((p) => p.id), EXPECTED_IDS);
+  assert.deepEqual(scenarios.map((scenario) => scenario.id), EXPECTED_IDS);
   assert.ok(Object.isFrozen(PERSONA_MATRIX));
+  const probeMapping = PERSONA_MATRIX.map(({ id, checks, runtime }) => ({ id, checks, runtime }));
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(probeMapping)).digest("hex"),
+    PROBE_MAPPING_SHA256,
+    "check/runtime assignments changed; review the fixed gate mapping before updating its pin",
+  );
 
   const checkIds = new Set(Object.keys(CHECKS));
+  assert.deepEqual([...new Set(PERSONA_MATRIX.flatMap((persona) => persona.checks))].sort(),
+    Object.keys(CHECKS).sort());
   for (const persona of PERSONA_MATRIX) {
     assert.ok(persona.label.length > 0, persona.id);
     assert.ok(Object.isFrozen(persona), persona.id);
@@ -66,6 +113,7 @@ test("the gate matrix is exactly the fixed A01–J05 grid", () => {
       assert.ok(gap.length > 0, persona.id);
     }
   }
+  assert.deepEqual(CHECKS.credential_prompt_no_echo.issues, []);
   for (const [checkId, check] of Object.entries(CHECKS)) {
     assert.equal(typeof check.run, "function", checkId);
     for (const issue of check.issues) {
@@ -76,10 +124,16 @@ test("the gate matrix is exactly the fixed A01–J05 grid", () => {
 
 test("the gate evaluates all 50 personas and finds no untracked defect", async () => {
   const report = await runPersonaGate({ root });
+  const scenarios = await readCanonicalScenarios();
 
   assert.equal(report.gate, "fixed-50-persona-a01-j05");
+  assert.equal(report.specBlobSha, PORTFOLIO_PROTOCOL_BLOB_SHA);
+  assert.equal(report.scenarioSource, ROUND_ONE_REPORT);
+  assert.equal(report.scenarioSourceBlobSha, ROUND_ONE_REPORT_BLOB_SHA);
   assert.equal(report.personas.length, 50);
   assert.deepEqual(report.personas.map((p) => p.id), EXPECTED_IDS);
+  assert.deepEqual(report.personas.map((p) => p.scenario), scenarios);
+  assert.deepEqual(report.personas.map((p) => p.label), scenarios.map((p) => p.persona));
 
   for (const persona of report.personas) {
     assert.ok(PERSONA_STATUSES.includes(persona.status), `${persona.id} status`);
@@ -128,17 +182,13 @@ test("the gate evaluates all 50 personas and finds no untracked defect", async (
   assert.ok(Object.keys(byCheck).length > 0);
 });
 
-test("the tracked defect set matches the declared open audit findings", async () => {
+test("resolved passphrase echo regressions are not downgraded to TRACKED", async () => {
   const report = await runPersonaGate({ root });
   const trackedIssues = [...new Set(report.personas.flatMap((p) => p.issues))].sort();
 
-  // #8 is the only reproducible current-default defect the in-repo probes can
-  // detect: the interactive passphrase prompt echoes on a TTY because the
-  // readline interface is wired to the real stdout.
-  assert.deepEqual(trackedIssues, ["#8"]);
-  assert.ok(report.personas.some((p) => p.status === "TRACKED"));
+  assert.deepEqual(trackedIssues, []);
+  assert.equal(report.summary.tracked, 0);
   assert.equal(report.summary.fail, 0);
-  assert.ok(report.summary.tracked > 0);
 });
 
 test("formatReport renders the 50-row matrix and the verdict", async () => {

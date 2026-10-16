@@ -162,7 +162,7 @@ test("refreshes the user token on 401 and retries with the new bearer token", as
     async (url, options) => {
       if (url.startsWith("https://oauth2.googleapis.com/token")) {
         tokenPosts.push(String(options.body));
-        return response({ access_token: "fresh-token", expires_in: 3600 });
+        return response({ access_token: "fresh-token", expires_in: 3600, scope: "https://www.googleapis.com/auth/youtube" });
       }
       authHeaders.push(options.headers.Authorization);
       if (authHeaders.length === 1) {
@@ -353,8 +353,9 @@ test("revokeUserCredentials revokes the token and clears env credentials", async
   assert.equal(result.source, "environment");
   assert.match(revokePosts[0].url, /oauth2.googleapis.com\/revoke/);
   assert.match(revokePosts[0].body, /token=(acc|ref)/);
-  assert.equal(credentialsEnv.YOUTUBE_ACCESS_TOKEN, undefined);
-  assert.equal(credentialsEnv.YOUTUBE_REFRESH_TOKEN, undefined);
+  assert.equal(client.env.YOUTUBE_ACCESS_TOKEN, undefined);
+  assert.equal(client.env.YOUTUBE_REFRESH_TOKEN, undefined);
+  assert.equal(credentialsEnv.YOUTUBE_ACCESS_TOKEN, "acc");
 });
 
 test("revokeUserCredentials reports MISSING when nothing is stored", async () => {
@@ -371,7 +372,7 @@ test("credentialStatus reports the environment source", async () => {
     throw new Error("fetch must not be called");
   });
   const status = await client.credentialStatus();
-  assert.equal(status.status, "READY");
+  assert.equal(status.status, "UNKNOWN");
   assert.equal(status.source, "environment");
 });
 

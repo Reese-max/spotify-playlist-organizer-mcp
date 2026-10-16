@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 const FILE_VERSION = 1;
+export const YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube";
 
 export class CredentialStoreError extends Error {
   constructor(code, message, options = {}) {
@@ -11,6 +12,12 @@ export class CredentialStoreError extends Error {
     this.name = "CredentialStoreError";
     this.code = code;
     if (options.cause) this.cause = options.cause;
+  }
+}
+
+export function assertYouTubeScope(scope) {
+  if (typeof scope !== "string" || !scope.split(/\s+/).includes(YOUTUBE_SCOPE)) {
+    throw new CredentialStoreError("AUTH_SCOPE_INSUFFICIENT", "YouTube permission is missing. Run npm run youtube:auth to authorize again.");
   }
 }
 
@@ -52,17 +59,20 @@ function normalizeCredentials(value) {
     refreshToken: typeof value.refreshToken === "string" ? value.refreshToken : null,
     tokenType: typeof value.tokenType === "string" ? value.tokenType : "Bearer",
     scope: typeof value.scope === "string" ? value.scope : "",
-    expiresAt: Number.isFinite(Number(value.expiresAt)) ? Number(value.expiresAt) : null,
+    expiresAt: value.expiresAt != null && Number.isFinite(Number(value.expiresAt)) ? Number(value.expiresAt) : null,
     savedAt: typeof value.savedAt === "string" ? value.savedAt : null,
+    revoked: value.revoked === true,
   };
 }
 
 export function credentialsFromTokenResponse(data, previous = {}) {
+  const scope = Object.hasOwn(data ?? {}, "scope") ? data.scope : previous.scope;
+  assertYouTubeScope(scope);
   return normalizeCredentials({
     accessToken: data?.access_token ?? previous.accessToken ?? null,
     refreshToken: data?.refresh_token ?? previous.refreshToken ?? null,
     tokenType: data?.token_type ?? previous.tokenType ?? "Bearer",
-    scope: data?.scope ?? previous.scope ?? "",
+    scope,
     expiresAt: data?.expires_in
       ? Date.now() + Math.max(Number(data.expires_in) - 60, 0) * 1000
       : previous.expiresAt ?? null,
@@ -179,11 +189,15 @@ export class CredentialStore {
     }
     try {
       const credentials = await this.load();
+      if (credentials.revoked) {
+        return { status: "REVOKED", filePath: this.filePath, refreshable: false, reason: "AUTH_REVOKED" };
+      }
+      assertYouTubeScope(credentials.scope);
       const hasRefresh = Boolean(credentials.refreshToken);
       const hasAccess = Boolean(credentials.accessToken);
       const expired = credentials.expiresAt !== null && credentials.expiresAt <= Date.now();
       return {
-        status: hasRefresh || (hasAccess && !expired) ? "READY" : hasAccess ? "EXPIRED" : "UNKNOWN",
+        status: expired ? "EXPIRED" : hasAccess && credentials.expiresAt !== null ? "READY" : "UNKNOWN",
         filePath: this.filePath,
         refreshable: hasRefresh,
         scope: credentials.scope || null,

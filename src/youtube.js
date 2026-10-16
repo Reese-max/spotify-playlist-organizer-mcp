@@ -1,5 +1,6 @@
 import { parseLink } from "./core.js";
-import { CredentialStore, credentialsFromTokenResponse } from "./credentials.js";
+import { assertYouTubeScope, CredentialStore, credentialsFromTokenResponse } from "./credentials.js";
+import { redactSecretishText, redactSecretishValue } from "./library.js";
 import {
   awaitWithDeadline,
   fetchWithDeadline,
@@ -13,11 +14,11 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const MAX_PAGE_SIZE = 50;
 
 export class YouTubeApiError extends Error {
-  constructor(status, message, body = null, code = null) {
-    super(message);
+  constructor(status, message, body = null, code = null, secrets = []) {
+    super(redactSecretishText(message, secrets));
     this.name = "YouTubeApiError";
     this.status = status;
-    this.body = body;
+    this.body = redactSecretishValue(body, secrets);
     this.code = code;
   }
 }
@@ -160,22 +161,35 @@ export class YouTubeClient {
     if (typeof fetchImpl !== "function") {
       throw new Error("This server requires a Node.js runtime with fetch support.");
     }
-    this.env = env;
+    this.env = { ...env };
     this.fetch = fetchImpl;
     this.refreshingUserToken = null;
+    this.revokingUserCredentials = null;
+    this.authGeneration = 0;
     this.timeoutMs = timeoutFromEnv(this.env);
     this.maxReadRetries = Math.min(Math.max(Number(this.env.PROVIDER_MAX_READ_RETRIES) || 1, 0), 2);
     this.credentials = new CredentialStore(this.env);
     this.storedCredentials = undefined;
+    this.secretValues = new Set(Object.entries(env)
+      .filter(([key]) => /(?:TOKEN|SECRET|PASSPHRASE|API_KEY)$/.test(key))
+      .flatMap(([, value]) => typeof value === "string" ? [value, value.trim()] : []).filter(Boolean));
   }
 
-  async loadStoredCredentials() {
-    if (this.storedCredentials !== undefined) return this.storedCredentials;
-    if (!(await this.credentials.exists())) {
-      this.storedCredentials = null;
-      return null;
+  rememberCredentials(credentials) {
+    for (const token of [credentials?.accessToken, credentials?.refreshToken]) {
+      if (token) this.secretValues.add(token);
     }
-    this.storedCredentials = await this.credentials.load();
+    return credentials;
+  }
+
+  async loadStoredCredentials({ reload = false } = {}) {
+    const refreshCache = reload || (this.credentials.passphraseConfigured
+      && (this.storedCredentials === null || this.storedCredentials?.revoked));
+    if (!refreshCache && this.storedCredentials !== undefined) return this.storedCredentials;
+    const generation = this.authGeneration;
+    const stored = await this.credentials.exists() ? await this.credentials.load() : null;
+    if (generation !== this.authGeneration) return this.storedCredentials ?? null;
+    this.storedCredentials = this.rememberCredentials(stored);
     return this.storedCredentials;
   }
 
@@ -186,7 +200,11 @@ export class YouTubeClient {
   }
 
   async refreshUserToken({ signal } = {}) {
+    const generation = this.authGeneration;
     const refreshToken = await this.getRefreshToken();
+    if (this.revokingUserCredentials || generation !== this.authGeneration) {
+      throw new YouTubeApiError(401, "YouTube authorization changed during refresh. Authorize again if needed.", null, "AUTH_REVOKED");
+    }
     if (!refreshToken) return null;
     if (this.refreshingUserToken) return this.refreshingUserToken;
 
@@ -220,21 +238,38 @@ export class YouTubeClient {
         timeoutMs: this.timeoutMs,
         operation: "YouTube OAuth token response",
       });
+      if (generation !== this.authGeneration) {
+        throw new YouTubeApiError(401, "YouTube authorization changed during refresh. Authorize again if needed.", null, "AUTH_REVOKED");
+      }
       if (!response.ok) {
+        if (data?.error === "invalid_grant") {
+          const previous = await this.loadStoredCredentials();
+          const sameSource = !previous || previous.refreshToken === refreshToken;
+          this.storedCredentials = sameSource
+            ? { ...previous, accessToken: null, refreshToken: null, revoked: true }
+            : previous;
+          delete this.env.YOUTUBE_ACCESS_TOKEN;
+          delete this.env.YOUTUBE_REFRESH_TOKEN;
+          if (this.credentials.passphraseConfigured && sameSource) await this.credentials.save(this.storedCredentials);
+          throw new YouTubeApiError(401, "YouTube authorization was revoked or expired. Run npm run youtube:auth again.", null, "AUTH_REVOKED");
+        }
         throw new YouTubeApiError(
           response.status,
           "YouTube OAuth token refresh failed.",
           data,
           "AUTH_REFRESH_FAILED",
+          this.secretValues,
         );
       }
       const previous = await this.loadStoredCredentials();
-      const credentials = credentialsFromTokenResponse(data, previous ?? { refreshToken });
+      const inherited = previous?.refreshToken === refreshToken ? previous : { refreshToken };
+      const credentials = this.rememberCredentials(credentialsFromTokenResponse(data, inherited));
       if (this.credentials.passphraseConfigured && credentials.refreshToken) {
         await this.credentials.save(credentials);
-        this.storedCredentials = credentials;
       }
-      this.env.YOUTUBE_ACCESS_TOKEN = credentials.accessToken;
+      this.storedCredentials = credentials;
+      delete this.env.YOUTUBE_ACCESS_TOKEN;
+      delete this.env.YOUTUBE_REFRESH_TOKEN;
       return credentials.accessToken;
     })();
 
@@ -246,9 +281,18 @@ export class YouTubeClient {
   }
 
   async getUserToken({ signal } = {}) {
-    if (this.env.YOUTUBE_ACCESS_TOKEN?.trim()) return this.env.YOUTUBE_ACCESS_TOKEN.trim();
+    if (this.env.YOUTUBE_ACCESS_TOKEN?.trim()) {
+      if (this.credentials.passphraseConfigured) {
+        try { await this.loadStoredCredentials(); } catch {}
+      }
+      return this.env.YOUTUBE_ACCESS_TOKEN.trim();
+    }
     const stored = await this.loadStoredCredentials();
-    if (stored?.accessToken && (!stored.expiresAt || stored.expiresAt > Date.now())) {
+    if (stored?.revoked) {
+      throw new YouTubeApiError(401, "YouTube authorization was revoked. Run npm run youtube:auth again.", null, "AUTH_REVOKED");
+    }
+    if (stored) assertYouTubeScope(stored.scope);
+    if (stored?.accessToken && (stored.expiresAt === null || stored.expiresAt > Date.now())) {
       return stored.accessToken;
     }
     const refreshed = await this.refreshUserToken({ signal });
@@ -337,6 +381,7 @@ export class YouTubeClient {
             "YouTube API quota exceeded for " + method + " " + path + ".",
             data,
             "YOUTUBE_QUOTA_EXCEEDED",
+            this.secretValues,
           );
           error.operation = method + " " + path;
           error.nextStep = method === "GET" && path === "/search"
@@ -352,6 +397,7 @@ export class YouTubeClient {
           "YouTube API request failed" + (detail ? ": " + detail : ""),
           data,
           response.status === 429 ? "HTTP_429" : response.status >= 500 ? "HTTP_5XX" : null,
+          this.secretValues,
         );
       }
       return data;
@@ -580,21 +626,44 @@ export class YouTubeClient {
   }
 
   async credentialStatus() {
+    if (this.storedCredentials?.revoked && !this.credentials.passphraseConfigured) {
+      return { status: "REVOKED", refreshable: false, reason: "AUTH_REVOKED" };
+    }
     const hasEnvironmentCredential = Boolean(
       this.env.YOUTUBE_ACCESS_TOKEN?.trim() || this.env.YOUTUBE_REFRESH_TOKEN?.trim(),
     );
     if (hasEnvironmentCredential) {
       return {
-        status: "READY",
+        status: "UNKNOWN",
         source: "environment",
         filePath: this.credentials.filePath,
         refreshable: Boolean(this.env.YOUTUBE_REFRESH_TOKEN?.trim()),
+        reason: "ENVIRONMENT_CREDENTIAL_UNVERIFIED",
+        warning: "Explicit local development fallback: scopes and expiry are unverified. Prefer npm run youtube:auth.",
       };
+    }
+    if (this.credentials.passphraseConfigured) {
+      try { await this.loadStoredCredentials({ reload: true }); } catch {}
     }
     return this.credentials.status();
   }
 
-  async revokeUserCredentials({ signal } = {}) {
+  async revokeUserCredentials(options = {}) {
+    if (this.revokingUserCredentials) return this.revokingUserCredentials;
+    this.authGeneration += 1;
+    this.revokingUserCredentials = this.#revokeUserCredentials(options);
+    try {
+      return await this.revokingUserCredentials;
+    } finally {
+      this.revokingUserCredentials = null;
+    }
+  }
+
+  async #revokeUserCredentials({ signal } = {}) {
+    // Drain an older refresh before deleting its file; new refreshes fail closed.
+    if (this.refreshingUserToken) {
+      try { await this.refreshingUserToken; } catch {}
+    }
     const hasEnvironmentCredential = Boolean(
       this.env.YOUTUBE_ACCESS_TOKEN?.trim() || this.env.YOUTUBE_REFRESH_TOKEN?.trim(),
     );
@@ -606,6 +675,12 @@ export class YouTubeClient {
     const refreshToken = this.env.YOUTUBE_REFRESH_TOKEN?.trim() || stored?.refreshToken || null;
     const accessToken = this.env.YOUTUBE_ACCESS_TOKEN?.trim() || stored?.accessToken || null;
     const token = refreshToken || accessToken;
+    if (!token && stored?.revoked) {
+      const deleted = await this.credentials.remove();
+      this.authGeneration += 1;
+      this.storedCredentials = null;
+      return { status: "REVOKED", source: "encrypted_file", localCredentialsDeleted: deleted, environmentCredentialsCleared: false };
+    }
     if (!token) {
       return {
         status: hasFileCredential ? "UNKNOWN" : "MISSING",
@@ -629,11 +704,12 @@ export class YouTubeClient {
       timeoutMs: this.timeoutMs,
       operation: "YouTube OAuth revoke response",
     });
-    if (!response.ok && response.status !== 400) {
-      throw new YouTubeApiError(response.status, "YouTube OAuth revoke failed.", data, "AUTH_REVOKE_FAILED");
+    if (!response.ok && !(response.status === 400 && data?.error === "invalid_token")) {
+      throw new YouTubeApiError(response.status, "YouTube OAuth revoke failed.", data, "AUTH_REVOKE_FAILED", this.secretValues);
     }
 
     const deleted = await this.credentials.remove();
+    this.authGeneration += 1;
     this.storedCredentials = null;
     delete this.env.YOUTUBE_ACCESS_TOKEN;
     delete this.env.YOUTUBE_REFRESH_TOKEN;

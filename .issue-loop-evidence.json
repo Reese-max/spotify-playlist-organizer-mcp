@@ -1,0 +1,12 @@
+{
+  "repo": "Reese-max/spotify-playlist-organizer-mcp",
+  "issue": 3,
+  "base_sha": "cbfbb0431a0041b084953b2d86e346dd764129d7",
+  "red_proof": "Before implementation: node --test test/youtube-security.test.js\n✖ stored restricted grants fail closed before using a fresh token\nAssertionError [ERR_ASSERTION]: Missing expected rejection.\nℹ tests 14\nℹ pass 3\nℹ fail 11\nReview regression before its fix: node --test --test-name-pattern='reload started during revoke' test/youtube-security.test.js\n✖ a credential reload started during revoke cannot restore deleted credentials (6.7763ms)\nℹ tests 1\nℹ pass 0\nℹ fail 1\nAssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
+  "test_command": "npm test",
+  "test_exit": 0,
+  "tests_passed": 328,
+  "tests_failed": 0,
+  "summary": "Reused the existing encrypted credential store, PKCE flow and YouTube client to enforce granted scopes, truthful credential status, safe refresh rotation and revoke/recovery without restoring deleted credentials. Added shared recursive MCP redaction and secret-free OAuth/provider diagnostics, with 29 new synthetic security regressions covering the issue acceptance criteria. Updated setup documentation and the acceptance record; Git Bash npm test passed with 328 passes, zero failures and three existing Linux-only PTY skips, and lint, coverage ratchets and the CRAP report exited zero.",
+  "not_done": "Real disposable-account Google PKCE/status/refresh/revoke/reauthorize, supported OS credential permissions/ACLs and actual MCP-host output capture remain unverified; offline tests do not close those runtime acceptance criteria. No account fingerprint query or OS Keychain adapter was added; the existing passphrase-encrypted local store was reused. Mutation testing was not run, and the three existing Linux-only PTY tests were skipped on Windows; the Windows ConPTY harness passed 11 offline controls. No push, PR, issue closure, merge, production credentials or real provider write was performed."
+}

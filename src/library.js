@@ -214,8 +214,11 @@ const SECRETISH_ASSIGNMENT = /(?<![A-Za-z0-9])(?:access_token|refresh_token|clie
 
 // Untrusted provider text (error messages, upstream payloads) must not carry
 // credential-shaped substrings into the database or into MCP output.
-export function redactSecretishText(value) {
+export function redactSecretishText(value, secrets = []) {
   if (typeof value !== "string") return value;
+  for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    value = value.replaceAll(secret, "[REDACTED]");
+  }
   // `.test()` on a /g regex is stateful, so gate on the non-global instance
   // and only ever call `.replace()` on the global one.
   if (!SECRETISH_VALUE.test(value)) {
@@ -225,6 +228,15 @@ export function redactSecretishText(value) {
   return value
     .replace(SECRETISH_ASSIGNMENT, "[REDACTED]")
     .replace(new RegExp(SECRETISH_VALUE.source, "gi"), "[REDACTED]");
+}
+
+export function redactSecretishValue(value, secrets = []) {
+  return JSON.parse(JSON.stringify(value, (key, entry) => {
+    if (/^(?:access_?token|refresh_?token|client_?secret|passphrase|password|api_?key|authorization|authorization_code|code_verifier)$/i.test(key)) {
+      return entry == null ? entry : "[REDACTED]";
+    }
+    return redactSecretishText(entry, secrets);
+  }));
 }
 
 function containsSecretishContent(value) {

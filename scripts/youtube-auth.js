@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import { stdin as input, stdout as output } from "node:process";
-import { CredentialStore, credentialsFromTokenResponse } from "../src/credentials.js";
+import { CredentialStore, credentialsFromTokenResponse, YOUTUBE_SCOPE } from "../src/credentials.js";
 import { loadEnvFile } from "../src/env.js";
 import { canDisableEcho, readHiddenLine } from "../src/hidden-input.js";
 import { awaitWithDeadline, fetchWithDeadline, timeoutFromEnv } from "../src/http.js";
@@ -87,7 +87,7 @@ authorization.search = new URLSearchParams({
   response_type: "code",
   access_type: "offline",
   prompt: "consent",
-  scope: "https://www.googleapis.com/auth/youtube",
+  scope: YOUTUBE_SCOPE,
   state,
   code_challenge: codeChallenge,
   code_challenge_method: "S256",
@@ -113,8 +113,8 @@ const server = http.createServer(async (request, response) => {
   const error = callback.searchParams.get("error");
   if (error) {
     response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-    response.end("Authorization was denied: " + error);
-    finish(server, "Google authorization failed: " + error, 1);
+    response.end("Google authorization was denied. Return to the terminal to retry.");
+    finish(server, "Google authorization failed. Run npm run youtube:auth to retry.", 1);
     return;
   }
 
@@ -147,7 +147,7 @@ const server = http.createServer(async (request, response) => {
       operation: "YouTube OAuth token response",
     }));
     if (!tokenResponse.ok) {
-      throw new Error(data?.error_description ?? data?.error ?? "Token exchange failed.");
+      throw new Error("Token exchange failed.");
     }
 
     const credentials = credentialsFromTokenResponse(data);
@@ -158,18 +158,22 @@ const server = http.createServer(async (request, response) => {
     response.end("<h1>YouTube authorization complete</h1><p>You can close this window and return to the terminal.</p>");
     finish(
       server,
-      "YouTube OAuth setup completed. Encrypted credentials saved to " + credentialStore.filePath + ".",
+      "YouTube OAuth setup completed. Encrypted credentials saved to " + credentialStore.filePath + ".\n"
+        + "Granted scope: " + YOUTUBE_SCOPE + ".\n"
+        + "Use youtube_auth_status to inspect credentials; youtube_auth_revoke revokes and deletes them.",
       0,
     );
   } catch (exchangeError) {
     response.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     response.end("Token exchange failed");
-    finish(server, "Token exchange failed: " + exchangeError.message, 1);
+    finish(server, exchangeError?.code === "AUTH_SCOPE_INSUFFICIENT"
+      ? "YouTube permission is missing. Run npm run youtube:auth to authorize again."
+      : "Token exchange or credential persistence failed. Check local configuration and run npm run youtube:auth again.", 1);
   }
 });
 
-server.on("error", (error) => {
-  console.error("OAuth callback server failed:", error.message);
+server.on("error", () => {
+  console.error("OAuth callback server failed. Check the local loopback address and port.");
   process.exitCode = 1;
 });
 

@@ -69,7 +69,7 @@ Server 啟動時會開啟一個本機 SQLite 音樂庫（`node:sqlite`），作�
 - 覆寫路徑：設定環境變數 `MUSIC_LIBRARY_FILE`（相對路徑會解析為絕對路徑）。
 - 備份：先關閉 server（關閉時會做 WAL checkpoint），再複製 `library.sqlite`；若仍看到 `-wal`/`-shm` 檔，請一併複製。
 - 重置：關閉 server，刪除 `library.sqlite`，重新啟動即會重建空 schema。
-- OAuth token、refresh token、client secret 與 `YOUTUBE_CREDENTIAL_PASSPHRASE` 一律留在加密憑證檔，不會寫入音樂庫 DB、log 或 MCP 輸出；寫入端也會拒絕疑似 secret 的欄位名稱。
+- access/refresh token 存於加密憑證檔；client secret 與 `YOUTUBE_CREDENTIAL_PASSPHRASE` 由本機環境或 secret manager 提供。這些值不會寫入音樂庫 DB、log 或 MCP 輸出；寫入端也會拒絕疑似 secret 的欄位名稱。
 
 ## 音樂庫查詢與維護
 
@@ -141,7 +141,7 @@ curl -X DELETE http://127.0.0.1:8741/session -H "Authorization: Bearer <session>
 
 計數口徑：`sync.results`／`sync.failed`／`sync.unknown` 是**每次實際 append 嘗試**（同一 `videoId` 只算一次，批內重複列不重複加），`import_status.items` 則是**逐 plan 列**（重複列鏡射同一 `videoId` 的結果）。所以一個 videoId 失敗會讓 `import_status` 看到兩列 `syncResult:"failed"` 而 `sync.failed` 仍是 1——兩者都對，只是分母不同。`already_present` 不算 append 嘗試，所以只出現在 `import_status`。
 
-安全：batch import 落進 plan（sync_state）的 provider 錯誤訊息與**呼叫端貼上的 `items` 文字**，以及 **MCP tool 丟出的 `error`／`nextStep` 與 HTTP facade 的錯誤 `message`**，都會先過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`GOCSPX-…`、含前綴的 OAuth 指派如 `invalid_client_id=`、JSON 引號形如 `"client_secret":"…"`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。因此 `preview_import`／`import_status` 回傳的 `input` 會與你貼的原文不同——那是刻意的。讀取端同樣會 redact，所以舊版本寫入、當時未經處理的 plan 也不會在 `import_status` 回吐憑證。這組較寬鬆的樣式（OAuth 指派與 `GOCSPX-…`）**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。`save_music`／`library_sync`／`library_query` 各自在**成功回應**內嵌的 `errorInfo` 尚未接上這層 redact，不受本保證涵蓋。
+安全：batch import 落進 plan（sync_state）的 provider 錯誤訊息與**呼叫端貼上的 `items` 文字**，以及 **MCP tool 丟出的 `error`／`nextStep` 與 HTTP facade 的錯誤 `message`**，都會先過 `redactSecretishText`：憑證形狀的子字串（`Bearer …`、`ya29.…`、`AIza…`、`sk-…`、`GOCSPX-…`、含前綴的 OAuth 指派如 `invalid_client_id=`、JSON 引號形如 `"client_secret":"…"`、`SID=`）一律換成 `[REDACTED]`，`code`/`status` 保留供重試判讀。因此 `preview_import`／`import_status` 回傳的 `input` 會與你貼的原文不同——那是刻意的。讀取端同樣會 redact，所以舊版本寫入、當時未經處理的 plan 也不會在 `import_status` 回吐憑證。這組較寬鬆的樣式（OAuth 指派與 `GOCSPX-…`）**只**影響 redact；決定整列 sync_state 要不要從備份剔除的，仍是較嚴格的憑證值樣式——否則像 `?client_id=12345` 這種無害 query 就會讓整份 import plan 從備份消失。MCP 的共用輸出入口另會遞迴遮罩成功／錯誤回應內的憑證欄位、上述樣式，以及本次 client 已載入／輪替的 token 與已設定的 secret/passphrase；包含 `save_music`／`library_sync`／`library_query` 成功回應內嵌的 `errorInfo`。不會改寫原始音樂資料；HTTP facade 的成功回應不在這項 MCP 保證範圍內。
 
 同步 preflight 失敗記在 plan 的 `syncError`，描述**該次 apply**並自帶 `playlistId`（此欄位只有本版之後寫入的 plan 才有，早期 plan 沒有）：下一次沒傳 `syncPlaylist` 的呼叫會清掉它，傳了但 preflight 成功也會清掉。唯一保留舊值的情況是本次呼叫有傳 `syncPlaylist` 卻在同步前就被取消——那時本次沒有任何同步嘗試，上次失敗（連同它所屬的目標 playlist）仍是最後已知狀態。apply 回應的 `sync.error` 是同一份內容（`playlistId`/`code`/`message`/`status`）：preflight 失敗時它取代了舊版塞在 `results` 裡的 `sync_failed` 項目，所以**光看 `results` 會看不到這筆失敗**，要改看 `sync.error`。`import_status` 的逐項視窗另含 `syncPlaylistId`，指出該列最後一次同步寫進哪個 playlist。
 
@@ -267,6 +267,12 @@ Windows 的 Node/libuv `setRawMode(false)` 會將原生模式設為 processed/li
 「MCP host launch/capture」在此只涉及 **auth setup 腳本**被其他 host 啟動時的 stdin/stdout 契約；`src/server.js` 的 MCP stdio 路徑不啟動此腳本，也不互動索取 passphrase。harness 以真正 pipe handles 驗證 auth 無 passphrase 時 fail closed、有假環境 passphrase 時跳過 prompt，兩者都在 callback/network 前停止。這可離線驗證 repository 的 host 契約；不是某個未指名 MCP client 的 UI/錄影證據。若實際 host 另外提供 TTY 或錄影，需記錄它的版本、launch/TTY 類型並確認沒有 stdin/按鍵擷取；隱藏輸出無法阻止 host 自行記錄輸入。不需真實帳號來完成這些檢查。
 
 `YOUTUBE_CREDENTIAL_FILE` 未設定時，預設位置是使用者設定目錄下的 `music-playlist-organizer/youtube-credentials.json`。`YOUTUBE_ACCESS_TOKEN` 與 `YOUTUBE_REFRESH_TOKEN` 仍可作為明確的本機 fallback，但不建議在一般部署中使用，也不要提交到 repository。
+
+憑證邊界沿用 `YouTubeClient.getUserToken`／`refreshUserToken`／`credentialStatus`／`revokeUserCredentials`，持久化由 `CredentialStore.load`／`save`／`remove`／`status` 負責。setup 與 refresh 都必須取得完整的 `https://www.googleapis.com/auth/youtube` scope；refresh 省略 scope 時只沿用同一 refresh token 先前已驗證的授權，明確空值、縮減授權與無已知授權都以 `AUTH_SCOPE_INSUFFICIENT` 拒絕，且不保存／使用新 token。未具備 scope 的舊憑證需要重新授權。成功刷新後會沿用新憑證，包含輪替的 refresh token。
+
+`youtube_auth_status({})` 只回傳狀態與非秘密的來源／scope／expiry：`READY`（有效）、`EXPIRED`（已到期，`refreshable` 表示可嘗試刷新）、`REVOKED`（刷新收到 `invalid_grant`）、`MISSING`（無憑證檔）、`UNKNOWN`（無法解密、缺 scope／expiry，或使用環境 fallback）。`invalid_grant` 會清除失效的 token，並為同一組已存授權保存不含 token 的撤銷標記；失敗的環境覆寫不會覆蓋另一組已存授權。執行 `npm run youtube:auth` 重新授權即可恢復，既有 client 可在 status／後續載入時取得新憑證。明確環境 fallback 的 scope／expiry 無法驗證，status 會附上本機開發用途的警示；client 的記憶體快取與撤銷操作不會修改其他 client 的環境設定。`youtube_auth_revoke({})` 撤銷遠端授權並刪除本機憑證檔，也可刪除無 token 的撤銷標記，之後查詢為 `MISSING`。只有成功或遠端明確回報 `invalid_token` 才刪除本機檔案，其他失敗保留供復原；撤銷會等待在途 refresh，並阻止舊讀取／刷新恢復已刪憑證。
+
+POSIX 憑證目錄使用 `0700`、檔案使用 `0600`；Windows 的 POSIX mode 不等於 DACL，請使用本人設定目錄並確認只有本人可存取。不要將 passphrase 與憑證檔放在同一處，亦不要把自訂路徑內的憑證檔加入 Git。此加密檔搭配使用者管理的 passphrase，並未另接 OS Keychain。流程依據 [Google Desktop OAuth / PKCE](https://developers.google.com/identity/protocols/oauth2/native-app) 與 [OAuth 安全指引](https://developers.google.com/identity/protocols/oauth2/resources/best-practices)；完整帳號與 host 驗收見 [Issue #3 驗收紀錄](docs/issue-3-acceptance.md)。
 
 ## 使用範例
 

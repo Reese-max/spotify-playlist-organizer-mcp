@@ -10,7 +10,8 @@ export class ProviderRequestError extends Error {
     this.name = "ProviderRequestError";
     this.code = code;
     this.retryable = retryable;
-    if (cause) this.cause = cause;
+    // Transport errors can echo request URLs, headers or bodies containing tokens.
+    if (cause) this.cause = new Error("Upstream error details withheld to protect credentials.");
   }
 }
 

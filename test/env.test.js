@@ -39,6 +39,45 @@ test("parses dotenv-style lines with comments, quotes, and exports", () => {
   assert.equal(parsed.NOT_AN_ASSIGNMENT, undefined);
 });
 
+test("preserves literal backslashes in quoted credential settings", () => {
+  const parsed = parseEnvFile(String.raw`
+YOUTUBE_CREDENTIAL_FILE="C:\Users\Alice\Secrets\youtube-credentials.json"
+YOUTUBE_CREDENTIAL_PASSPHRASE="keep\q\z"
+ESCAPED="quote \" and slash \\"
+`);
+  assert.equal(parsed.YOUTUBE_CREDENTIAL_FILE, String.raw`C:\Users\Alice\Secrets\youtube-credentials.json`);
+  assert.equal(parsed.YOUTUBE_CREDENTIAL_PASSPHRASE, String.raw`keep\q\z`);
+  assert.equal(parsed.ESCAPED, 'quote " and slash \\');
+});
+
+test("preserves multiline quoted secrets without treating their contents as settings", () => {
+  const passphrase = "first line\nYOUTUBE_ACCESS_TOKEN=part-of-the-passphrase\nlast # literal";
+  for (const quote of ['"', "'"]) {
+    const parsed = parseEnvFile([
+      "EMPTY=",
+      "YOUTUBE_CREDENTIAL_PASSPHRASE=" + quote + passphrase + quote,
+      "GOOGLE_CLIENT_ID=after-secret",
+    ].join("\n").replace(/\n/g, "\r\n"));
+    assert.equal(parsed.YOUTUBE_CREDENTIAL_PASSPHRASE, passphrase);
+    assert.equal(parsed.YOUTUBE_ACCESS_TOKEN, undefined);
+    assert.equal(parsed.EMPTY, "");
+    assert.equal(parsed.GOOGLE_CLIENT_ID, "after-secret");
+  }
+});
+
+test("excludes comments from empty and unquoted settings", () => {
+  const parsed = parseEnvFile([
+    "GOOGLE_CLIENT_SECRET= # configure this later",
+    "GOOGLE_CLIENT_ID=client-id# trailing comment",
+    "YOUTUBE_REGION=JP\t# trailing comment",
+    'YOUTUBE_CREDENTIAL_PASSPHRASE="keep#literal"',
+  ].join("\n"));
+  assert.equal(parsed.GOOGLE_CLIENT_SECRET, "");
+  assert.equal(parsed.GOOGLE_CLIENT_ID, "client-id");
+  assert.equal(parsed.YOUTUBE_REGION, "JP");
+  assert.equal(parsed.YOUTUBE_CREDENTIAL_PASSPHRASE, "keep#literal");
+});
+
 test("resolves the working-directory .env before the package-root fallback", () => {
   const cwd = path.join(os.tmpdir(), "env-candidates-cwd");
   const candidates = envFileCandidates({ cwd, env: {}, packageRoot: "/pkg" });

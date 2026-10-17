@@ -1,0 +1,14 @@
+{
+  "repo": "Reese-max/spotify-playlist-organizer-mcp",
+  "issue": 38,
+  "base_sha": "2003b698c1e19cba2af8b375f0db5a4371644ffe",
+  "red_proof": "On reviewed HEAD 2003b698c1e19cba2af8b375f0db5a4371644ffe, with only regression tests added and before production fixes: node --test --test-name-pattern=\"preserves literal|preserves multiline|excludes comments|identifies an empty setting\" test/env.test.js test/env-onboarding.test.js exited 1. Tests: 4, pass: 0, fail: 4. Literal-backslash failure: actual C:UsersAliceSecretsyoutube-credentials.json, expected C:\\Users\\Alice\\Secrets\\youtube-credentials.json. Multiline failure: actual 'first line', expected the complete three-line passphrase. Comment failure: actual '# configure this later', expected an empty value. Diagnostic failure: actual 'GOOGLE_CLIENT_SECRET is set in the environment but empty', expected 'GOOGLE_CLIENT_SECRET is empty in <loaded .env path>'.",
+  "test_command": "npm test && npm run smoke && git diff --check",
+  "test_exit": 0,
+  "tests_passed": 27,
+  "tests_failed": 0,
+  "summary": "Fixed four .env parsing and diagnostic defects with four red-to-green regressions (23 to 27 tests). Full suite: 27/27; additional MCP smoke: 1/1. Strengthened MCP framing, stderr secret checks, and credential-path verification; documented quoting semantics. Validation ran locally in Git Bash with Node.js v26.7.0; no push.",
+  "not_done": [
+    "Remote GitHub CI and authenticated Google/YouTube OAuth integration were not run."
+  ]
+}

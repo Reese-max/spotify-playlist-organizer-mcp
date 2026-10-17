@@ -143,10 +143,39 @@ test("youtube:auth explains when an empty environment value overrides .env", asy
   }
 });
 
+test("youtube:auth identifies an empty setting from .env without blaming the shell", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "env-empty-file-"));
+  await writeFile(path.join(directory, ".env"), [
+    "GOOGLE_CLIENT_ID=onboarding-client-id",
+    "GOOGLE_CLIENT_SECRET=",
+    "YOUTUBE_CREDENTIAL_PASSPHRASE=onboarding-passphrase",
+    "",
+  ].join("\n"), "utf8");
+  const child = spawn(process.execPath, [AUTH_SCRIPT], {
+    cwd: directory,
+    env: cleanEnv({ HOME: directory, USERPROFILE: directory }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  const exited = once(child, "exit");
+  try {
+    const [code] = await exited;
+    assert.equal(code, 1);
+    assert.match(stderr, /GOOGLE_CLIENT_SECRET is empty in .*\.env/);
+    assert.doesNotMatch(stderr, /overrides any \.env value|onboarding-passphrase/);
+  } finally {
+    await stopChild(child, exited);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("MCP stdio server loads the same .env and keeps tokens out of output", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "env-mcp-"));
+  const credentialFile = path.join(directory, "youtube-credentials.json");
   await writeFile(path.join(directory, ".env"), [
     "YOUTUBE_ACCESS_TOKEN=env-token-should-not-leak",
+    "YOUTUBE_CREDENTIAL_FILE='" + credentialFile + "'",
     "",
   ].join("\n"), "utf8");
 
@@ -160,6 +189,7 @@ test("MCP stdio server loads the same .env and keeps tokens out of output", asyn
   const exited = once(child, "exit");
   const responses = new Map();
   const waiters = new Map();
+  const invalidLines = [];
   let buffer = "";
   child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   child.stdout.on("data", (chunk) => {
@@ -181,7 +211,7 @@ test("MCP stdio server loads the same .env and keeps tokens out of output", asyn
           }
         }
       } catch {
-        // Non-JSON output would corrupt stdio framing; the assertions below catch leaks.
+        invalidLines.push(line);
       }
     }
   });
@@ -226,7 +256,10 @@ test("MCP stdio server loads the same .env and keeps tokens out of output", asyn
     assert.equal(payload.status, "READY");
     assert.equal(payload.source, "environment");
     assert.equal(payload.refreshable, false);
+    assert.equal(payload.filePath, credentialFile);
+    assert.deepEqual(invalidLines, []);
     assert.doesNotMatch(stdout, /env-token-should-not-leak/);
+    assert.doesNotMatch(stderr, /env-token-should-not-leak/);
   } finally {
     await stopChild(child, exited);
     await rm(directory, { recursive: true, force: true });

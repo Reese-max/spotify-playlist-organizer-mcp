@@ -1,0 +1,32 @@
+{
+  "pr": 38,
+  "head": "2003b698c1e19cba2af8b375f0db5a4371644ffe",
+  "findings": [
+    {
+      "severity": "med",
+      "file": "src/env.js",
+      "line": 17,
+      "issue": "Double-quoted settings discard backslashes in unknown escape sequences. A Windows credential path such as C:\\Users\\Alice\\Secrets\\youtube-credentials.json becomes a different, relative path; passphrases containing literal backslashes are also changed. Preserve unknown escapes."
+    },
+    {
+      "severity": "med",
+      "file": "src/env.js",
+      "line": 38,
+      "issue": "Splitting before parsing quotes truncates multiline quoted passphrases and can interpret assignment-looking lines inside the secret as separate environment settings. Parse a complete quoted value before advancing to the next assignment."
+    },
+    {
+      "severity": "med",
+      "file": "src/env.js",
+      "line": 31,
+      "issue": "Only a space followed by # is treated as an unquoted comment, and trimming first turns KEY= # comment into a nonempty credential. Comment-only values and comments without a preceding space or with a tab must be excluded while quoted hashes remain literal."
+    },
+    {
+      "severity": "low",
+      "file": "scripts/youtube-auth.js",
+      "line": 22,
+      "issue": "A blank GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET loaded from .env is incorrectly reported as an empty shell override. Use loadEnvFile's imported-key metadata to identify the actual source and tell the user to edit the loaded file."
+    }
+  ],
+  "fixed": true,
+  "summary": "Fixed four .env onboarding defects: lost literal backslashes, truncated multiline secrets, comments parsed as credential values, and blank file settings misreported as shell overrides. All four new regression tests failed before the fixes; npm test now passes 27/27 and the MCP smoke test passes 1/1. MCP verification also checks the configured credential path, JSON framing, and secret absence on stdout and stderr."
+}

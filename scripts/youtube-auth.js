@@ -19,6 +19,9 @@ console.log(
 function required(name) {
   const value = process.env[name]?.trim();
   if (value) return value;
+  if (envFile.keys.includes(name)) {
+    throw new Error(name + " is empty in " + envFile.filePath + "; give it a value.");
+  }
   if (process.env[name] !== undefined) {
     throw new Error(
       name + " is set in the environment but empty, which overrides any .env value. Unset it or give it a value.",

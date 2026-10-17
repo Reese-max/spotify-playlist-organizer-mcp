@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const ENV_FILE_PIN = "MPO_ENV_FILE";
 
-const DOUBLE_QUOTE_ESCAPES = { n: "\n", r: "\r", t: "\t" };
+const DOUBLE_QUOTE_ESCAPES = { n: "\n", r: "\r", t: "\t", '"': '"', "\\": "\\" };
 
 function parseValue(raw) {
   const value = raw.trim();
@@ -14,7 +14,7 @@ function parseValue(raw) {
     for (let i = 1; i < value.length; i++) {
       const char = value[i];
       if (char === "\\" && i + 1 < value.length) {
-        inner += DOUBLE_QUOTE_ESCAPES[value[i + 1]] ?? value[i + 1];
+        inner += DOUBLE_QUOTE_ESCAPES[value[i + 1]] ?? "\\" + value[i + 1];
         i += 1;
       } else if (char === '"') {
         return inner;
@@ -28,18 +28,16 @@ function parseValue(raw) {
     const end = value.indexOf("'", 1);
     return value.slice(1, end >= 0 ? end : undefined);
   }
-  const comment = value.indexOf(" #");
+  const comment = value.indexOf("#");
   return (comment >= 0 ? value.slice(0, comment) : value).trimEnd();
 }
 
 export function parseEnvFile(text) {
   const result = {};
-  const source = String(text ?? "").replace(/^\uFEFF/, "");
-  for (const rawLine of source.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-    if (!match) continue;
+  const source = String(text ?? "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  // Match complete quoted values so secret contents cannot become assignments.
+  const assignments = /(?:^|\n)[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*("(?:\\[\s\S]|[^"\\])*"|'[^']*'|[^\n]*)/g;
+  for (const match of source.matchAll(assignments)) {
     result[match[1]] = parseValue(match[2]);
   }
   return result;

@@ -340,6 +340,7 @@ npm test                # 每個 commit 必跑（node:test）
 npm run smoke           # MCP stdio server 啟動煙霧測試
 npm run lint            # ESLint flat config（CI 也跑）
 npm run test:coverage   # 測試 + V8 coverage + 棘輪門檻（行≥80/分支≥75/函數≥88，校準於 CI Node 24）
+npm run persona-gate    # 固定 A01–J05 50-persona 品質閘門（見下）
 npm run crap            # CRAP 分數：cyclomatic complexity × coverage
 npm run crap -- --gate 30   # 有任何函數 CRAP > 30 就 exit 1（可做門檻）
 npm run mutate          # Stryker mutation testing（全檔很慢，見下）
@@ -372,6 +373,23 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 `npm run test:coverage` 使用與 `npm test` 相同的 `node --test` 完整回歸套件，因此會包含 `test/mcp-smoke.test.js`；coverage 閘門另外要求行 ≥ 80%、分支 ≥ 75%、函數 ≥ 88%。Job 設有 5 分鐘上限，權限只有 `contents: read`，不提供 YouTube／Spotify OAuth 或 API key；測試使用 stub，不會修改真實播放清單，也不應在輸出中出現 secrets。
 
 每次驗證請保存 Actions run URL、被測 commit SHA、實際命令與結果（可從 run summary 的 step log 取得）。這個 workflow 證明的是 Ubuntu／Node.js 24 下的本機與 stub provider 路徑；真實 OAuth／provider 網路行為，以及 Windows、macOS 或其他 Node 版本，仍需另外驗證。Issue #5 的實際 run 證據（含隔離負向測試失敗→復原）見 [`.github/quality-audits/2026-10-01-ci-regression-validation.md`](.github/quality-audits/2026-10-01-ci-regression-validation.md)。
+
+### 固定 50-persona 品質閘門（`npm run persona-gate`）
+
+`scripts/persona-gate.mjs` 將 portfolio audit 固定的 A01–J05 共 50 個合成 persona 編碼成可重跑閘門（issue #7）。每列的 persona、目標、輸入、步驟、預期、觀察與 finding 直接取自固定 Round-1 報告，並鎖定該檔 blob `df97d763…`；測試若來源或任一情境改動就會失敗。每個情境另映射到 repo 內可驗證的 checks（直接呼叫 `saveMusic`、`MusicLibrary`、`CredentialStore`、`fetchWithDeadline` 與 stdio server 訊號，全程不碰真實 provider／OAuth），並列出仍需真實執行證據的 runtime 項目。每列輸出四態之一：
+
+| 狀態 | 意義 |
+|---|---|
+| `PASS` | 指定 checks 全部通過，且無待補的 runtime 證據 |
+| `NEEDS_RUNTIME` | checks 通過；仍需真實 provider／client／OS／CI 執行證據（列出缺什麼） |
+| `TRACKED` | 有 check 失敗，但失敗已綁定既有 open issue（已知 current-default 缺陷，不是新 regression） |
+| `FAIL` | 有 check 失敗且沒有 tracker —— 新的可重現缺陷，閘門 exit 1 |
+
+固定報告以 `.gitattributes` 保持 LF，避免 Windows checkout 改變雜湊。密碼不回顯檢查重用既有的合成 TTY 行為測試；stdio 退出檢查在 POSIX 傳送真正的 SIGTERM，Windows 則透過 IPC 觸發同一個 JavaScript handler。合成 TTY 與 Windows signal 模擬仍不取代原生終端機或 POSIX signal 的 runtime 證據。
+
+只有 50 列全部 `PASS` 才是 `CLEAN`；`--strict` 在 verdict 不是 `CLEAN` 時 exit 1。`--json` 輸出完整 machine-readable 報表供 audit round 引用。閘門的目的是「沒有新的未追蹤缺陷」，不是靠降級或跳過假裝通過；新缺陷一旦出現在某個 persona 的 check 上，該列立即 `FAIL`。
+
+目前 main 的合成檢查結果為 3 PASS / 0 TRACKED / 47 NEEDS_RUNTIME / 0 FAIL → NOT_CLEAN。模擬結果只表示本機合成檢查，不取代 Issue #7 所要求的真實 runtime evidence 或兩個獨立合格輪次。
 
 ## 官方文件
 

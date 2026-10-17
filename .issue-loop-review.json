@@ -1,0 +1,26 @@
+{
+  "pr": 59,
+  "head": "ad22471a05576416bbc29cae8a47e392ffd0ac94",
+  "findings": [
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 58,
+      "issue": "The pinned LF Git blob is hashed from raw checkout bytes without an LF checkout rule. With core.autocrlf=true, the untouched report has CRLF and every gate invocation fails before evaluating any persona."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 658,
+      "issue": "child.kill('SIGTERM') forcibly terminates Windows children instead of running their JavaScript signal handler. Requiring exit code 0 therefore makes the gate and npm test fail on a healthy Windows installation."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 583,
+      "issue": "The no-echo probe scans only createInterface calls in youtube-auth.js, which now delegates to readHiddenLine and contains no such calls. A regression that echoes input in hidden-input.js is silently reported as passing."
+    }
+  ],
+  "fixed": true,
+  "summary": "Fixed three gate defects: pinned-audit CRLF checkout failures, Windows SIGTERM false failures, and the vacuous passphrase no-echo probe. All three regressions were red before the fixes; Git Bash validation now passes npm test (307 passed, 0 failed, 3 platform skips), lint, coverage, and the persona gate. The gate remains NOT_CLEAN (3 PASS / 47 NEEDS_RUNTIME / 0 FAIL); issue #7's real runtime evidence and independent qualifying rounds remain outstanding."
+}

@@ -1,0 +1,12 @@
+{
+  "repo": "Reese-max/spotify-playlist-organizer-mcp",
+  "issue": 52,
+  "base_sha": "7a220de65bf248e078a7cecd64ff27f15406aec5",
+  "red_proof": "Before changing public/index.html, ran node --test --test-name-pattern=\"partial-write result UI\" test/http-ui.test.js under Git Bash: exit 1, tests 1, pass 0, fail 1. The regression executed the served page's actual renderer with a real HTTP PARTIAL_PLAYLIST_CREATED receipt and failed at test/http-ui.test.js:299 with AssertionError [ERR_ASSERTION]: result UI must display the returned playlist ID. After the UI fix, the same command exited 0 with 1 pass and 0 failures.",
+  "test_command": "npm test",
+  "test_exit": 0,
+  "tests_passed": 226,
+  "tests_failed": 0,
+  "summary": "Fixed the partial-write receipt UI to display escaped exact playlist/video IDs alongside its read-back instructions; added an HTTP-to-renderer regression and updated README. The installed-dependency baseline passed 225 tests, and the final npm test passed 226/226 under Git Bash. npm run lint and npm run test:coverage also exited 0; reported coverage is 88.41% lines, 82.44% branches, 94.36% functions. A Chrome session at 390x844 verified explicit candidate selection, preview/apply success, recent music, duplicate preview/re-apply, visible PARTIAL_PLAYLIST_CREATED IDs and safe next step, read-back to local_only, and no horizontal overflow (scrollWidth=390). Browser validation used the disposable test provider and temporary SQLite data; no live provider API writes were performed.",
+  "not_done": []
+}

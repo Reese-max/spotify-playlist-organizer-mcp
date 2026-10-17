@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 import { createHttpServer } from "../src/http-server.js";
 import { openLibrary } from "../src/library.js";
@@ -271,6 +272,34 @@ test("a playlist created then rejected reports PARTIAL_PLAYLIST_CREATED with a s
   const recent = await api(base, "GET", "/api/library/recent?limit=15", { token });
   const recentBody = await recent.json();
   assert.ok(recentBody.items.some((item) => item.id === receipt.ids.trackId));
+});
+
+test("partial-write result UI displays the exact IDs required by its read-back instructions", async (t) => {
+  const { base, youtube } = await startServer(t);
+  youtube.videos.set(VID_A, { id: VID_A, name: "Partial UI Song" });
+  youtube.rejectNextAdd = true;
+  const token = await session(base);
+  const response = await api(base, "POST", "/api/save_music", {
+    token,
+    body: { input: "Partial UI Song", videoId: VID_A, mode: "apply", playlist: "Brand New List" },
+  });
+  const receipt = await response.json();
+  assert.equal(receipt.youtube.writeState, "PARTIAL_PLAYLIST_CREATED");
+  const html = await (await api(base, "GET", "/")).text();
+  const app = { addEventListener() {} };
+  // ponytail: capture actual renderer output; browser checks cover layout.
+  runInNewContext(`${html.match(/<script>([\s\S]*?)<\/script>/)[1]}
+    state.ctx.result = receipt;
+    viewResult();`, {
+    receipt,
+    localStorage: { getItem: () => null },
+    document: { getElementById: (id) => id === "app" ? app : {} },
+  });
+
+  assert.ok(app.innerHTML.includes(receipt.ids.playlistId), "result UI must display the returned playlist ID");
+  assert.ok(app.innerHTML.includes(receipt.ids.videoId), "result UI must display the exact video ID");
+  assert.ok(app.innerHTML.includes(receipt.nextStep), "result UI must display the safe next step");
+  assert.match(app.innerHTML, /id="reconcile"/);
 });
 
 test("unknown-after-write receipt exposes reconcile path over HTTP", async (t) => {

@@ -1,0 +1,14 @@
+{
+  "pr": 52,
+  "head": "7a220de65bf248e078a7cecd64ff27f15406aec5",
+  "findings": [
+    {
+      "severity": "med",
+      "file": "test/http-ui.test.js",
+      "line": 264,
+      "issue": "The partial-write test checks only the words 'playlist ID' in nextStep. The actual result UI never displays receipt.ids.playlistId or receipt.ids.videoId, so users cannot follow the exact-ID read-back instructions after PARTIAL_PLAYLIST_CREATED. Execute the served renderer and assert that the returned IDs are visible."
+    }
+  ],
+  "fixed": true,
+  "summary": "Found and fixed one medium-severity acceptance gap: partial-write receipts instructed users to read back an exact playlist ID without displaying the returned playlist/video IDs. The result UI now displays escaped IDs, protected by an HTTP-to-renderer regression that failed before the fix; all 226 tests, lint, and coverage pass, and a 390px browser flow verified candidate selection, saving, duplicate handling, and partial-write read-back against the test provider. No needs-human findings remain."
+}

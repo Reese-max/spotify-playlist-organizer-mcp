@@ -321,6 +321,8 @@ function viewResult() {
       <div class="title" style="margin-top:8px">${esc(r.video?.name ?? r.input ?? "")}</div>
       <p class="muted">${v.body}</p>
       ${steps}
+      ${r.ids?.playlistId ? `<div class="sub">Playlist ID: <span class="mono">${esc(r.ids.playlistId)}</span></div>` : ""}
+      ${r.ids?.videoId ? `<div class="sub">Video ID: <span class="mono">${esc(r.ids.videoId)}</span></div>` : ""}
       ${r.nextStep ? `<div class="next">${esc(r.nextStep)}</div>` : ""}
       ${action === "reconciliation_required" && trackId
         ? `<button id="reconcile">Run read-back reconcile</button>` : ""}

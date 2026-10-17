@@ -17,7 +17,7 @@
 // The verdict is CLEAN only when all 50 personas are PASS. The gate exits
 // non-zero on any FAIL; --strict also fails on NOT_CLEAN verdicts.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -586,7 +586,16 @@ export const CHECKS = Object.freeze({
           || /\boutput\s*:\s*(?:output|stdout|process\.stdout)\b/.test(args);
         assertCheck(!echoes, "passphrase readline is bound to real stdout — input echoes");
       }
-      return "secret prompt does not echo on TTY";
+      const env = { ...process.env };
+      delete env.NODE_TEST_CONTEXT; // Independent TAP output even inside node --test.
+      const probe = spawnSync(process.execPath, [
+        "--test", "--test-reporter=tap",
+        "--test-name-pattern=^(hidden input resolves|terminals that cannot disable echo)",
+        path.join("test", "youtube-auth.test.js"),
+      ], { cwd: root, env, encoding: "utf8", timeout: 10_000 });
+      assertCheck(probe.status === 0 && /# pass 2\b/.test(probe.stdout ?? ""),
+        `hidden-input no-echo tests failed (${probe.error?.code ?? probe.status})`);
+      return "synthetic TTY hides input, restores raw mode, and fails closed without echo control";
     },
   },
 
@@ -610,10 +619,14 @@ export const CHECKS = Object.freeze({
     issues: [],
     run: async ({ root }) => {
       const directory = await mkdtemp(path.join(os.tmpdir(), "persona-gate-stdio-"));
-      const child = spawn(process.execPath, [path.join("src", "server.js")], {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", [
+        'import { main } from "./src/server.js";',
+        'process.on("message", () => process.emit("SIGTERM"));',
+        "await main();",
+      ].join("\n")], {
         cwd: root,
         env: { ...process.env, MUSIC_LIBRARY_FILE: path.join(directory, "library.sqlite") },
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe", "ipc"],
       });
       let stderr = "";
       child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -654,11 +667,14 @@ export const CHECKS = Object.freeze({
         const exitWait = new Promise((resolveWait) => {
           exitTimer = setTimeout(() => resolveWait([null]), 5_000);
         });
-        child.kill("SIGTERM");
+        // Windows kill() force-terminates: exercise the JS handler through IPC.
+        if (process.platform === "win32") child.send("SIGTERM");
+        else child.kill("SIGTERM");
         const [code] = await Promise.race([exitPromise, exitWait]);
         clearTimeout(exitTimer);
         assertCheck(code === 0, `SIGTERM exit code ${code}; expected 0. ${stderr}`);
-        return "SIGTERM exits 0 after initialize";
+        return (process.platform === "win32" ? "synthetic SIGTERM" : "SIGTERM")
+          + " exits 0 after initialize";
       } finally {
         child.kill("SIGKILL");
         let reapTimer;

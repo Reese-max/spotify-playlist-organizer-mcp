@@ -385,6 +385,8 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 | `TRACKED` | 有 check 失敗，但失敗已綁定既有 open issue（已知 current-default 缺陷，不是新 regression） |
 | `FAIL` | 有 check 失敗且沒有 tracker —— 新的可重現缺陷，閘門 exit 1 |
 
+固定報告以 `.gitattributes` 保持 LF，避免 Windows checkout 改變雜湊。密碼不回顯檢查重用既有的合成 TTY 行為測試；stdio 退出檢查在 POSIX 傳送真正的 SIGTERM，Windows 則透過 IPC 觸發同一個 JavaScript handler。合成 TTY 與 Windows signal 模擬仍不取代原生終端機或 POSIX signal 的 runtime 證據。
+
 只有 50 列全部 `PASS` 才是 `CLEAN`；`--strict` 在 verdict 不是 `CLEAN` 時 exit 1。`--json` 輸出完整 machine-readable 報表供 audit round 引用。閘門的目的是「沒有新的未追蹤缺陷」，不是靠降級或跳過假裝通過；新缺陷一旦出現在某個 persona 的 check 上，該列立即 `FAIL`。
 
 目前 main 的合成檢查結果為 3 PASS / 0 TRACKED / 47 NEEDS_RUNTIME / 0 FAIL → NOT_CLEAN。模擬結果只表示本機合成檢查，不取代 Issue #7 所要求的真實 runtime evidence 或兩個獨立合格輪次。

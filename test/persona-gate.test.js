@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -53,6 +55,43 @@ const REQUIRED_PASS_CHECKS = Object.freeze([
 function sink() {
   return { text: "", write(chunk) { this.text += chunk; } };
 }
+
+test("the pinned audit keeps LF bytes on autocrlf checkouts", () => {
+  const attributes = spawnSync("git", ["check-attr", "eol", "--", ROUND_ONE_REPORT], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  assert.equal(attributes.status, 0, attributes.stderr);
+  assert.match(attributes.stdout, /: eol: lf\r?\n$/);
+});
+
+test("the stdio signal probe exercises clean shutdown on this platform", async () => {
+  assert.match(await CHECKS.stdio_signal_exit.run({ root }), /SIGTERM.*exits 0/);
+});
+
+test("the no-echo probe rejects a helper that echoes typed input", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "persona-gate-echo-"));
+  try {
+    for (const folder of ["src", "scripts", "test"]) {
+      await mkdir(resolve(directory, folder));
+    }
+    for (const file of ["package.json", "scripts/youtube-auth.js", "test/youtube-auth.test.js"]) {
+      await cp(resolve(root, file), resolve(directory, file));
+    }
+    const original = await readFile(resolve(root, "src/hidden-input.js"), "utf8");
+    await writeFile(resolve(directory, "src/hidden-input.js"), original);
+    assert.match(await CHECKS.credential_prompt_no_echo.run({ root: directory }), /echo|hides input/i);
+    const leaking = original.replace(
+      "const onData = (original) => {",
+      "const onData = (original) => { output.write(original);",
+    );
+    assert.notEqual(leaking, original, "negative control must actually introduce an echo");
+    await writeFile(resolve(directory, "src/hidden-input.js"), leaking);
+    await assert.rejects(CHECKS.credential_prompt_no_echo.run({ root: directory }), /echo/i);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 async function readCanonicalScenarios() {
   const markdown = await readFile(resolve(root, ROUND_ONE_REPORT), "utf8");

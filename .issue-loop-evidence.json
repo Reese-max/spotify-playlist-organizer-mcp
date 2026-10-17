@@ -1,0 +1,16 @@
+{
+  "repo": "Reese-max/spotify-playlist-organizer-mcp",
+  "issue": 59,
+  "base_sha": "ad22471a05576416bbc29cae8a47e392ffd0ac94",
+  "red_proof": "Before implementation, node --test --test-name-pattern=\"autocrlf|stdio signal probe|no-echo probe rejects\" test/persona-gate.test.js exited 1 with 0 passed and 3 failed on Windows / Node v26.7.0. The failures were: pinned audit eol was unspecified instead of lf; SIGTERM exit code null instead of 0; and Missing expected rejection for a helper deliberately changed to echo typed input. The unchanged checkout's five existing persona-gate tests also failed because raw CRLF bytes hashed to 3f63ab80cb97f8513ae17907f900dd5db666120a instead of the pinned df97d763c208cef415f44f79e35c029c9c504de8. After fixes, all three regression tests pass, including a normal-helper positive control and an echoing-helper negative control.",
+  "test_command": "npm test && npm run lint && npm run test:coverage && npm run persona-gate -- --json",
+  "test_exit": 0,
+  "tests_passed": 307,
+  "tests_failed": 0,
+  "summary": "Reviewed the exact PR head and linked issue #7, then fixed three reproducible gate defects with minimal changes and red-to-green regressions. Executed test_command through Git Bash on Windows / Node v26.7.0: both full-suite runs reported 310 tests, 307 passed, 0 failed, 3 platform skips; lint passed; coverage was 92.82% lines / 83.97% branches / 91.10% functions; the gate reported 3 PASS / 47 NEEDS_RUNTIME / 0 TRACKED / 0 FAIL and NOT_CLEAN. The original audit blob and fixed persona assignments remain unchanged.",
+  "not_done": [
+    "Native POSIX SIGTERM delivery and the CI-pinned Node 24 runtime were not executed in this Windows validation. Windows exercises the same JavaScript shutdown handler through IPC.",
+    "Three Linux PTY tests are skipped on Windows; native terminal, real provider/OAuth/client/OS evidence and issue #7's two independent qualifying rounds remain outstanding.",
+    "No push, PR update, merge, issue closure, or other branch modification was performed."
+  ]
+}

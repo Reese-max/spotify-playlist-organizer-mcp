@@ -1,0 +1,62 @@
+{
+  "pr": 64,
+  "head": "ef3da8ef54297b54b5cf8c3b19d80765cc16e12b",
+  "findings": [
+    {
+      "severity": "high",
+      "file": "scripts/persona-gate.mjs",
+      "line": 613,
+      "issue": "Windows child.kill('SIGTERM') forcibly terminates Node rather than running its signal handler. The new gate makes the unchanged product fail E04/H03 and npm test (reproduced: 2 pass, 3 fail). Use EOF shutdown on Windows and preserve the POSIX signal evidence boundary."
+    },
+    {
+      "severity": "high",
+      "file": "scripts/persona-gate.mjs",
+      "line": 835,
+      "issue": "Every credential_prompt_no_echo exception inherits #8, including unrelated ENOENT/EACCES failures. New failures become TRACKED and the default CLI exits 0. Bind a tracker only to the explicit known-defect signature and cover the untracked CLI exit path."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 539,
+      "issue": "The source scanner reports a safe prompt when createInterface uses an options variable or an output alias, although it still echoes. Unrecognized prompt shapes must fail closed rather than claim TTY safety; tests must allow a genuinely resolved #8 to stop being TRACKED."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 785,
+      "issue": "H04 has neither checks nor runtime obligations, so the fixed 50-persona report unconditionally declares this unverified scenario PASS. Preserve its secret/deployment checks and outstanding execution evidence."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 586,
+      "issue": "Any nonempty stdout counts as successful MCP initialization, including banners and JSON-RPC errors. Validate the matching initialize response before accepting the shutdown probe."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 578,
+      "issue": "An asynchronous spawn error rejects the exit promise without an observer while readiness waits for stdout/exit. The resulting unhandled rejection aborts the gate instead of producing a FAIL report and cleaning up promptly."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 740,
+      "issue": "needs-human: Fixed scenario continuity is incomplete: E04 changes spreadsheet/cloud-setup familiarity to Windows installation, E05 omits readability/fatigue, and F01 omits large text/clear controls. Confirm the intended full matrix against issue #7 before counting this as a complete fixed-persona audit round."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 874,
+      "issue": "needs-human: The report has no tested SHA/default-branch binding, issue-disposition evidence, or independent-round provenance. Its local probe verdict cannot establish issue #7's qualifying round or umbrella CLEAN acceptance; confirm that contract before consuming it as such."
+    },
+    {
+      "severity": "med",
+      "file": "scripts/persona-gate.mjs",
+      "line": 535,
+      "issue": "needs-human: The gate declares #8 an open current-default defect, but live GitHub readback shows #8 CLOSED/COMPLETED at 2026-10-07T21:49:05Z and current main is cbfbb0431a0041b084953b2d86e346dd764129d7. The reviewed branch still contains the old prompt. Decide how this offline gate should handle historical trackers and the newer default-branch security fix; no rebase or authentication behavior change was performed."
+    }
+  ],
+  "fixed": true,
+  "summary": "Fixed six reproducible gate defects with eight red-to-green regressions: Windows shutdown, blanket tracker assignment, scanner false passes, unverified H04 PASS, invalid MCP readiness, and unhandled spawn errors; the tests also allow a genuinely resolved prompt. npm test and coverage each passed 236/236, lint and CRAP exited 0, and the 50-persona CLI reported 0 FAIL with NOT_CLEAN. needs-human: confirm fixed-persona continuity, full audit qualification/provenance, and the stale open-#8 declaration (#8 is now closed and current main has advanced); these three findings remain unresolved."
+}

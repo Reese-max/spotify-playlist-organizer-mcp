@@ -534,15 +534,26 @@ export const CHECKS = Object.freeze({
   // is a readline interface wired to the real stdout for the secret prompt.
   credential_prompt_no_echo: {
     issues: ["#8"],
+    trackedErrorCode: "CREDENTIAL_PROMPT_ECHO",
     run: async ({ root }) => {
       const text = await readFile(path.join(root, "scripts", "youtube-auth.js"), "utf8");
-      for (const match of text.matchAll(/createInterface\(\s*\{([^}]*)\}/gs)) {
+      // ponytail: verify only inline, output-free options; other shapes need a TTY probe.
+      const interfaces = [...text.matchAll(/\bcreateInterface\(\s*\{([^}]*)\}\s*\)/gs)];
+      assertCheck(interfaces.length > 0
+        && interfaces.length === [...text.matchAll(/\bcreateInterface\s*\(/g)].length,
+      "Unrecognized passphrase prompt; TTY verification required");
+      for (const match of interfaces) {
         const args = match[1];
         const echoes = /\boutput\b(?!\s*:)/.test(args)
           || /\boutput\s*:\s*(?:output|stdout|process\.stdout)\b/.test(args);
-        assertCheck(!echoes, "passphrase readline is bound to real stdout — input echoes (#8)");
+        if (echoes) {
+          throw Object.assign(new Error("passphrase readline is bound to real stdout — input echoes (#8)"),
+            { code: "CREDENTIAL_PROMPT_ECHO" });
+        }
+        assertCheck(!/\boutput\b|\.\.\./.test(args),
+          "Unrecognized readline output; TTY verification required");
       }
-      return "secret prompt does not echo on TTY";
+      return "recognized output-free readline options; real TTY evidence still owed";
     },
   },
 
@@ -561,7 +572,7 @@ export const CHECKS = Object.freeze({
     },
   },
 
-  // The stdio server must exit 0 on SIGTERM — Linux sends a real signal (H03).
+  // POSIX must exit 0 on SIGTERM; Windows verifies stdin EOF because kill is forcible.
   stdio_signal_exit: {
     issues: [],
     run: async ({ root }) => {
@@ -576,22 +587,39 @@ export const CHECKS = Object.freeze({
       // A dead child's stdin write raises EPIPE on the stream, not the promise.
       child.stdin.on("error", () => {});
       const exitPromise = once(child, "exit");
+      exitPromise.catch(() => {});
+      let readyTimer;
+      let exitTimer;
       try {
         const ready = new Promise((resolveReady, rejectReady) => {
           let buffer = "";
-          const timer = setTimeout(
+          readyTimer = setTimeout(
             () => rejectReady(new Error("server did not answer initialize")),
             10_000,
           );
+          child.once("error", rejectReady);
           child.stdout.on("data", (chunk) => {
             buffer += chunk.toString();
-            if (buffer.split("\n").some((line) => line.trim())) {
-              clearTimeout(timer);
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let response;
+              try {
+                response = JSON.parse(line);
+              } catch {
+                rejectReady(new Error("invalid JSON in initialize response"));
+                return;
+              }
+              if (response?.id !== 1) continue;
+              if (response.jsonrpc !== "2.0" || response.error || !response.result?.serverInfo?.name) {
+                rejectReady(new Error("server did not return a successful initialize response"));
+                return;
+              }
               resolveReady();
             }
           });
           child.once("exit", (code) => {
-            clearTimeout(timer);
             rejectReady(new Error("server exited " + code + " before initialize: " + stderr));
           });
         });
@@ -606,22 +634,26 @@ export const CHECKS = Object.freeze({
           },
         }) + "\n");
         await ready;
-        let exitTimer;
+        clearTimeout(readyTimer);
         const exitWait = new Promise((resolveWait) => {
           exitTimer = setTimeout(() => resolveWait([null]), 5_000);
         });
-        child.kill("SIGTERM");
+        const shutdown = process.platform === "win32" ? "stdin EOF" : "SIGTERM";
+        if (process.platform === "win32") child.stdin.end();
+        else child.kill("SIGTERM");
         const [code] = await Promise.race([exitPromise, exitWait]);
         clearTimeout(exitTimer);
-        assertCheck(code === 0, `SIGTERM exit code ${code}; expected 0. ${stderr}`);
-        return "SIGTERM exits 0 after initialize";
+        assertCheck(code === 0, `${shutdown} exit code ${code}; expected 0. ${stderr}`);
+        return `${shutdown} exits 0 after initialize`;
       } finally {
+        clearTimeout(readyTimer);
+        clearTimeout(exitTimer);
         child.kill("SIGKILL");
         let reapTimer;
         const reapWait = new Promise((resolveWait) => {
           reapTimer = setTimeout(resolveWait, 1_000);
         });
-        await Promise.race([exitPromise, reapWait]);
+        await Promise.race([exitPromise, reapWait]).catch(() => {});
         clearTimeout(reapTimer);
         // A still-dying child may hold the SQLite file briefly (Windows EPERM);
         // cleanup failure must not mask the check result.
@@ -781,10 +813,11 @@ export const PERSONA_MATRIX = Object.freeze([
     ["macOS store/TTY (#3)"]),
   persona("H03", "Linux/CI non-interactive runner",
     ["stdio_signal_exit", "ci_workflow_declared"],
-    ["CI admission receipt (#5)"]),
+    ["CI admission receipt (#5)",
+      ...(process.platform === "win32" ? ["POSIX SIGTERM shutdown (Windows probe uses stdin EOF)"] : [])]),
   persona("H04", "self-hosting deployer scoping the repo",
-    [],
-    []),
+    ["credentials_encrypted_at_rest", "receipt_carries_no_secret"],
+    ["self-hosted configuration and secret-safe deployment"]),
   persona("H05", "third-party maintainer verifying the repo",
     ["ci_workflow_declared"],
     []),
@@ -837,7 +870,9 @@ export async function runPersonaGate({ root = REPO_ROOT } = {}) {
         id: checkId,
         ok: false,
         detail: error instanceof Error ? error.message : String(error),
-        issues: [...check.issues],
+        issues: check.trackedErrorCode && error?.code === check.trackedErrorCode
+          ? [...check.issues]
+          : [],
       };
     }
   }

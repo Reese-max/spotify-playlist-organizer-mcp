@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
@@ -48,6 +50,79 @@ const REQUIRED_PASS_CHECKS = Object.freeze([
 function sink() {
   return { text: "", write(chunk) { this.text += chunk; } };
 }
+
+async function fixtureRoot(t, files) {
+  const directory = await mkdtemp(join(os.tmpdir(), "persona-gate-regression-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const [name, content] of Object.entries(files)) {
+    const file = join(directory, name);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, content);
+  }
+  return directory;
+}
+
+test("shutdown probe uses a supported graceful close on the current platform", async () => {
+  const detail = await CHECKS.stdio_signal_exit.run({ root });
+  assert.match(detail, process.platform === "win32" ? /stdin EOF/ : /SIGTERM/);
+});
+
+test("unrelated tracked-check errors fail the report and default CLI", async (t) => {
+  // Isolate classification from unrelated product probes, including OS behavior.
+  for (const check of Object.values(CHECKS)) t.mock.method(check, "run", async () => "ok");
+  CHECKS.credential_prompt_no_echo.run = async () => {
+    throw Object.assign(new Error("authentication script is missing"), { code: "ENOENT" });
+  };
+  const out = sink();
+  const code = await main({ argv: ["--json"], out, root });
+  const report = JSON.parse(out.text);
+  const affected = report.personas.filter((p) => p.checks.some((c) => c.id === "credential_prompt_no_echo"));
+  assert.ok(affected.length > 0);
+  assert.ok(affected.every((p) => p.status === "FAIL"));
+  assert.ok(affected.every((p) => p.issues.length === 0));
+  assert.ok(report.summary.fail > 0);
+  assert.equal(code, 1);
+  assert.equal(await main({ out: sink(), root }), 1);
+});
+
+for (const prompt of [
+  "const options = { input, output }; createInterface(options);",
+  "const realOutput = output; createInterface({ input, output: realOutput });",
+]) {
+  test(`unrecognized prompt syntax cannot imply no echo: ${prompt}`, async (t) => {
+    const fixture = await fixtureRoot(t, { "scripts/youtube-auth.js": prompt });
+    await assert.rejects(CHECKS.credential_prompt_no_echo.run({ root: fixture }), /prompt|readline/i);
+  });
+}
+
+test("a persona without local checks must retain explicit runtime evidence", () => {
+  for (const p of PERSONA_MATRIX) {
+    assert.ok(p.checks.length > 0 || p.runtime.length > 0, `${p.id} has no verification`);
+  }
+});
+
+for (const response of ["banner instead of JSON", JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32603 } })]) {
+  test(`shutdown probe requires successful MCP initialize: ${response}`, async (t) => {
+    const fixture = await fixtureRoot(t, {
+      "src/server.js": `
+        process.on("SIGTERM", () => process.exit(0));
+        process.stdin.on("end", () => process.exit(0));
+        process.stdin.once("data", () => {
+          process.stdout.write(${JSON.stringify(response + "\n")});
+        });
+      `,
+    });
+    await assert.rejects(CHECKS.stdio_signal_exit.run({ root: fixture }), /initialize/i);
+  });
+}
+
+test("spawn failure is a caught check failure, not an unhandled rejection", async (t) => {
+  const fixture = await fixtureRoot(t, {});
+  await assert.rejects(
+    CHECKS.stdio_signal_exit.run({ root: join(fixture, "missing") }),
+    /ENOENT|spawn/i,
+  );
+});
 
 test("the gate matrix is exactly the fixed A01–J05 grid", () => {
   assert.equal(PERSONA_MATRIX.length, 50);
@@ -128,17 +203,26 @@ test("the gate evaluates all 50 personas and finds no untracked defect", async (
   assert.ok(Object.keys(byCheck).length > 0);
 });
 
-test("the tracked defect set matches the declared open audit findings", async () => {
-  const report = await runPersonaGate({ root });
-  const trackedIssues = [...new Set(report.personas.flatMap((p) => p.issues))].sort();
+test("the tracked defect set matches known failures and allows a resolved prompt", async (t) => {
+  const promptProbe = CHECKS.credential_prompt_no_echo.run;
+  const fixture = await fixtureRoot(t, {
+    "scripts/youtube-auth.js": "createInterface({ input, output });",
+  });
+  for (const check of Object.values(CHECKS)) t.mock.method(check, "run", async () => "ok");
+  CHECKS.credential_prompt_no_echo.run = () => promptProbe({ root: fixture });
 
-  // #8 is the only reproducible current-default defect the in-repo probes can
-  // detect: the interactive passphrase prompt echoes on a TTY because the
-  // readline interface is wired to the real stdout.
-  assert.deepEqual(trackedIssues, ["#8"]);
-  assert.ok(report.personas.some((p) => p.status === "TRACKED"));
-  assert.equal(report.summary.fail, 0);
-  assert.ok(report.summary.tracked > 0);
+  const tracked = await runPersonaGate({ root });
+  assert.deepEqual([...new Set(tracked.personas.flatMap((p) => p.issues))], ["#8"]);
+  assert.equal(tracked.summary.fail, 0);
+  assert.ok(tracked.summary.tracked > 0);
+
+  await writeFile(join(fixture, "scripts/youtube-auth.js"), "createInterface({ input });");
+  const resolved = await runPersonaGate({ root });
+  assert.equal(resolved.summary.fail, 0);
+  assert.equal(resolved.summary.tracked, 0);
+  assert.ok(resolved.personas.every((p) => p.issues.length === 0));
+  // Source inspection cannot replace the still-owed real TTY evidence.
+  assert.equal(resolved.personas.find((p) => p.id === "A01").status, "NEEDS_RUNTIME");
 });
 
 test("formatReport renders the 50-row matrix and the verdict", async () => {

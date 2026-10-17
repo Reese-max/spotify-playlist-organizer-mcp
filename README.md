@@ -348,6 +348,10 @@ npx stryker run --mutate src/library.js   # 單檔 scope
 
 只有 50 列全部 `PASS` 才是 `CLEAN`；`--strict` 在 verdict 不是 `CLEAN` 時 exit 1。`--json` 輸出完整 machine-readable 報表供 audit round 引用。閘門的目的是「沒有新的未追蹤缺陷」，不是靠降級或跳過假裝通過；新缺陷一旦出現在某個 persona 的 check 上，該列立即 `FAIL`。
 
+Windows 的程序關閉檢查使用 stdin EOF；POSIX 才實際送出 `SIGTERM`，Windows 報表會保留尚缺的 POSIX 訊號證據。Passphrase check 只辨識已知的 inline readline 設定；無法辨識的寫法會 `FAIL`，只有明確的既有 echo 簽章才綁定 #8，讀檔等非預期錯誤不會降為 `TRACKED`。Source check 不代表真實 TTY 已驗證。
+
+這份報表是本機 probes 的結果，不能單獨證明 #7 的完整合格輪次或 umbrella `CLEAN`；後者仍須綁定最新 default-branch SHA、確認適用 Issue 處置、補齊必要 runtime 證據，並完成兩個獨立合格輪次。這是離線檢查，tracker 的目前開關狀態須另行查核。
+
 GitHub Actions 會在 push 與 pull request 執行 `npm ci`、`npm run lint`、`npm run test:coverage`，並對 job 設定時間上限與 read-only repository 權限。
 
 ## 官方文件

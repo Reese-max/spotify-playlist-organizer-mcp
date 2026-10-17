@@ -74,7 +74,7 @@ function errorResult(error) {
 function safeTool(handler) {
   return async (args, extra) => {
     try {
-      return jsonResult(await handler(args, extra));
+      return jsonResult(await handler(args, { ...extra, signal: extra?.mcpReq?.signal ?? extra?.signal }));
     } catch (error) {
       return errorResult(error);
     }

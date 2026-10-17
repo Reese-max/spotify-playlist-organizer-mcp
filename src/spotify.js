@@ -1,7 +1,7 @@
 import { trackSummary } from "./core.js";
 import {
-  awaitWithDeadline,
-  fetchWithDeadline,
+  awaitSharedRequest,
+  fetchTextWithDeadline,
   maxReadRetriesFromEnv,
   retryDelayMs,
   timeoutFromEnv,
@@ -21,8 +21,7 @@ export class SpotifyApiError extends Error {
   }
 }
 
-async function readResponse(response, options = {}) {
-  const text = await awaitWithDeadline(response.text(), options);
+function readResponse(text) {
   if (!text) return null;
   try {
     return JSON.parse(text);
@@ -60,12 +59,10 @@ export class SpotifyClient {
   async getClientToken({ signal } = {}) {
     if (this.env.SPOTIFY_ACCESS_TOKEN?.trim()) return this.env.SPOTIFY_ACCESS_TOKEN.trim();
     if (this.clientToken && this.clientToken.expiresAt > Date.now()) return this.clientToken.value;
-    if (this.refreshingClientToken) return this.refreshingClientToken;
-
-    this.refreshingClientToken = (async () => {
+    return awaitSharedRequest(this, "refreshingClientToken", async (signal) => {
       const clientId = required(this.env, "SPOTIFY_CLIENT_ID");
       const clientSecret = required(this.env, "SPOTIFY_CLIENT_SECRET");
-      const response = await fetchWithDeadline(this.fetch, TOKEN_URL, {
+      const { response, text } = await fetchTextWithDeadline(this.fetch, TOKEN_URL, {
         method: "POST",
         headers: {
           Authorization: "Basic " + Buffer.from(clientId + ":" + clientSecret).toString("base64"),
@@ -77,11 +74,7 @@ export class SpotifyClient {
         timeoutMs: this.timeoutMs,
         operation: "Spotify client token request",
       });
-      const data = await readResponse(response, {
-        signal,
-        timeoutMs: this.timeoutMs,
-        operation: "Spotify client token response",
-      });
+      const data = readResponse(text);
       if (!response.ok) {
         throw new SpotifyApiError(
           response.status,
@@ -95,23 +88,15 @@ export class SpotifyClient {
         expiresAt: Date.now() + Math.max(0, Number(data.expires_in ?? 3600) - 60) * 1000,
       };
       return this.clientToken.value;
-    })();
-
-    try {
-      return await this.refreshingClientToken;
-    } finally {
-      this.refreshingClientToken = null;
-    }
+    }, { signal, timeoutMs: this.timeoutMs, operation: "Spotify client token request" });
   }
 
   async refreshUserToken({ signal } = {}) {
     if (!this.env.SPOTIFY_REFRESH_TOKEN?.trim()) return null;
-    if (this.refreshingUserToken) return this.refreshingUserToken;
-
-    this.refreshingUserToken = (async () => {
+    return awaitSharedRequest(this, "refreshingUserToken", async (signal) => {
       const clientId = required(this.env, "SPOTIFY_CLIENT_ID");
       const clientSecret = required(this.env, "SPOTIFY_CLIENT_SECRET");
-      const response = await fetchWithDeadline(this.fetch, TOKEN_URL, {
+      const { response, text } = await fetchTextWithDeadline(this.fetch, TOKEN_URL, {
         method: "POST",
         headers: {
           Authorization: "Basic " + Buffer.from(clientId + ":" + clientSecret).toString("base64"),
@@ -126,11 +111,7 @@ export class SpotifyClient {
         timeoutMs: this.timeoutMs,
         operation: "Spotify user token request",
       });
-      const data = await readResponse(response, {
-        signal,
-        timeoutMs: this.timeoutMs,
-        operation: "Spotify user token response",
-      });
+      const data = readResponse(text);
       if (!response.ok) {
         throw new SpotifyApiError(
           response.status,
@@ -141,13 +122,7 @@ export class SpotifyClient {
       }
       this.env.SPOTIFY_ACCESS_TOKEN = data.access_token;
       return data.access_token;
-    })();
-
-    try {
-      return await this.refreshingUserToken;
-    } finally {
-      this.refreshingUserToken = null;
-    }
+    }, { signal, timeoutMs: this.timeoutMs, operation: "Spotify user token request" });
   }
 
   async getToken(auth = "catalog", { signal } = {}) {
@@ -176,7 +151,7 @@ export class SpotifyClient {
     while (true) {
       const queryString = asQuery(query);
       const url = API_BASE + path + (queryString ? "?" + queryString : "");
-      const response = await fetchWithDeadline(this.fetch, url, {
+      const { response, text } = await fetchTextWithDeadline(this.fetch, url, {
         method,
         headers: {
           Authorization: "Bearer " + await this.getToken(requestAuth, { signal }),
@@ -189,11 +164,7 @@ export class SpotifyClient {
         timeoutMs: this.timeoutMs,
         operation: "Spotify API " + method + " " + path,
       });
-      const data = await readResponse(response, {
-        signal,
-        timeoutMs: this.timeoutMs,
-        operation: "Spotify API " + method + " " + path + " response",
-      });
+      const data = readResponse(text);
 
       if (response.status === 401 && retry && !refreshed && this.env.SPOTIFY_REFRESH_TOKEN?.trim()) {
         refreshed = true;
@@ -204,13 +175,12 @@ export class SpotifyClient {
 
       const retryable = response.status === 429 || response.status >= 500;
       if (retryable && method === "GET" && attempt < maxAttempts - 1) {
-        await waitForRetry(
-          retryDelayMs(response, attempt),
-          signal,
-          "Spotify API read retry",
-        );
-        attempt += 1;
-        continue;
+        const delay = retryDelayMs(response, attempt);
+        if (delay !== null) {
+          await waitForRetry(delay, signal, "Spotify API read retry");
+          attempt += 1;
+          continue;
+        }
       }
 
       if (!response.ok) {
@@ -335,18 +305,14 @@ export async function fetchYouTubeMetadata(
   { signal, timeoutMs = timeoutFromEnv(), } = {},
 ) {
   const endpoint = "https://www.youtube.com/oembed?url=" + encodeURIComponent(url) + "&format=json";
-  const response = await fetchWithDeadline(fetchImpl, endpoint, {
+  const { response, text } = await fetchTextWithDeadline(fetchImpl, endpoint, {
     headers: { Accept: "application/json" },
   }, {
     signal,
     timeoutMs,
     operation: "YouTube oEmbed request",
   });
-  const data = await readResponse(response, {
-    signal,
-    timeoutMs,
-    operation: "YouTube oEmbed response",
-  });
+  const data = readResponse(text);
   if (!response.ok) {
     throw new SpotifyApiError(
       response.status,

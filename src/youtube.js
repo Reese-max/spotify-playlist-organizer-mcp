@@ -1,8 +1,8 @@
 import { parseLink } from "./core.js";
 import { CredentialStore, credentialsFromTokenResponse } from "./credentials.js";
 import {
-  awaitWithDeadline,
-  fetchWithDeadline,
+  awaitSharedRequest,
+  fetchTextWithDeadline,
   maxReadRetriesFromEnv,
   retryDelayMs,
   timeoutFromEnv,
@@ -23,8 +23,7 @@ export class YouTubeApiError extends Error {
   }
 }
 
-async function readResponse(response, options = {}) {
-  const text = await awaitWithDeadline(response.text(), options);
+function readResponse(text) {
   if (!text) return null;
   try {
     return JSON.parse(text);
@@ -189,9 +188,7 @@ export class YouTubeClient {
   async refreshUserToken({ signal } = {}) {
     const refreshToken = await this.getRefreshToken();
     if (!refreshToken) return null;
-    if (this.refreshingUserToken) return this.refreshingUserToken;
-
-    this.refreshingUserToken = (async () => {
+    return awaitSharedRequest(this, "refreshingUserToken", async (signal) => {
       const clientId = requiredAny(
         this.env,
         ["GOOGLE_CLIENT_ID", "YOUTUBE_CLIENT_ID"],
@@ -202,7 +199,7 @@ export class YouTubeClient {
         ["GOOGLE_CLIENT_SECRET", "YOUTUBE_CLIENT_SECRET"],
         "GOOGLE_CLIENT_SECRET or YOUTUBE_CLIENT_SECRET",
       );
-      const response = await fetchWithDeadline(this.fetch, TOKEN_URL, {
+      const { response, text } = await fetchTextWithDeadline(this.fetch, TOKEN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -216,11 +213,7 @@ export class YouTubeClient {
         timeoutMs: this.timeoutMs,
         operation: "YouTube OAuth token request",
       });
-      const data = await readResponse(response, {
-        signal,
-        timeoutMs: this.timeoutMs,
-        operation: "YouTube OAuth token response",
-      });
+      const data = readResponse(text);
       if (!response.ok) {
         throw new YouTubeApiError(
           response.status,
@@ -237,13 +230,7 @@ export class YouTubeClient {
       }
       this.env.YOUTUBE_ACCESS_TOKEN = credentials.accessToken;
       return credentials.accessToken;
-    })();
-
-    try {
-      return await this.refreshingUserToken;
-    } finally {
-      this.refreshingUserToken = null;
-    }
+    }, { signal, timeoutMs: this.timeoutMs, operation: "YouTube OAuth token request" });
   }
 
   async getUserToken({ signal } = {}) {
@@ -290,7 +277,7 @@ export class YouTubeClient {
       const queryString = asQuery(queryParams);
       const apiBase = this.env.YOUTUBE_API_BASE?.trim() || API_BASE;
       const url = apiBase + path + (queryString ? "?" + queryString : "");
-      const response = await fetchWithDeadline(this.fetch, url, {
+      const { response, text } = await fetchTextWithDeadline(this.fetch, url, {
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -299,11 +286,7 @@ export class YouTubeClient {
         timeoutMs: this.timeoutMs,
         operation: "YouTube API " + method + " " + path,
       });
-      const data = await readResponse(response, {
-        signal,
-        timeoutMs: this.timeoutMs,
-        operation: "YouTube API " + method + " " + path + " response",
-      });
+      const data = readResponse(text);
 
       if (
         response.status === 401
@@ -319,13 +302,12 @@ export class YouTubeClient {
 
       const retryable = response.status === 429 || response.status >= 500;
       if (retryable && method === "GET" && attempt < maxAttempts - 1) {
-        await waitForRetry(
-          retryDelayMs(response, attempt),
-          signal,
-          "YouTube API read retry",
-        );
-        attempt += 1;
-        continue;
+        const delay = retryDelayMs(response, attempt);
+        if (delay !== null) {
+          await waitForRetry(delay, signal, "YouTube API read retry");
+          attempt += 1;
+          continue;
+        }
       }
 
       if (!response.ok) {
@@ -617,7 +599,7 @@ export class YouTubeClient {
       };
     }
 
-    const response = await fetchWithDeadline(this.fetch, "https://oauth2.googleapis.com/revoke", {
+    const { response, text } = await fetchTextWithDeadline(this.fetch, "https://oauth2.googleapis.com/revoke", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ token }),
@@ -626,11 +608,7 @@ export class YouTubeClient {
       timeoutMs: this.timeoutMs,
       operation: "YouTube OAuth revoke request",
     });
-    const data = await readResponse(response, {
-      signal,
-      timeoutMs: this.timeoutMs,
-      operation: "YouTube OAuth revoke response",
-    });
+    const data = readResponse(text);
     if (!response.ok && response.status !== 400) {
       throw new YouTubeApiError(response.status, "YouTube OAuth revoke failed.", data, "AUTH_REVOKE_FAILED");
     }

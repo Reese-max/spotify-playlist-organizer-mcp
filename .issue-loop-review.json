@@ -1,0 +1,38 @@
+{
+  "pr": 66,
+  "head": "914ee586a680dc8f2720bdcfc73c27eea1adf52e",
+  "findings": [
+    {
+      "severity": "med",
+      "file": "src/spotify.js",
+      "line": 63,
+      "issue": "New client-token promise sharing uses only the first caller's AbortSignal: cancelling that caller fails uncancelled waiters, while later waiters cannot cancel independently. The same inherited pattern exists in both user-token refresh paths."
+    },
+    {
+      "severity": "med",
+      "file": "src/http.js",
+      "line": 102,
+      "issue": "Inherited acceptance gap exposed by this PR's new guarantee: fetch deadline/cancellation cleanup runs as soon as headers arrive; body timeout/cancellation only rejects the waiting promise and leaves the underlying fetch and socket active."
+    },
+    {
+      "severity": "med",
+      "file": "src/server.js",
+      "line": 77,
+      "issue": "Inherited acceptance gap: installed MCP SDK 2.0.0 supplies cancellation at context.mcpReq.signal, but tool handlers consume extra.signal. Real stdio cancellation therefore never aborts the active provider request."
+    },
+    {
+      "severity": "med",
+      "file": "src/http.js",
+      "line": 164,
+      "issue": "Inherited acceptance gap behind the new Retry-After documentation: provider-specified delays are shortened to 2000 ms, causing YouTube and Spotify to retry before the provider permits."
+    },
+    {
+      "severity": "low",
+      "file": "README.md",
+      "line": 250,
+      "issue": "needs-human: the new blanket UNKNOWN_AFTER_WRITE promise does not match direct provider tools such as youtube_create_playlist, which return typed TIMEOUT/NETWORK_ERROR without a reconciliation receipt. Choosing a new public receipt contract versus narrowing the documented scope requires product/API judgment; left unchanged."
+    }
+  ],
+  "fixed": true,
+  "summary": "Fixed four defects with red/green regressions: independent token cancellation, response-body transport cleanup, MCP cancellation propagation, and early Retry-After retries. Git Bash tests/lint/coverage and Node 24 coverage passed with 269 tests and zero failures. needs-human: direct provider tools such as youtube_create_playlist return typed transport errors, so the blanket UNKNOWN_AFTER_WRITE documentation still requires an API/product decision."
+}

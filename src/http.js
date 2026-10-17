@@ -105,6 +105,13 @@ export async function fetchWithDeadline(
   }
 }
 
+export function fetchTextWithDeadline(fetchImpl, url, options, deadline) {
+  return fetchWithDeadline(async (...args) => {
+    const response = await fetchImpl(...args);
+    return { response, text: await response.text() };
+  }, url, options, deadline);
+}
+
 export async function awaitWithDeadline(
   value,
   { signal, timeoutMs = 15_000, operation = "Provider response" } = {},
@@ -156,15 +163,48 @@ export async function awaitWithDeadline(
   }
 }
 
+export async function awaitSharedRequest(owner, key, start, options = {}) {
+  if (options.signal?.aborted) throw cancelledError(options.operation, options.signal.reason);
+  let pending = owner[key];
+  if (!pending) {
+    const controller = new AbortController();
+    pending = { controller, waiters: 0, settled: false };
+    pending.promise = Promise.resolve().then(() => start(controller.signal)).finally(() => {
+      pending.settled = true;
+    });
+    owner[key] = pending;
+  }
+  pending.waiters += 1;
+  try {
+    const outcome = await awaitWithDeadline(pending.promise.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    ), options);
+    if ("error" in outcome) throw outcome.error;
+    return outcome.value;
+  } finally {
+    pending.waiters -= 1;
+    if (pending.waiters === 0) {
+      if (owner[key] === pending) owner[key] = null;
+      if (!pending.settled) pending.controller.abort();
+    }
+  }
+}
+
 export function retryDelayMs(response, attempt, maximum = 2_000) {
+  // A provider delay beyond our budget skips the retry instead of running early.
   const retryAfter = response?.headers?.get?.("retry-after");
   if (retryAfter) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(Math.round(seconds * 1000), maximum);
+      const delay = Math.round(seconds * 1000);
+      return delay <= maximum ? delay : null;
     }
     const date = Date.parse(retryAfter);
-    if (Number.isFinite(date)) return Math.min(Math.max(date - Date.now(), 0), maximum);
+    if (Number.isFinite(date)) {
+      const delay = Math.max(date - Date.now(), 0);
+      return delay <= maximum ? delay : null;
+    }
   }
   return Math.min(250 * (2 ** attempt), maximum);
 }

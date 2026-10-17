@@ -1,0 +1,12 @@
+{
+  "repo": "Reese-max/spotify-playlist-organizer-mcp",
+  "issue": 66,
+  "base_sha": "914ee586a680dc8f2720bdcfc73c27eea1adf52e",
+  "red_proof": "On reviewed head 914ee586a680dc8f2720bdcfc73c27eea1adf52e, before production fixes:\n$ node --test test/provider-timeout.test.js\nexit 1; tests 39; pass 15; fail 24.\nFAIL Spotify client token isolates cancellation of waiter 0 / waiter 1 (also both refresh paths).\nFAIL body timeout and cancellation abort the real provider transport: false !== true, transportSignal.aborted remained false (all seven provider/OAuth/oEmbed paths).\nFAIL provider Retry-After beyond the retry budget never causes an early retry: calls 2 !== 1 for YouTube and Spotify.\n$ node --test --test-name-pattern='provider body timeout and MCP cancellation' test/mcp-e2e.test.js\nexit 1; tests 3; pass 0; fail 3.\nFAIL provider timeout / MCP cancellation: provider socket must close before the 5 second cancellation deadline; false !== true.\nAdditional regression caught during fix review:\n$ node --test --test-name-pattern='preserves token endpoint error' test/provider-timeout.test.js\nexit 1; tests 3; pass 0; fail 3; actual NETWORK_ERROR, expected HTTP_429 or AUTH_REFRESH_FAILED.\nAll of these tests pass after the final fixes; no test assertions were weakened.",
+  "test_command": "node --version && npm test && npm run lint && npm run test:coverage",
+  "test_exit": 0,
+  "tests_passed": 269,
+  "tests_failed": 0,
+  "summary": "Fixed shared-token cancellation without losing endpoint error code/status, kept fetch and complete response-body reads under one abortable deadline, normalized the MCP SDK cancellation signal, and skipped retries exceeding the 2-second wait budget instead of shortening Retry-After. The declared command passed through Git Bash on Node v26.7.0 (269 tests, lint, coverage), and the CI-equivalent Node v24.19.0 coverage command passed with 269 tests and 88.78/83.64/94.64 percent line/branch/function coverage. Real stdio MCP/local HTTP stub tests verify bounded TIMEOUT, cancellation-driven socket closure, one provider request, and secret-free tool/stderr output.",
+  "not_done": "needs-human: README's blanket UNKNOWN_AFTER_WRITE guarantee differs from direct provider tools such as youtube_create_playlist, which return typed transport errors without a reconciliation receipt; no public API contract change was made. No push or other branch changes."
+}

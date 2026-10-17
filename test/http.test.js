@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fetchWithDeadline, ProviderRequestError, waitForRetry } from "../src/http.js";
+import { fetchWithDeadline, ProviderRequestError, retryDelayMs, waitForRetry } from "../src/http.js";
 import { YouTubeClient } from "../src/youtube.js";
 
 function response(data, status = 200) {
@@ -91,6 +91,16 @@ test("bounds a hanging provider response body", async () => {
 
 test("waitForRetry resolves immediately without a delay", async () => {
   await waitForRetry(0);
+});
+
+test("Retry-After dates and seconds are never shortened to the retry budget", () => {
+  const delay = (value) => retryDelayMs({ headers: { get: () => value } }, 0);
+  assert.equal(delay("0"), 0);
+  assert.equal(delay("1"), 1000);
+  assert.equal(delay("3"), null);
+  assert.equal(delay(new Date(Date.now() + 10_000).toUTCString()), null);
+  assert.equal(delay(new Date(Date.now() - 10_000).toUTCString()), 0);
+  assert.equal(delay("invalid"), 250);
 });
 
 test("waitForRetry waits out the delay then resolves", async () => {

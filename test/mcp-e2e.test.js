@@ -71,6 +71,9 @@ async function startYouTubeStub() {
     failSearchQuota: false,
     failSearchForbidden: false,
     delayAddMs: 0,
+    hangSearch: false,
+    searchStarted: Promise.withResolvers(),
+    searchClosed: Promise.withResolvers(),
   };
   state.addVideo = (videoId, title) => state.videos.set(videoId, videoResource(videoId, title));
 
@@ -98,6 +101,13 @@ async function startYouTubeStub() {
       }
       if (req.method === "GET" && pathname === "/search") {
         state.counters.search += 1;
+        if (state.hangSearch) {
+          res.on("close", state.searchClosed.resolve);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write("{");
+          state.searchStarted.resolve();
+          return;
+        }
         if (state.failSearchQuota) {
           return sendJson(403, {
             error: {
@@ -183,7 +193,7 @@ async function startYouTubeStub() {
   return state;
 }
 
-function spawnMcpServer(directory, apiBase) {
+function spawnMcpServer(directory, apiBase, env = {}) {
   const child = spawn(process.execPath, [join("src", "server.js")], {
     cwd: root,
     env: {
@@ -201,6 +211,7 @@ function spawnMcpServer(directory, apiBase) {
       GOOGLE_CLIENT_SECRET: SECRET_CLIENT_SECRET,
       YOUTUBE_CREDENTIAL_FILE: join(directory, "no-credentials.json"),
       YOUTUBE_CREDENTIAL_PASSPHRASE: SECRET_PASSPHRASE,
+      ...env,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -299,8 +310,8 @@ async function stopServer(child) {
   }
 }
 
-async function startClient(directory, stub) {
-  const child = spawnMcpServer(directory, stub.url);
+async function startClient(directory, stub, env) {
+  const child = spawnMcpServer(directory, stub.url, env);
   const client = new McpStdioClient(child);
   try {
     await client.initialize();
@@ -324,6 +335,50 @@ function assertNoSecrets(...texts) {
     }
   }
 }
+
+test("E2E: provider body timeout and MCP cancellation close the stub connection", { timeout: 30_000 }, async (t) => {
+  for (const cancel of [false, true]) {
+    await t.test(cancel ? "MCP cancellation" : "provider timeout", async (t) => {
+      const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-deadline-"));
+      const stub = await startYouTubeStub();
+      stub.hangSearch = true;
+      const { child, client } = await startClient(directory, stub, {
+        PROVIDER_TIMEOUT_MS: cancel ? "5000" : "500",
+      });
+      t.after(async () => {
+        for (const slot of client.pending.values()) clearTimeout(slot.timer);
+        client.pending.clear();
+        await stopServer(child);
+        await stub.close();
+        await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      });
+      const requestId = client.nextId;
+      const started = Date.now();
+      const pending = client.request("tools/call", {
+        name: "youtube_search_videos",
+        arguments: { query: "deadline fixture" },
+      });
+      await stub.searchStarted.promise;
+      if (cancel) {
+        client.notify("notifications/cancelled", { requestId, reason: "test cancellation" });
+      } else {
+        const response = await pending;
+        assert.equal(response.result.isError, true);
+        const payload = JSON.parse(response.result.content[0].text);
+        assert.equal(payload.code, "TIMEOUT");
+        assert.equal(payload.retryable, true);
+      }
+      const closure = await Promise.race([
+        stub.searchClosed.promise.then(() => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 1000)),
+      ]);
+      assert.equal(closure, true, "provider socket must close before the 5 second cancellation deadline");
+      assert.ok(Date.now() - started < 3000);
+      assert.equal(stub.counters.search, 1);
+      assertNoSecrets(client.stdoutText, client.stderrText);
+    });
+  }
+});
 
 test("E2E: overlapping stdio save calls add one playlist row", { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-e2e-"));

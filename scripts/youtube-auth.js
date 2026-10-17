@@ -4,7 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { CredentialStore, credentialsFromTokenResponse } from "../src/credentials.js";
 import { loadEnvFile } from "../src/env.js";
-import { awaitWithDeadline, fetchWithDeadline, timeoutFromEnv } from "../src/http.js";
+import { fetchTextWithDeadline, timeoutFromEnv } from "../src/http.js";
 
 loadEnvFile();
 
@@ -115,7 +115,7 @@ const server = http.createServer(async (request, response) => {
   }
 
   try {
-    const tokenResponse = await fetchWithDeadline(globalThis.fetch, TOKEN_URL, {
+    const { response: tokenResponse, text } = await fetchTextWithDeadline(globalThis.fetch, TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -130,10 +130,7 @@ const server = http.createServer(async (request, response) => {
       timeoutMs,
       operation: "YouTube OAuth token exchange",
     });
-    const data = parseTokenResponse(await awaitWithDeadline(tokenResponse.text(), {
-      timeoutMs,
-      operation: "YouTube OAuth token response",
-    }));
+    const data = parseTokenResponse(text);
     if (!tokenResponse.ok) {
       throw new Error(data?.error_description ?? data?.error ?? "Token exchange failed.");
     }

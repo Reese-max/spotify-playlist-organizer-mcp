@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
+import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
 import { ProviderRequestError } from "../src/http.js";
 import { fetchYouTubeMetadata, SpotifyClient } from "../src/spotify.js";
@@ -294,4 +299,144 @@ test("timers and abort listeners are released after timeout and cancellation", a
   cancelController.abort();
   await assert.rejects(pending);
   assert.equal(getEventListeners(cancelController.signal, "abort").length, 0);
+});
+
+const tokenClients = [
+  ["Spotify client token", (fetchImpl) => new SpotifyClient(spotifyEnv({ SPOTIFY_ACCESS_TOKEN: undefined, PROVIDER_TIMEOUT_MS: "1000" }), fetchImpl), "getClientToken"],
+  ["Spotify refresh", (fetchImpl) => new SpotifyClient(spotifyEnv({ SPOTIFY_REFRESH_TOKEN: SECRET_REFRESH, PROVIDER_TIMEOUT_MS: "1000" }), fetchImpl), "refreshUserToken"],
+  ["YouTube refresh", (fetchImpl) => new YouTubeClient(youtubeEnv({
+    GOOGLE_CLIENT_ID: "test-client",
+    GOOGLE_CLIENT_SECRET: SECRET_CLIENT,
+    YOUTUBE_REFRESH_TOKEN: SECRET_REFRESH,
+    YOUTUBE_CREDENTIAL_FILE: join(tmpdir(), randomUUID() + ".json"),
+    PROVIDER_TIMEOUT_MS: "1000",
+  }), fetchImpl), "refreshUserToken"],
+];
+
+for (const [name, makeClient, method] of tokenClients) {
+  test(name + " preserves token endpoint error code and HTTP status", async () => {
+    const status = method === "getClientToken" ? 429 : 401;
+    const code = method === "getClientToken" ? "HTTP_429" : "AUTH_REFRESH_FAILED";
+    const client = makeClient(async () => jsonResponse({ error: "access_denied" }, status));
+    await assert.rejects(client[method](), (error) => {
+      assert.equal(error.code, code);
+      assert.equal(error.status, status);
+      assert.equal(error.body.error, "access_denied");
+      return true;
+    });
+  });
+
+  for (const cancelledIndex of [0, 1]) {
+    test(name + " isolates cancellation of waiter " + cancelledIndex, async () => {
+      const reply = Promise.withResolvers();
+      let calls = 0;
+      const client = makeClient(async (_url, { signal }) => {
+        calls += 1;
+        assert.equal(signal.aborted, false);
+        return reply.promise;
+      });
+      const controllers = [new AbortController(), new AbortController()];
+      const pending = controllers.map((controller) => client[method]({ signal: controller.signal })
+        .then((token) => token, (error) => error.code));
+      await nextTurn();
+      controllers[cancelledIndex].abort();
+      reply.resolve(jsonResponse({ access_token: "shared-token", expires_in: 3600 }));
+      const results = await Promise.all(pending);
+      assert.equal(results[cancelledIndex], "CALLER_CANCELLED");
+      assert.equal(results[1 - cancelledIndex], "shared-token");
+      assert.equal(calls, 1);
+      for (const controller of controllers) assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    });
+  }
+
+  test(name + " aborts the transport after the last waiter cancels and can recover", async () => {
+    let transportSignal;
+    let calls = 0;
+    const client = makeClient(async (_url, { signal }) => {
+      transportSignal = signal;
+      calls += 1;
+      return calls === 1 ? hangForever() : jsonResponse({ access_token: "recovered-token" });
+    });
+    const controller = new AbortController();
+    const pending = client[method]({ signal: controller.signal });
+    const rejected = assert.rejects(pending, (error) => error.code === "CALLER_CANCELLED");
+    await nextTurn();
+    controller.abort();
+    await rejected;
+    assert.equal(transportSignal.aborted, true);
+    assert.equal(await client[method](), "recovered-token");
+    assert.equal(calls, 2);
+  });
+}
+
+test("body timeout and cancellation abort the real provider transport", async (t) => {
+  const operations = [
+    ["YouTube read", (fetchImpl, signal) => new YouTubeClient(youtubeEnv({ PROVIDER_TIMEOUT_MS: "300" }), fetchImpl).searchVideos("focus", { signal })],
+    ["Spotify read", (fetchImpl, signal) => new SpotifyClient(spotifyEnv({ PROVIDER_TIMEOUT_MS: "300" }), fetchImpl).searchTracks("focus", { signal })],
+    ...tokenClients.map(([name, makeClient, method]) => [name, (fetchImpl, signal) => makeClient(fetchImpl)[method]({ signal })]),
+    ["YouTube revoke", (fetchImpl, signal) => new YouTubeClient(youtubeEnv({ YOUTUBE_ACCESS_TOKEN: SECRET_TOKEN, PROVIDER_TIMEOUT_MS: "300" }), fetchImpl).revokeUserCredentials({ signal })],
+    ["YouTube oEmbed", (fetchImpl, signal) => fetchYouTubeMetadata("https://www.youtube.com/watch?v=dQw4w9WgXcQ", fetchImpl, { signal, timeoutMs: 300 })],
+  ];
+  for (const [name, run] of operations) {
+    for (const cancel of [false, true]) {
+      await t.test(name + (cancel ? " cancellation" : " timeout"), { timeout: 5000 }, async (t) => {
+        const closed = Promise.withResolvers();
+        const reading = Promise.withResolvers();
+        const server = createServer((_req, res) => {
+          res.on("close", closed.resolve);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.write("{");
+        });
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+        t.after(async () => {
+          server.closeAllConnections();
+          await new Promise((resolve) => server.close(resolve));
+        });
+        let transportSignal;
+        const fetchImpl = async (_url, options) => {
+          transportSignal = options.signal;
+          const response = await fetch("http://127.0.0.1:" + server.address().port, options);
+          return {
+            ok: response.ok,
+            status: response.status,
+            headers: response.headers,
+            text() {
+              const body = response.text();
+              reading.resolve();
+              return body;
+            },
+          };
+        };
+        const controller = new AbortController();
+        const pending = run(fetchImpl, controller.signal);
+        const rejected = assert.rejects(pending, (error) => error.code === (cancel ? "CALLER_CANCELLED" : "TIMEOUT"));
+        await reading.promise;
+        if (cancel) controller.abort();
+        await rejected;
+        assert.equal(transportSignal.aborted, true, "body completion must abort the active fetch");
+        await closed.promise;
+        assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+      });
+    }
+  }
+});
+
+test("provider Retry-After beyond the retry budget never causes an early retry", async (t) => {
+  for (const [name, makeClient] of [
+    ["YouTube", (fetchImpl) => new YouTubeClient(youtubeEnv(), fetchImpl)],
+    ["Spotify", (fetchImpl) => new SpotifyClient(spotifyEnv(), fetchImpl)],
+  ]) {
+    await t.test(name, async () => {
+      let calls = 0;
+      const client = makeClient(async () => {
+        calls += 1;
+        return {
+          ...jsonResponse({ error: { message: "retry later" } }, 429),
+          headers: { get: () => "3" },
+        };
+      });
+      await assert.rejects(client.request("/search"), (error) => error.code === "HTTP_429");
+      assert.equal(calls, 1, "do not retry sooner than Retry-After permits");
+    });
+  }
 });

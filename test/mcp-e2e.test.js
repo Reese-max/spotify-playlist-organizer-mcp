@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1142,6 +1142,64 @@ test("E2E: a credential echoed by the provider is redacted from a thrown tool er
     assert.doesNotMatch(preview.text, /ya29\./, "provider credential leaked into the tool error");
     assert.match(preview.text, /\[REDACTED\]/);
     assertNoSecrets(preview.text);
+  } finally {
+    await stopServer(child);
+    await stub.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("E2E: Spotify MCP tools fail closed before provider calls while visibility is unknown", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(os.tmpdir(), "music-mcp-spotify-policy-"));
+  const stub = await startYouTubeStub();
+  const fetchLog = join(directory, "spotify-fetch-attempts.log");
+  const fetchGuard = pathToFileURL(join(root, "test", "fixtures", "deny-spotify-fetch.js")).href;
+  const spotifyToken = "synthetic-spotify-access-token-sentinel";
+  const child = spawnMcpServer(directory, stub.url, {
+    SPOTIFY_ACCESS_TOKEN: spotifyToken,
+    SPOTIFY_CLIENT_ID: "synthetic-spotify-client-id",
+    SPOTIFY_CLIENT_SECRET: "synthetic-spotify-client-secret",
+    SPOTIFY_FETCH_LOG: fetchLog,
+    NODE_OPTIONS: "--import=" + fetchGuard,
+  });
+  const client = new McpStdioClient(child);
+
+  try {
+    await client.initialize();
+    const listed = await client.request("tools/list", {});
+    const organize = listed.result.tools.find((tool) => tool.name === "spotify_organize_playlist");
+    assert.deepEqual(organize.inputSchema.properties.mode.enum, ["preview", "apply"]);
+    assert.equal(organize.inputSchema.properties.mode.default, "preview");
+
+    const calls = [
+      ["spotify_search_tracks", { query: "synthetic boundary query" }],
+      ["spotify_identify_track", { input: "synthetic boundary query" }],
+      ["spotify_resolve_links", { links: ["synthetic boundary query"] }],
+      ["spotify_check_playlist_duplicates", { playlist: "synthetic-playlist-id" }],
+      ["spotify_classify_playlist", { playlist: "synthetic-playlist-id" }],
+      ["spotify_organize_playlist", { playlist: "synthetic-playlist-id" }],
+      ["spotify_organize_playlist", { playlist: "synthetic-playlist-id", mode: "apply" }],
+    ];
+
+    const responses = [];
+    for (const [toolName, args] of calls) {
+      const response = await client.callTool(toolName, args);
+      responses.push(response.text);
+      assert.equal(response.result.isError, true, toolName + " must fail closed");
+      assert.equal(response.parsed.code, "SPOTIFY_CONTENT_VISIBILITY_UNKNOWN");
+      assert.equal(response.parsed.error, "Spotify results are disabled by the provider-data policy guard.");
+      assert.ok(response.parsed.nextStep.includes("spotify-ai-boundary.md"));
+      assert.equal(response.text.includes(spotifyToken), false);
+      assert.equal(response.text.includes("synthetic boundary query"), false);
+    }
+
+    assertNoSecrets(client.stdoutText, client.stderrText, ...responses);
+    await stopServer(child);
+    const attempts = await readFile(fetchLog, "utf8").catch((error) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    assert.equal(attempts, "", "preflight must prevent Spotify token or API requests");
   } finally {
     await stopServer(child);
     await stub.close();

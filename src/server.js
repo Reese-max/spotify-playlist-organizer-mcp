@@ -19,7 +19,7 @@ import {
   youtubePlaylistUrl,
   YouTubeClient,
 } from "./youtube.js";
-import { openLibrary, redactSecretishText } from "./library.js";
+import { openLibrary, redactSecretishText, redactSecretishValue } from "./library.js";
 import { classifyMusic } from "./classify.js";
 import { saveMusic } from "./save-music.js";
 import {
@@ -53,11 +53,11 @@ import {
   renamePlaylistAdmin,
 } from "./playlist-admin.js";
 
-function jsonResult(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+function jsonResult(value, secrets) {
+  return { content: [{ type: "text", text: JSON.stringify(redactSecretishValue(value, secrets), null, 2) }] };
 }
 
-function errorResult(error) {
+function errorResult(error, secrets) {
   const payload = {
     // Provider errors embed provider-controlled text; a thrown error must not
     // be able to carry a credential out through the MCP response.
@@ -72,12 +72,17 @@ function errorResult(error) {
   }
   return {
     isError: true,
-    content: [{ type: "text", text: JSON.stringify(payload) }],
+    ...jsonResult(payload, secrets),
   };
 }
 
-function safeTool(handler) {
+function safeToolWithRedaction(handler, youtubeClient) {
   return async (args, extra) => {
+    // A local-only tool can echo stored secrets without making an OAuth call.
+    if (youtubeClient.credentials.passphraseConfigured) {
+      try { await youtubeClient.loadStoredCredentials(); } catch {}
+    }
+    const secrets = youtubeClient.secretValues;
     // The SDK exposes per-request cancellation at ctx.mcpReq.signal (aborted
     // by notifications/cancelled); handlers read the conventional
     // extra.signal, so forward it when the transport doesn't flatten it.
@@ -85,9 +90,9 @@ function safeTool(handler) {
       ? extra
       : { ...extra, signal: extra.mcpReq.signal };
     try {
-      return jsonResult(await handler(args, forwarded));
+      return jsonResult(await handler(args, forwarded), secrets);
     } catch (error) {
-      return errorResult(error);
+      return errorResult(error, secrets);
     }
   };
 }
@@ -209,6 +214,7 @@ export function createServer(library) {
   // configuration (credential file path, timeouts, retry bounds) sees it.
   const client = new SpotifyClient();
   const youtubeClient = new YouTubeClient();
+  const safeTool = (handler) => safeToolWithRedaction(handler, youtubeClient);
   const server = new McpServer({ name: "music-playlist-organizer", version: APP_VERSION });
 
   server.registerTool(
